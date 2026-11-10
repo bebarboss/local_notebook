@@ -28,6 +28,7 @@ pub fn run() {
             let state = AppState::new(&handle).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             init_resources(app.handle());
             ingest::ocr::set_enabled(state.settings.lock().ocr_enabled);
+            ingest::set_keep_images(state.settings.lock().keep_images);
             app.manage(state);
 
             // watch every service folder and catch up on changes made while closed
@@ -88,6 +89,9 @@ pub fn run() {
             commands::use_embedding_folder,
             commands::wipe_all_data,
             commands::ocr_status,
+            commands::restore_document,
+            commands::source_images,
+            commands::image_data,
             updater::check_update,
             updater::install_update,
         ])

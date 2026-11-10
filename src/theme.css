@@ -256,6 +256,22 @@ code { font-family: var(--mono); font-size: 12.5px; background: var(--code); col
 .ai-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .ai-meta .info { font-size: 12px; color: var(--muted); margin-left: 4px; }
 .ai-sources { display: flex; flex-wrap: wrap; gap: 6px; }
+.thumbs { display: flex; flex-wrap: wrap; gap: 8px; }
+.thumb { padding: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--sidebar); cursor: zoom-in; flex: none; }
+.thumb:hover { border-color: var(--accent); }
+.thumb:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.thumb img { width: 100%; height: 100%; object-fit: cover; object-position: top left; display: block; }
+.thumb-loading { display: block; width: 100%; height: 100%; min-width: 40px; min-height: 40px; background: var(--border); opacity: .5; }
+.lightbox { position: fixed; inset: 0; z-index: 60; background: rgba(10, 12, 18, .86); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 48px 16px 16px; }
+.lightbox > img { max-width: 100%; max-height: calc(100vh - 120px); object-fit: contain; border-radius: 8px; background: #fff; }
+.lightbox-close { position: absolute; top: 10px; right: 10px; color: #fff; }
+.lightbox-bar { display: flex; gap: 14px; align-items: center; color: #e5e7eb; font-size: 13px; max-width: 100%; }
+.lightbox-bar .link-btn { color: #93c5fd; }
+.doc-card .row { display: flex; align-items: flex-start; gap: 6px; }
+.doc-card .row > .name { flex: 1; min-width: 0; }
+.doc-card .doc-del { opacity: 0; margin: -4px -6px -4px 0; }
+.doc-card:hover .doc-del, .doc-card:focus-within .doc-del { opacity: 1; }
+@media (hover: none) { .doc-card .doc-del { opacity: 1; } }
 .caret { display: inline-block; width: 8px; height: 16px; background: var(--accent); vertical-align: -2px; margin-left: 2px; border-radius: 2px; animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 .msg-error {
@@ -379,7 +395,7 @@ code { font-family: var(--mono); font-size: 12.5px; background: var(--code); col
 .svc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
 .svc-card { border: 1px solid var(--border); border-radius: 16px; background: var(--surface); padding: 18px; display: flex; flex-direction: column; gap: 14px; }
 .svc-card.active { border: 2px solid var(--accent); padding: 17px; }
-.svc-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; font-size: 12px; }
+.svc-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; font-size: 12px; }
 .svc-stats > div { display: flex; flex-direction: column; gap: 2px; }
 .svc-stats b { font-size: 16px; font-weight: 700; }
 .svc-meta { font-size: 12px; color: var(--text-2); line-height: 1.7; padding-top: 10px; border-top: 1px solid var(--border-soft); word-break: break-all; }

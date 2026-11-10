@@ -6,6 +6,7 @@ import { initials, useApp } from "../state";
 import { Markdown } from "./Markdown";
 import { SourcePanel } from "./SourcePanel";
 import { sourceLabel } from "./CitationChip";
+import { AnswerImages } from "./SourceImages";
 import { ErrorState } from "./ui";
 
 export interface StreamingState {
@@ -72,6 +73,7 @@ function AiMsg({ msg, onRetry, showService, retryDisabled }: { msg: Message; onR
   return (
     <div className="ai-msg">
       {msg.content && <Markdown text={msg.content} sources={msg.sources} />}
+      {msg.content && msg.sources.length > 0 && <AnswerImages msg={msg} onSource={setOpenSrc} />}
       {msg.error && <ErrorState message={msg.error} />}
       <div className="ai-meta">
         <button

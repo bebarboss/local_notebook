@@ -51,6 +51,7 @@ export const DEFAULT_SETTINGS: Settings = {
   updateUrl: "",
   autoCheckUpdate: true,
   ocrEnabled: true,
+  keepImages: true,
 };
 
 export function AppProvider({ children }: { children: ReactNode }) {

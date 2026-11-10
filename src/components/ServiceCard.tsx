@@ -26,7 +26,8 @@ export function ServiceCard({
       <div className="svc-stats">
         <div><span className="muted">เอกสาร</span><b>{stats?.documents ?? 0}</b></div>
         <div><span className="muted">ท่อน</span><b>{stats?.chunks ?? 0}</b></div>
-        <div><span className="muted">ขนาด</span><b>{formatBytes(stats?.bytes ?? 0)}</b></div>
+        <div title="ขนาดไฟล์ต้นฉบับรวม"><span className="muted">ขนาด</span><b>{formatBytes(stats?.bytes ?? 0)}</b></div>
+        <div title="พื้นที่ที่ index ใช้ในเครื่อง (ข้อความ + vector + รูป)"><span className="muted">index</span><b>{formatBytes(stats?.indexBytes ?? 0)}</b></div>
       </div>
       <div className="svc-meta">
         โมเดล <span className="mono">{service.model}</span> · {service.effort} · top-k {service.topK}

@@ -293,24 +293,14 @@ fn group_lines(mut boxes: Vec<TextBox>) -> String {
         .join("\n")
 }
 
-/// OCR an image file from disk.
-pub fn image_file_text(path: &Path) -> AppResult<String> {
-    let Some(ocr) = engine() else {
-        return Err(AppError::new("ocr_off", "ข้าม · รูปภาพ (OCR ปิดอยู่หรือไม่มีโมเดล OCR)"));
-    };
-    let img = image::open(path).map_err(|e| AppError::new("image", format!("เปิดรูปไม่ได้: {e}")))?;
-    ocr.recognize(&img)
-}
-
-/// OCR embedded image bytes (DOCX/PPTX media). Small icons and undecodable formats are skipped.
-pub fn bytes_text(bytes: &[u8]) -> Option<String> {
+/// OCR an embedded picture (DOCX/PPTX media). None when OCR is off, for icons, or no text.
+pub fn image_text(img: &DynamicImage) -> Option<String> {
     let ocr = engine()?;
-    let img = image::load_from_memory(bytes).ok()?;
     let (w, h) = img.dimensions();
-    if w < 64 || h < 24 {
+    if w < super::MIN_IMAGE_W || h < super::MIN_IMAGE_H {
         return None;
     }
-    ocr.recognize(&img).ok().filter(|t| !t.trim().is_empty())
+    ocr.recognize(img).ok().filter(|t| !t.trim().is_empty())
 }
 
 #[cfg(test)]

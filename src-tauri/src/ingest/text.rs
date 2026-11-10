@@ -12,7 +12,7 @@ impl Extractor for TextExtractor {
 
     fn extract(&self, path: &Path) -> AppResult<Vec<Page>> {
         let bytes = std::fs::read(path)?;
-        Ok(vec![Page { page: None, text: decode(&bytes) }])
+        Ok(vec![Page::new(None, decode(&bytes))])
     }
 }
 

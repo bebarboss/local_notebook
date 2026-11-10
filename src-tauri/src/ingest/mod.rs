@@ -12,7 +12,7 @@ pub mod watcher;
 use crate::commands::AppState;
 use crate::embed::{Embedder, ModelId};
 use crate::errors::{AppError, AppResult};
-use crate::store::{NewChunk, VectorStore};
+use crate::store::{NewChunk, NewImage, VectorStore};
 use chunker::{chunk, normalize, ChunkOptions};
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -26,6 +26,94 @@ use tauri::{AppHandle, Emitter, Manager};
 pub struct Page {
     pub page: Option<u32>,
     pub text: String,
+    /// Pictures kept for display (only when `keep_images()` is on).
+    pub images: Vec<PageImage>,
+}
+
+pub struct PageImage {
+    pub jpeg: Vec<u8>,
+    pub w: u32,
+    pub h: u32,
+    /// true → a marker was placed in `text` where the picture sits, so it can be tied
+    /// to the chunk around it; false → belongs to the whole page (scanned page, image file).
+    pub inline: bool,
+}
+
+static KEEP_IMAGES: AtomicBool = AtomicBool::new(true);
+
+/// Keep pictures from documents so answers can show them.
+pub fn set_keep_images(on: bool) {
+    KEEP_IMAGES.store(on, Ordering::Relaxed);
+}
+
+pub fn keep_images() -> bool {
+    KEEP_IMAGES.load(Ordering::Relaxed)
+}
+
+/// Longest side of a stored picture (px) and JPEG quality.
+const IMAGE_MAX_SIDE: u32 = 1280;
+const IMAGE_QUALITY: u8 = 80;
+/// Pictures smaller than this are icons/bullets — not kept, not OCR'd.
+pub const MIN_IMAGE_W: u32 = 64;
+pub const MIN_IMAGE_H: u32 = 24;
+/// Private-use code points mark where picture N sits inside page text.
+const MARKER_BASE: u32 = 0xF0000;
+
+fn marker(i: usize) -> char {
+    char::from_u32(MARKER_BASE + i as u32).unwrap_or('\u{FFFD}')
+}
+
+fn marker_index(c: char) -> Option<usize> {
+    let v = c as u32;
+    (MARKER_BASE..MARKER_BASE + 0xFFFE).contains(&v).then(|| (v - MARKER_BASE) as usize)
+}
+
+fn encode_jpeg(img: &::image::DynamicImage) -> Option<(Vec<u8>, u32, u32)> {
+    use ::image::GenericImageView;
+    let (w, h) = img.dimensions();
+    if w < MIN_IMAGE_W || h < MIN_IMAGE_H {
+        return None;
+    }
+    let small = if w.max(h) > IMAGE_MAX_SIDE { img.thumbnail(IMAGE_MAX_SIDE, IMAGE_MAX_SIDE) } else { img.clone() };
+    let rgb = small.to_rgb8();
+    let mut out = Vec::new();
+    ::image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, IMAGE_QUALITY).encode_image(&rgb).ok()?;
+    Some((out, rgb.width(), rgb.height()))
+}
+
+impl Page {
+    pub fn new(page: Option<u32>, text: String) -> Self {
+        Self { page, text, images: Vec::new() }
+    }
+
+    /// Append a picture found in the flow of the page, with its OCR text (if any).
+    pub fn push_image(&mut self, img: Option<&::image::DynamicImage>, ocr_text: Option<&str>) {
+        if let Some((jpeg, w, h)) = img.filter(|_| keep_images()).and_then(encode_jpeg) {
+            let m = marker(self.images.len());
+            self.images.push(PageImage { jpeg, w, h, inline: true });
+            self.text.push('\n');
+            self.text.push(m);
+        }
+        match ocr_text.map(str::trim).filter(|t| !t.is_empty()) {
+            Some(t) => self.text.push_str(&format!("\n{}\n{t}\n", pdf::IMAGE_MARK)),
+            None => self.text.push('\n'),
+        }
+    }
+
+    /// A picture of the whole page (scanned page, standalone image file).
+    pub fn set_page_image(&mut self, img: &::image::DynamicImage) {
+        if !keep_images() {
+            return;
+        }
+        if let Some((jpeg, w, h)) = encode_jpeg(img) {
+            self.images.push(PageImage { jpeg, w, h, inline: false });
+        }
+    }
+}
+
+/// Decode an embedded picture (DOCX/PPTX media). EMF/WMF and broken files → None.
+pub fn decode_image(bytes: &[u8]) -> Option<::image::DynamicImage> {
+    ::image::load_from_memory(bytes).ok()
 }
 
 /// Add a file type by implementing this and registering it in `extractors()`.
@@ -70,7 +158,7 @@ pub struct IndexProgress {
 }
 
 /// Walk folders (recursively) + individual files and return supported files.
-pub fn collect_files(folders: &[String], files: &[String]) -> Vec<PathBuf> {
+pub fn collect_files(folders: &[String], files: &[String], excluded: &[String]) -> Vec<PathBuf> {
     fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         if depth > 20 {
             return;
@@ -99,7 +187,7 @@ pub fn collect_files(folders: &[String], files: &[String]) -> Vec<PathBuf> {
             out.push(p);
         }
     }
-    let mut seen = HashSet::new();
+    let mut seen: HashSet<String> = excluded.iter().map(|x| x.to_lowercase()).collect();
     out.retain(|p| seen.insert(p.to_string_lossy().to_lowercase()));
     out
 }
@@ -119,17 +207,61 @@ fn mtime_of(meta: &std::fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
-/// Extract + chunk one file. Chunks never span pages.
-pub fn extract_chunks(path: &Path, opts: ChunkOptions) -> AppResult<Vec<(Option<u32>, String)>> {
+pub struct Extracted {
+    /// (page, chunk text); the index is the chunk's `ord`
+    pub chunks: Vec<(Option<u32>, String)>,
+    pub images: Vec<NewImage>,
+}
+
+/// Extract + chunk one file. Chunks never span pages. Picture markers are removed from
+/// the chunk text and turned into (page, chunk ord) links for each kept picture.
+pub fn extract_chunks(path: &Path, opts: ChunkOptions) -> AppResult<Extracted> {
     let ex = extractor_for(path).ok_or_else(|| AppError::new("unsupported", "ไม่รองรับไฟล์ชนิดนี้"))?;
-    let pages = ex.extract(path)?;
-    let mut out = Vec::new();
+    Ok(chunk_pages(ex.extract(path)?, opts))
+}
+
+pub fn chunk_pages(pages: Vec<Page>, opts: ChunkOptions) -> Extracted {
+    let mut out = Extracted { chunks: Vec::new(), images: Vec::new() };
+    let mut seen: HashSet<[u8; 16]> = HashSet::new();
     for p in pages {
+        let first_ord = out.chunks.len();
+        let mut at: HashMap<usize, usize> = HashMap::new(); // picture → chunk ord
+        let mut pending: Vec<usize> = Vec::new();
         for c in chunk(&normalize(&p.text), opts) {
-            out.push((p.page, c));
+            let mut clean = String::with_capacity(c.len());
+            for ch in c.chars() {
+                match marker_index(ch) {
+                    Some(i) => pending.push(i),
+                    None => clean.push(ch),
+                }
+            }
+            let clean = normalize(&clean);
+            if clean.is_empty() {
+                continue; // markers carry over to the next chunk
+            }
+            let ord = out.chunks.len();
+            for i in pending.drain(..) {
+                at.entry(i).or_insert(ord);
+            }
+            out.chunks.push((p.page, clean));
+        }
+        if out.chunks.len() == first_ord {
+            continue; // nothing to cite on this page → its pictures could never be shown
+        }
+        let last = out.chunks.len() - 1;
+        for i in pending {
+            at.entry(i).or_insert(last);
+        }
+        for (i, img) in p.images.into_iter().enumerate() {
+            let digest: [u8; 16] = Sha256::digest(&img.jpeg)[..16].try_into().expect("16 bytes");
+            if !seen.insert(digest) {
+                continue; // same picture again (logo, repeated screenshot)
+            }
+            let chunk_ord = if img.inline { at.get(&i).map(|o| *o as i64) } else { None };
+            out.images.push(NewImage { page: p.page, chunk_ord, w: img.w, h: img.h, jpeg: img.jpeg });
         }
     }
-    Ok(out)
+    out
 }
 
 // ------------------------------------------------------------------ manager
@@ -229,7 +361,14 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
     progress(None, 0, 0, 0.0, "scanning", None);
 
     // a different embedding model (or chunk settings) invalidates every vector
-    let signature = format!("{}|{}|{}|ocr{}", model.as_str(), opts.size, opts.overlap, u8::from(ocr::engine().is_some()));
+    let signature = format!(
+        "{}|{}|{}|ocr{}|img{}",
+        model.as_str(),
+        opts.size,
+        opts.overlap,
+        u8::from(ocr::engine().is_some()),
+        u8::from(keep_images())
+    );
     {
         let mut s = store.lock();
         let old = s.meta("signature")?;
@@ -239,7 +378,7 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
         }
     }
 
-    let files = collect_files(&svc.folders, &svc.files);
+    let files = collect_files(&svc.folders, &svc.files, &svc.excluded);
     let wanted: HashSet<String> = files.iter().map(|p| p.to_string_lossy().into_owned()).collect();
 
     // remove documents whose file is gone (or no longer part of this service)
@@ -300,8 +439,8 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
                 continue;
             }
         };
-        let pieces = match extract_chunks(path, opts) {
-            Ok(c) if c.is_empty() => {
+        let Extracted { chunks: pieces, images } = match extract_chunks(path, opts) {
+            Ok(c) if c.chunks.is_empty() => {
                 store.lock().upsert_document(&p, &hash, *mtime, *bytes, "skipped", Some("ข้าม · ไม่พบข้อความในไฟล์"))?;
                 continue;
             }
@@ -335,7 +474,7 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
         {
             let mut s = store.lock();
             s.upsert_document(&p, &hash, *mtime, *bytes, "indexing", None)?;
-            s.replace_chunks(doc_id, &chunks)?;
+            s.replace_chunks(doc_id, &chunks, &images)?;
         }
     }
     state.services.lock().touch(service_id);
@@ -352,9 +491,46 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("a.md");
         std::fs::write(&f, "หัวข้อ\n\n".to_string() + &"เนื้อหาภาษาไทยยาวๆ ".repeat(200)).unwrap();
-        let c = extract_chunks(&f, ChunkOptions { size: 500, overlap: 50 }).unwrap();
+        let c = extract_chunks(&f, ChunkOptions { size: 500, overlap: 50 }).unwrap().chunks;
         assert!(c.len() > 3);
         assert!(c.iter().all(|(p, _)| p.is_none()));
+    }
+
+    fn picture(w: u32, h: u32, shade: u8) -> ::image::DynamicImage {
+        ::image::DynamicImage::ImageRgb8(::image::RgbImage::from_pixel(w, h, ::image::Rgb([shade, 0, 0])))
+    }
+
+    #[test]
+    fn pictures_follow_their_chunk() {
+        set_keep_images(true);
+        let opts = ChunkOptions { size: 300, overlap: 30 };
+        let mut p = Page::new(None, "ส่วนแรก ".repeat(80));
+        p.push_image(Some(&picture(200, 100, 1)), Some("ข้อความในรูปแรก"));
+        p.text.push_str(&"ส่วนท้าย ".repeat(80));
+        p.push_image(Some(&picture(200, 100, 2)), None);
+        p.push_image(Some(&picture(200, 100, 1)), None); // duplicate → dropped
+        p.push_image(Some(&picture(10, 10, 3)), None); // icon → not kept
+        let mut scan = Page::new(Some(2), "หน้าสแกน".into());
+        scan.set_page_image(&picture(300, 400, 9));
+        let ex = chunk_pages(vec![p, scan], opts);
+
+        assert!(ex.chunks.iter().all(|(_, t)| t.chars().all(|c| marker_index(c).is_none())), "markers leaked");
+        assert!(ex.chunks.iter().any(|(_, t)| t.contains("ข้อความในรูปแรก")));
+        assert_eq!(ex.images.len(), 3);
+        let first = ex.images[0].chunk_ord.unwrap() as usize;
+        assert!(ex.chunks[first].1.contains("ส่วนแรก"));
+        let second = ex.images[1].chunk_ord.unwrap() as usize;
+        assert!(second > first && ex.chunks[second].1.contains("ส่วนท้าย"));
+        assert_eq!((ex.images[2].page, ex.images[2].chunk_ord), (Some(2), None));
+        assert!(ex.images.iter().all(|i| i.jpeg.starts_with(&[0xFF, 0xD8])));
+
+        // switched off: OCR text stays, no picture kept
+        set_keep_images(false);
+        let mut p = Page::new(None, "ข้อความ".into());
+        p.push_image(Some(&picture(200, 100, 1)), Some("ในรูป"));
+        set_keep_images(true);
+        assert!(p.images.is_empty());
+        assert!(p.text.contains("ในรูป"));
     }
 
     /// Real models + pdfium: `cargo test real_documents -- --ignored --nocapture`
@@ -366,7 +542,11 @@ mod tests {
         let dir = PathBuf::from(std::env::var("DOCASK_TEST_DIR").expect("DOCASK_TEST_DIR"));
         ocr::init(res.join("ocr"));
         pdf::init(res.join("pdfium").join("pdfium.dll"));
-        for name in ["mixed.pdf", "scanned.pdf", "screen.png"] {
+        for name in ["mixed.pdf", "scanned.pdf", "screen.png", "sample.docx", "sample.pptx"] {
+            if !dir.join(name).exists() {
+                println!("===== {name}: not found, skipped");
+                continue;
+            }
             let t = std::time::Instant::now();
             let pages = extractor_for(&dir.join(name)).unwrap().extract(&dir.join(name)).unwrap();
             println!("===== {name} ({:?})", t.elapsed());
@@ -382,6 +562,21 @@ mod tests {
                 assert!(all.contains("ผู้ดำเนินการ"), "SARA AM cluster not de-duplicated");
             }
             assert!(all.contains("Job Data"), "{name}: English text from image missing");
+
+            // pictures kept for display, tied to the chunk/page they belong to
+            let ex = chunk_pages(pages, ChunkOptions::default());
+            for i in &ex.images {
+                println!("  picture page={:?} chunk={:?} {}x{} {} KB", i.page, i.chunk_ord, i.w, i.h, i.jpeg.len() / 1024);
+            }
+            assert!(!ex.images.is_empty(), "{name}: no picture kept");
+            if name == "sample.docx" {
+                let ord = ex.images[0].chunk_ord.expect("docx picture tied to a chunk") as usize;
+                assert!(ex.chunks[ord].1.contains("Job Data"), "docx picture not in the chunk with its OCR text");
+            }
+            if name == "sample.pptx" {
+                assert_eq!(ex.images.len(), 1);
+                assert_eq!(ex.images[0].page, Some(1), "pptx picture must stay on slide 1");
+            }
         }
     }
 
@@ -393,7 +588,10 @@ mod tests {
         std::fs::write(dir.path().join("~$c.docx"), "x").unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         std::fs::write(dir.path().join("sub").join("d.MD"), "x").unwrap();
-        let files = collect_files(&[dir.path().to_string_lossy().into_owned()], &[]);
+        let files = collect_files(&[dir.path().to_string_lossy().into_owned()], &[], &[]);
         assert_eq!(files.len(), 2);
+        let removed = dir.path().join("sub").join("d.MD").to_string_lossy().to_uppercase();
+        let files = collect_files(&[dir.path().to_string_lossy().into_owned()], &[], &[removed]);
+        assert_eq!(files.len(), 1, "excluded file must be skipped (case-insensitive)");
     }
 }

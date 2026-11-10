@@ -13,10 +13,16 @@ impl Extractor for ImageExtractor {
     }
 
     fn extract(&self, path: &Path) -> AppResult<Vec<Page>> {
-        let text = ocr::image_file_text(path)?;
+        let Some(engine) = ocr::engine() else {
+            return Err(AppError::new("ocr_off", "ข้าม · รูปภาพ (OCR ปิดอยู่หรือไม่มีโมเดล OCR)"));
+        };
+        let img = image::open(path).map_err(|e| AppError::new("image", format!("เปิดรูปไม่ได้: {e}")))?;
+        let text = engine.recognize(&img)?;
         if text.trim().is_empty() {
             return Err(AppError::new("no_text", NO_TEXT_IN_IMAGE));
         }
-        Ok(vec![Page { page: None, text }])
+        let mut page = Page::new(None, text);
+        page.set_page_image(&img);
+        Ok(vec![page])
     }
 }

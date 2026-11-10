@@ -58,6 +58,8 @@ pub struct Settings {
     pub auto_check_update: bool,
     /// OCR pictures, scanned PDF pages and image files
     pub ocr_enabled: bool,
+    /// keep pictures from documents and show them with answers
+    pub keep_images: bool,
 }
 
 impl Default for Settings {
@@ -77,6 +79,7 @@ impl Default for Settings {
             update_url: crate::updater::DEFAULT_UPDATE_URL.to_string(),
             auto_check_update: true,
             ocr_enabled: true,
+            keep_images: true,
         }
     }
 }

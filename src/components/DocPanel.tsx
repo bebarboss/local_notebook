@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
-import { FileText, X, RefreshCw } from "lucide-react";
+import { FileText, X, RefreshCw, Trash2, Undo2 } from "lucide-react";
 import { api } from "../lib/api";
 import type { DocItem, IndexProgress, Service } from "../lib/types";
 import { formatBytes, useApp } from "../state";
 import { ProgressBar } from "./ProgressBar";
-import { ErrorState, SkeletonList } from "./ui";
+import { ConfirmDialog, ErrorState, SkeletonList } from "./ui";
+
+const baseName = (p: string) => p.split(/[\\/]/).pop() || p;
 
 export function DocPanel({ service, onClose }: { service: Service; onClose: () => void }) {
   const { stats, toast, refreshServices } = useApp();
   const [docs, setDocs] = useState<DocItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [job, setJob] = useState<IndexProgress | null>(null);
+  const [removing, setRemoving] = useState<DocItem | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -44,6 +47,26 @@ export function DocPanel({ service, onClose }: { service: Service; onClose: () =
     } catch (e) { toast((e as { message: string }).message); }
   };
 
+  const inFolder = (path: string) =>
+    service.folders.some((f) => path.toLowerCase().startsWith(f.toLowerCase().replace(/[\\/]?$/, "\\")));
+
+  const remove = async (d: DocItem) => {
+    try {
+      await api.removeDocument(service.id, d.id);
+      setRemoving(null);
+      toast(`เอา ${d.name} ออกจาก ${service.code} แล้ว`);
+      await Promise.all([load(), refreshServices()]);
+    } catch (e) { toast((e as { message: string }).message); }
+  };
+
+  const restore = async (path: string) => {
+    try {
+      await api.restoreDocument(service.id, path);
+      toast(`นำ ${baseName(path)} กลับมาแล้ว กำลังทำ index`);
+      await Promise.all([load(), refreshServices()]);
+    } catch (e) { toast((e as { message: string }).message); }
+  };
+
   return (
     <aside className="right-panel" aria-label={`เอกสารใน ${service.name}`}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
@@ -54,11 +77,9 @@ export function DocPanel({ service, onClose }: { service: Service; onClose: () =
         </div>
       </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        <ProgressBar value={Math.min(1, (st?.bytes ?? 0) / (50 * 1024 * 1024))} label="พื้นที่ใช้" />
-        <span style={{ fontSize: 12, color: "var(--muted)" }}>
-          {st?.chunks ?? 0} ท่อน · {formatBytes(st?.bytes ?? 0)} · index แยกของ {service.code}
-        </span>
+      <div style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12, color: "var(--muted)" }}>
+        <span>{st?.documents ?? 0} เอกสาร · {st?.chunks ?? 0} ท่อน</span>
+        <span>ไฟล์ต้นฉบับ {formatBytes(st?.bytes ?? 0)} · index ในเครื่อง {formatBytes(st?.indexBytes ?? 0)}</span>
       </div>
 
       {job && (
@@ -80,8 +101,40 @@ export function DocPanel({ service, onClose }: { service: Service; onClose: () =
       )}
       {docs && docs.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {docs.map((d) => <DocCard key={d.id} d={d} />)}
+          {docs.map((d) => <DocCard key={d.id} d={d} onRemove={() => setRemoving(d)} />)}
         </div>
+      )}
+
+      {service.excluded.length > 0 && (
+        <details className="info-box">
+          <summary style={{ cursor: "pointer" }}><strong>ไฟล์ที่เอาออก ({service.excluded.length})</strong></summary>
+          <span style={{ fontSize: 12, color: "var(--muted)" }}>อยู่ในโฟลเดอร์ที่ติดตาม แต่จะไม่ถูก index</span>
+          {service.excluded.map((p) => (
+            <div key={p} style={{ display: "flex", alignItems: "center", gap: 6 }} title={p}>
+              <span className="ellipsis" style={{ flex: 1, minWidth: 0 }}>{baseName(p)}</span>
+              <button className="link-btn" style={{ display: "inline-flex", gap: 4, alignItems: "center" }} onClick={() => restore(p)}>
+                <Undo2 size={12} strokeWidth={1.8} aria-hidden="true" /> นำกลับ
+              </button>
+            </div>
+          ))}
+        </details>
+      )}
+
+      {removing && (
+        <ConfirmDialog
+          title="เอาเอกสารออกจาก service"
+          body={
+            <>
+              เอา <strong style={{ wordBreak: "break-all" }}>{removing.name}</strong> ออกจาก {service.name}?
+              ท่อนข้อความและรูปของไฟล์นี้จะถูกลบออกจาก index — <strong>ไฟล์ต้นฉบับในเครื่องไม่ถูกลบ</strong>
+              {inFolder(removing.path) && <><br />ไฟล์นี้อยู่ในโฟลเดอร์ที่ติดตาม จะไม่ถูก index อีกจนกว่าจะกด "นำกลับ"</>}
+            </>
+          }
+          confirmLabel="เอาออก"
+          danger
+          onConfirm={() => remove(removing)}
+          onCancel={() => setRemoving(null)}
+        />
       )}
 
       <div className="info-box">
@@ -97,27 +150,35 @@ export function DocPanel({ service, onClose }: { service: Service; onClose: () =
   );
 }
 
-function DocCard({ d }: { d: DocItem }) {
+function DocCard({ d, onRemove }: { d: DocItem; onRemove: () => void }) {
+  const head = (
+    <div className="row">
+      <span className="name">{d.name}</span>
+      <button className="icon-btn doc-del" aria-label={`เอา ${d.name} ออก`} title="เอาออกจาก service" onClick={onRemove}>
+        <Trash2 size={14} strokeWidth={1.8} />
+      </button>
+    </div>
+  );
   if (d.status === "skipped") {
     return (
-      <div className="doc-card warn">
-        <span className="name">{d.name}</span>
+      <div className="doc-card warn" title={d.path}>
+        {head}
         <span className="sub">{d.message ?? "ข้าม · PDF สแกน ไม่มีข้อความ"}</span>
       </div>
     );
   }
   if (d.status === "error") {
     return (
-      <div className="doc-card err">
-        <span className="name">{d.name}</span>
+      <div className="doc-card err" title={d.path}>
+        {head}
         <span className="sub">{d.message ?? "แปลงไฟล์ไม่สำเร็จ"}</span>
       </div>
     );
   }
   if (d.status === "indexing" || d.status === "queued") {
     return (
-      <div className="doc-card" style={{ gap: 6 }}>
-        <span className="name">{d.name}</span>
+      <div className="doc-card" style={{ gap: 6 }} title={d.path}>
+        {head}
         <ProgressBar thin value={d.progress} label={`ความคืบหน้า ${d.name}`} />
         <span className="sub">{d.status === "queued" ? "รอคิวทำ index" : `กำลังทำ index ${Math.round(d.progress * 100)}%`}</span>
       </div>
@@ -125,7 +186,7 @@ function DocCard({ d }: { d: DocItem }) {
   }
   return (
     <div className="doc-card" title={d.path}>
-      <span className="name">{d.name}</span>
+      {head}
       <span className="sub">{d.kind} · {d.chunkCount} ท่อน</span>
     </div>
   );

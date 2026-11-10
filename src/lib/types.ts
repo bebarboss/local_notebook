@@ -11,6 +11,8 @@ export interface Service {
   folders: string[];
   /** individual files added with "+ เพิ่ม" outside the watched folders */
   files: string[];
+  /** files inside the folders that were removed from this service (skipped by the scan) */
+  excluded: string[];
   model: string;
   effort: Effort;
   topK: number;
@@ -23,7 +25,10 @@ export interface ServiceStats {
   serviceId: string;
   documents: number;
   chunks: number;
+  /** total size of the source files */
   bytes: number;
+  /** size of the index on disk (text + vectors + pictures) */
+  indexBytes: number;
   skipped: number;
   indexing: number;
   lastIndexedAt: number | null;
@@ -53,6 +58,13 @@ export interface Source {
   ord: number;
   score: number;
   text: string;
+}
+
+/** A picture kept from a document (fetch the pixels with api.imageData). */
+export interface ImageInfo {
+  id: number;
+  w: number;
+  h: number;
 }
 
 export type Role = "user" | "assistant";
@@ -141,6 +153,8 @@ export interface Settings {
   autoCheckUpdate: boolean;
   /** OCR pictures, scanned PDF pages and image files */
   ocrEnabled: boolean;
+  /** keep pictures from documents and show them with answers */
+  keepImages: boolean;
 }
 
 export type EmbeddingModelId = "multilingual-e5-small" | "multilingual-e5-base" | "bge-m3";

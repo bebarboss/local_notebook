@@ -4,6 +4,7 @@ import type { Source } from "../lib/types";
 import { th } from "../i18n/th";
 import { useApp } from "../state";
 import { Modal } from "./ui";
+import { SourceImageGrid } from "./SourceImages";
 
 export function SourcePanel({ source, onClose }: { source: Source; onClose: () => void }) {
   const { toast } = useApp();
@@ -22,6 +23,7 @@ export function SourcePanel({ source, onClose }: { source: Source; onClose: () =
       >
         {source.text}
       </div>
+      <SourceImageGrid source={source} />
       <div className="modal-actions">
         <button
           className="btn btn-lg"

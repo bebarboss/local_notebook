@@ -308,6 +308,7 @@ function EmbeddingSection() {
           }}><FolderOpen size={16} strokeWidth={1.8} aria-hidden="true" />เลือกโฟลเดอร์</button>
         </div>
         <OcrRow />
+        <KeepImagesRow />
         <div className="list-row">
           <div className="l"><span className="t">Index ใหม่ทั้งหมด</span><span className="d">ลบ vector เดิมทุก service แล้วทำใหม่ด้วยโมเดลปัจจุบัน</span></div>
           <button className="btn" disabled={!st?.ready} onClick={() => setConfirmReindex(true)}>Index ใหม่ทั้งหมด</button>
@@ -465,6 +466,29 @@ function UpdateRows() {
       </div>
       {found && <UpdateDialog info={found} onClose={() => setFound(null)} />}
     </>
+  );
+}
+
+function KeepImagesRow() {
+  const { settings, updateSettings, toast } = useApp();
+  return (
+    <div className="list-row">
+      <div className="l">
+        <span className="t">แสดงรูปจากเอกสาร</span>
+        <span className="d">
+          เก็บรูปใน PDF / Word / PowerPoint และหน้าสแกนไว้ในเครื่อง แล้วแสดงใต้คำตอบและในแหล่งอ้างอิง ·
+          index ใหญ่ขึ้นราว 50–150 KB ต่อรูป · รูปไม่ถูกส่งไป Gateway · เปิด/ปิดแล้วจะ index ใหม่ทั้งหมด
+        </span>
+      </div>
+      <Switch
+        checked={settings.keepImages}
+        label="แสดงรูปจากเอกสาร"
+        onChange={async (v) => {
+          await updateSettings({ keepImages: v });
+          toast(v ? "เปิดแล้ว — เอกสารจะถูก index ใหม่เพื่อเก็บรูป" : "ปิดแล้ว — รูปที่เก็บไว้จะถูกลบตอน index ใหม่");
+        }}
+      />
+    </div>
   );
 }
 

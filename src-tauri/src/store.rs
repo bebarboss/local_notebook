@@ -33,6 +33,23 @@ pub struct NewChunk {
     pub embedding: Vec<f32>,
 }
 
+/// A picture kept from a document. `chunk_ord` = the chunk it sits in (None → whole page/file).
+pub struct NewImage {
+    pub page: Option<u32>,
+    pub chunk_ord: Option<i64>,
+    pub w: u32,
+    pub h: u32,
+    pub jpeg: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageInfo {
+    pub id: i64,
+    pub w: u32,
+    pub h: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct Hit {
     pub chunk_id: i64,
@@ -48,7 +65,7 @@ pub trait VectorStore {
     fn get_document(&self, path: &str) -> AppResult<Option<DocRow>>;
     fn upsert_document(&mut self, path: &str, hash: &str, mtime: i64, bytes: i64, status: &str, message: Option<&str>) -> AppResult<i64>;
     fn set_status(&mut self, doc_id: i64, status: &str, message: Option<&str>) -> AppResult<()>;
-    fn replace_chunks(&mut self, doc_id: i64, chunks: &[NewChunk]) -> AppResult<()>;
+    fn replace_chunks(&mut self, doc_id: i64, chunks: &[NewChunk], images: &[NewImage]) -> AppResult<()>;
     fn delete_document(&mut self, path: &str) -> AppResult<()>;
     fn clear(&mut self) -> AppResult<()>;
     fn search(&mut self, query: &[f32], k: usize, threshold: f32) -> AppResult<Vec<Hit>>;
@@ -90,6 +107,16 @@ impl SqliteStore {
                embedding BLOB NOT NULL
              );
              CREATE INDEX IF NOT EXISTS chunks_doc ON chunks(doc_id);
+             CREATE TABLE IF NOT EXISTS images (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+               page INTEGER,
+               chunk_ord INTEGER,
+               w INTEGER NOT NULL,
+               h INTEGER NOT NULL,
+               data BLOB NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS images_doc ON images(doc_id, page);
              CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )?;
         Ok(Self { conn, path: path.to_path_buf(), cache: None })
@@ -126,6 +153,23 @@ impl SqliteStore {
                 |r| Ok(Hit { chunk_id: r.get(0)?, score: 0.0, doc_path: r.get(1)?, page: r.get::<_, Option<u32>>(2)?, ord: r.get(3)?, text: r.get(4)? }),
             )
             .optional()?)
+    }
+
+    /// Pictures to show next to a cited chunk: everything on its page (PDF/PPTX),
+    /// or — for documents without pages — the pictures inside that chunk plus whole-file ones.
+    pub fn images_for(&self, doc_path: &str, page: Option<u32>, ord: i64) -> AppResult<Vec<ImageInfo>> {
+        let mut st = self.conn.prepare(
+            "SELECT i.id, i.w, i.h FROM images i JOIN documents d ON d.id=i.doc_id
+             WHERE d.path=?1 AND ((?2 IS NOT NULL AND i.page=?2)
+                               OR (?2 IS NULL AND i.page IS NULL AND (i.chunk_ord=?3 OR i.chunk_ord IS NULL)))
+             ORDER BY i.id LIMIT 12",
+        )?;
+        let rows = st.query_map(params![doc_path, page, ord], |r| Ok(ImageInfo { id: r.get(0)?, w: r.get(1)?, h: r.get(2)? }))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn image_data(&self, id: i64) -> AppResult<Option<Vec<u8>>> {
+        Ok(self.conn.query_row("SELECT data FROM images WHERE id=?1", [id], |r| r.get(0)).optional()?)
     }
 
     fn load_cache(&mut self) -> AppResult<()> {
@@ -195,13 +239,18 @@ impl VectorStore for SqliteStore {
         Ok(())
     }
 
-    fn replace_chunks(&mut self, doc_id: i64, chunks: &[NewChunk]) -> AppResult<()> {
+    fn replace_chunks(&mut self, doc_id: i64, chunks: &[NewChunk], images: &[NewImage]) -> AppResult<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM chunks WHERE doc_id=?1", [doc_id])?;
+        tx.execute("DELETE FROM images WHERE doc_id=?1", [doc_id])?;
         {
             let mut ins = tx.prepare("INSERT INTO chunks(doc_id,page,ord,text,embedding) VALUES(?1,?2,?3,?4,?5)")?;
             for c in chunks {
                 ins.execute(params![doc_id, c.page, c.ord, c.text, to_blob(&c.embedding)])?;
+            }
+            let mut img = tx.prepare("INSERT INTO images(doc_id,page,chunk_ord,w,h,data) VALUES(?1,?2,?3,?4,?5,?6)")?;
+            for i in images {
+                img.execute(params![doc_id, i.page, i.chunk_ord, i.w, i.h, i.jpeg])?;
             }
         }
         tx.execute(
@@ -220,7 +269,7 @@ impl VectorStore for SqliteStore {
     }
 
     fn clear(&mut self) -> AppResult<()> {
-        self.conn.execute_batch("DELETE FROM chunks; DELETE FROM documents;")?;
+        self.conn.execute_batch("DELETE FROM images; DELETE FROM chunks; DELETE FROM documents;")?;
         self.cache = None;
         Ok(())
     }
@@ -296,12 +345,34 @@ mod tests {
         s.replace_chunks(d, &[
             NewChunk { page: None, ord: 0, text: "ลาพักร้อน".into(), embedding: v(&[1.0, 0.0]) },
             NewChunk { page: Some(2), ord: 1, text: "เงินเดือน".into(), embedding: v(&[0.0, 1.0]) },
-        ]).unwrap();
+        ], &[]).unwrap();
         let hits = s.search(&v(&[0.9, 0.1]), 1, 0.0).unwrap();
         assert_eq!(hits[0].text, "ลาพักร้อน");
         assert_eq!(s.stats().unwrap().1, 2);
         s.delete_document("C:\\a.txt").unwrap();
         assert!(s.search(&v(&[1.0, 0.0]), 3, 0.0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn images_by_page_and_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = SqliteStore::open(&dir.path().join("index.db")).unwrap();
+        let img = |page, chunk_ord, b: u8| NewImage { page, chunk_ord, w: 10, h: 5, jpeg: vec![b] };
+        let c = |page, ord| NewChunk { page, ord, text: "x".into(), embedding: v(&[1.0, 0.0]) };
+        let pdf = s.upsert_document("C:\\a.pdf", "h", 1, 1, "indexing", None).unwrap();
+        s.replace_chunks(pdf, &[c(Some(1), 0), c(Some(2), 1)], &[img(Some(1), Some(0), 1), img(Some(2), None, 2), img(Some(2), Some(1), 3)]).unwrap();
+        let docx = s.upsert_document("C:\\b.docx", "h", 1, 1, "indexing", None).unwrap();
+        s.replace_chunks(docx, &[c(None, 0), c(None, 1)], &[img(None, Some(0), 4), img(None, Some(1), 5)]).unwrap();
+
+        let ids = |s: &SqliteStore, p: &str, page, ord| s.images_for(p, page, ord).unwrap().iter().map(|i| s.image_data(i.id).unwrap().unwrap()[0]).collect::<Vec<_>>();
+        assert_eq!(ids(&s, "C:\\a.pdf", Some(2), 1), vec![2, 3]); // whole page
+        assert_eq!(ids(&s, "C:\\a.pdf", Some(1), 0), vec![1]);
+        assert_eq!(ids(&s, "C:\\b.docx", None, 1), vec![5]); // only the chunk's own picture
+        // re-index replaces, delete cascades
+        s.replace_chunks(docx, &[c(None, 0)], &[]).unwrap();
+        assert!(ids(&s, "C:\\b.docx", None, 0).is_empty());
+        s.delete_document("C:\\a.pdf").unwrap();
+        assert!(ids(&s, "C:\\a.pdf", Some(2), 1).is_empty());
     }
 
     /// Two services = two files; neither sees the other's chunks.
@@ -311,10 +382,10 @@ mod tests {
         let mut hr = SqliteStore::open(&dir.path().join("hr").join("index.db")).unwrap();
         let mut pos = SqliteStore::open(&dir.path().join("pos").join("index.db")).unwrap();
         let a = hr.upsert_document("C:\\same.pdf", "h", 1, 1, "indexing", None).unwrap();
-        hr.replace_chunks(a, &[NewChunk { page: Some(1), ord: 0, text: "HR only".into(), embedding: v(&[1.0, 0.0]) }]).unwrap();
+        hr.replace_chunks(a, &[NewChunk { page: Some(1), ord: 0, text: "HR only".into(), embedding: v(&[1.0, 0.0]) }], &[]).unwrap();
         // same file may live in both services with separate embeddings
         let b = pos.upsert_document("C:\\same.pdf", "h", 1, 1, "indexing", None).unwrap();
-        pos.replace_chunks(b, &[NewChunk { page: Some(1), ord: 0, text: "POS copy".into(), embedding: v(&[0.0, 1.0]) }]).unwrap();
+        pos.replace_chunks(b, &[NewChunk { page: Some(1), ord: 0, text: "POS copy".into(), embedding: v(&[0.0, 1.0]) }], &[]).unwrap();
         let h = hr.search(&v(&[1.0, 0.0]), 5, -1.0).unwrap();
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].text, "HR only");

@@ -17,12 +17,14 @@ import type {
   EmbeddingStatus,
   GatewayInfo,
   GatewayStatus,
+  ImageInfo,
   IndexProgress,
   Message,
   ModelConfig,
   Service,
   ServiceStats,
   Settings,
+  Source,
   TestResult,
   UpdateInfo,
   UpdateProgress,
@@ -87,6 +89,9 @@ export interface Backend {
   listDocuments(serviceId: string): Promise<DocItem[]>;
   addDocuments(serviceId: string, paths: string[]): Promise<void>;
   removeDocument(serviceId: string, docId: number): Promise<void>;
+  restoreDocument(serviceId: string, path: string): Promise<Service>;
+  sourceImages(src: Source): Promise<ImageInfo[]>;
+  imageData(serviceId: string, id: number): Promise<string>;
   reindexService(serviceId: string, full: boolean): Promise<void>;
   cancelIndex(serviceId: string): Promise<void>;
   exportService(serviceId: string, destDir: string): Promise<string>;
@@ -170,6 +175,9 @@ function createTauriBackend(): Backend {
     listDocuments: (serviceId) => call("list_documents", { serviceId }),
     addDocuments: (serviceId, paths) => call("add_documents", { serviceId, paths }),
     removeDocument: (serviceId, docId) => call("remove_document", { serviceId, docId }),
+    restoreDocument: (serviceId, path) => call("restore_document", { serviceId, path }),
+    sourceImages: (s) => call("source_images", { serviceId: s.serviceId, docPath: s.docPath, page: s.page, ord: s.ord }),
+    imageData: (serviceId, id) => call("image_data", { serviceId, id }),
     reindexService: (serviceId, full) => call("reindex_service", { serviceId, full }),
     cancelIndex: (serviceId) => call("cancel_index", { serviceId }),
     exportService: (serviceId, destDir) => call("export_service", { serviceId, destDir }),

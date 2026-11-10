@@ -98,9 +98,13 @@ pub fn get_settings(state: S<'_>) -> Settings {
 pub fn save_settings(app: AppHandle, state: S<'_>, settings: Settings) -> AppResult<Settings> {
     let s = settings.sanitize();
     s.save()?;
-    let ocr_changed = state.settings.lock().ocr_enabled != s.ocr_enabled;
+    let ocr_changed = {
+        let cur = state.settings.lock();
+        cur.ocr_enabled != s.ocr_enabled || cur.keep_images != s.keep_images
+    };
     let purge = s.auto_delete_days;
     crate::ingest::ocr::set_enabled(s.ocr_enabled);
+    crate::ingest::set_keep_images(s.keep_images);
     *state.settings.lock() = s.clone();
     let _ = state.chats.lock().purge_older_than(purge);
     if ocr_changed {
@@ -305,6 +309,13 @@ pub fn list_services(state: S<'_>) -> Vec<Service> {
     state.services.lock().list()
 }
 
+/// Size on disk of a service's index (SQLite file + write-ahead log).
+fn index_size(id: &str) -> i64 {
+    let p = crate::services::index_path(id);
+    let wal = p.with_extension("db-wal");
+    [p, wal].iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len() as i64).sum()
+}
+
 #[tauri::command]
 pub fn service_stats(state: S<'_>) -> AppResult<Vec<ServiceStats>> {
     let list = state.services.lock().list();
@@ -317,6 +328,7 @@ pub fn service_stats(state: S<'_>) -> AppResult<Vec<ServiceStats>> {
             documents,
             chunks,
             bytes,
+            index_bytes: index_size(&s.id),
             skipped,
             indexing: pending,
             last_indexed_at: Some(s.updated_at),
@@ -393,6 +405,31 @@ pub fn remove_document(app: AppHandle, state: S<'_>, service_id: String, doc_id:
         state.indexer.start(app, service_id, false);
     }
     Ok(())
+}
+
+/// Put a document that was removed from a watched folder back into the service.
+#[tauri::command]
+pub fn restore_document(app: AppHandle, state: S<'_>, service_id: String, path: String) -> AppResult<Service> {
+    let svc = state.services.lock().restore_file(&service_id, &path)?;
+    state.indexer.start(app, service_id, false);
+    Ok(svc)
+}
+
+/// Pictures kept from the document around a cited chunk.
+#[tauri::command]
+pub fn source_images(state: S<'_>, service_id: String, doc_path: String, page: Option<u32>, ord: i64) -> AppResult<Vec<crate::store::ImageInfo>> {
+    let store = state.stores.get(&service_id)?;
+    let imgs = store.lock().images_for(&doc_path, page, ord)?;
+    Ok(imgs)
+}
+
+/// One kept picture as a `data:image/jpeg;base64,…` URL (CSP allows `img-src data:`).
+#[tauri::command]
+pub fn image_data(state: S<'_>, service_id: String, id: i64) -> AppResult<String> {
+    use base64::Engine;
+    let store = state.stores.get(&service_id)?;
+    let bytes = store.lock().image_data(id)?.ok_or_else(|| AppError::new("not_found", "ไม่พบรูปนี้ (อาจถูก index ใหม่แล้ว)"))?;
+    Ok(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
 #[tauri::command]
@@ -842,7 +879,7 @@ mod tests {
     #[test]
     fn prompt_has_numbered_sources_and_no_old_chunks() {
         let svc = Service {
-            id: "hr".into(), name: "HR".into(), code: "HR".into(), color: "#1F4FD1".into(), folders: vec![], files: vec![],
+            id: "hr".into(), name: "HR".into(), code: "HR".into(), color: "#1F4FD1".into(), folders: vec![], files: vec![], excluded: vec![],
             model: "godev1".into(), effort: "medium".into(), top_k: 5, system_prompt: "ตอบสั้น".into(), created_at: 0, updated_at: 0,
         };
         let src = vec![SourceRef { n: 1, service_id: "hr".into(), service_name: "HR".into(), doc_path: "a.pdf".into(), file_name: "a.pdf".into(), page: Some(4), ord: 0, score: 0.9, text: "ลา 10 วัน".into() }];

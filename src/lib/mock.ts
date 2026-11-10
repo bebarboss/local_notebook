@@ -32,10 +32,10 @@ export function createMockBackend(): Backend {
 
   const t0 = now();
   const services: Service[] = [
-    { id: "hr", name: "HR · นโยบายบุคคล", code: "HR", color: "#1F4FD1", files: [], folders: ["D:\\Docs\\HR"], model: "godev1", effort: "medium", topK: 5, systemPrompt: "", createdAt: t0 - 9e8, updatedAt: t0 - 6e5 },
-    { id: "pos", name: "POS · ระบบหน้าร้าน", code: "POS", color: "#B45309", files: [], folders: ["D:\\Docs\\POS"], model: "gothink1", effort: "high", topK: 8, systemPrompt: "", createdAt: t0 - 8e8, updatedAt: t0 - 7.2e6 },
-    { id: "pr", name: "จัดซื้อและสัญญา", code: "PR", color: "#0F766E", files: [], folders: ["D:\\Docs\\Procurement"], model: "godev2", effort: "medium", topK: 5, systemPrompt: "", createdAt: t0 - 7e8, updatedAt: t0 - 3e7 },
-    { id: "mt", name: "ประชุมทีม", code: "MT", color: "#7C3AED", files: [], folders: ["D:\\Docs\\Meetings"], model: "godev1", effort: "low", topK: 5, systemPrompt: "", createdAt: t0 - 6e8, updatedAt: t0 - 8.6e7 },
+    { id: "hr", name: "HR · นโยบายบุคคล", code: "HR", color: "#1F4FD1", files: [], excluded: [], folders: ["D:\\Docs\\HR"], model: "godev1", effort: "medium", topK: 5, systemPrompt: "", createdAt: t0 - 9e8, updatedAt: t0 - 6e5 },
+    { id: "pos", name: "POS · ระบบหน้าร้าน", code: "POS", color: "#B45309", files: [], excluded: [], folders: ["D:\\Docs\\POS"], model: "gothink1", effort: "high", topK: 8, systemPrompt: "", createdAt: t0 - 8e8, updatedAt: t0 - 7.2e6 },
+    { id: "pr", name: "จัดซื้อและสัญญา", code: "PR", color: "#0F766E", files: [], excluded: [], folders: ["D:\\Docs\\Procurement"], model: "godev2", effort: "medium", topK: 5, systemPrompt: "", createdAt: t0 - 7e8, updatedAt: t0 - 3e7 },
+    { id: "mt", name: "ประชุมทีม", code: "MT", color: "#7C3AED", files: [], excluded: [], folders: ["D:\\Docs\\Meetings"], model: "godev1", effort: "low", topK: 5, systemPrompt: "", createdAt: t0 - 6e8, updatedAt: t0 - 8.6e7 },
   ];
 
   const doc = (id: number, name: string, chunks: number, mb: number, extra: Partial<DocItem> = {}): DocItem => ({
@@ -96,7 +96,7 @@ export function createMockBackend(): Backend {
   let settings: Settings = {
     theme: "system", userName: "navaritrod", setupDone: false, historyTurns: 6, autoDeleteDays: 0,
     topK: 5, threshold: 0.3, chunkSize: 1000, chunkOverlap: 150, embeddingModel: "multilingual-e5-small", lastServiceId: "hr",
-    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true,
+    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true,
   };
   try {
     const saved = localStorage.getItem("docask-mock-settings");
@@ -136,6 +136,7 @@ export function createMockBackend(): Backend {
       documents: list.length,
       chunks: list.reduce((a, d) => a + d.chunkCount, 0),
       bytes: list.reduce((a, d) => a + d.bytes, 0),
+      indexBytes: list.reduce((a, d) => a + d.chunkCount, 0) * 6500,
       skipped: list.filter((d) => d.status === "skipped").length,
       indexing: list.filter((d) => d.status === "indexing" || d.status === "queued").length,
       lastIndexedAt: s.updatedAt,
@@ -211,7 +212,7 @@ export function createMockBackend(): Backend {
     listServices: async () => (await wait(200), clone(services)),
     serviceStats: async () => services.map(stats),
     createService: async (n: NewService) => {
-      const s: Service = { ...n, files: [], id: uid("svc"), createdAt: now(), updatedAt: now() };
+      const s: Service = { ...n, files: [], excluded: [], id: uid("svc"), createdAt: now(), updatedAt: now() };
       services.push(s);
       docs[s.id] = [];
       emit("services-changed", null);
@@ -239,7 +240,27 @@ export function createMockBackend(): Backend {
       }
       emit("services-changed", null);
     },
-    removeDocument: async (sid, id) => { docs[sid] = (docs[sid] ?? []).filter((d) => d.id !== id); },
+    removeDocument: async (sid, id) => {
+      const d = (docs[sid] ?? []).find((x) => x.id === id);
+      const svc = services.find((x) => x.id === sid);
+      if (d && svc) {
+        if (svc.files.includes(d.path)) svc.files = svc.files.filter((f) => f !== d.path);
+        else svc.excluded = [...svc.excluded, d.path];
+      }
+      docs[sid] = (docs[sid] ?? []).filter((x) => x.id !== id);
+      emit("services-changed", null);
+    },
+    restoreDocument: async (sid, path) => {
+      const svc = services.find((x) => x.id === sid)!;
+      svc.excluded = svc.excluded.filter((f) => f !== path);
+      const name = path.split(/[\\/]/).pop() || path;
+      (docs[sid] ??= []).push(doc(++seq, name, 20, 0.8, { path, status: "queued", chunkCount: 0, progress: 0 }));
+      emit("services-changed", null);
+      return clone(svc);
+    },
+    // pictures: the first cited document of each answer "has" a screenshot and a diagram
+    sourceImages: async (src) => (await wait(120), src.n === 1 ? [{ id: 1, w: 640, h: 400 }, { id: 2, w: 480, h: 480 }] : []),
+    imageData: async (_sid, id) => mockPicture(id),
     reindexService: async (sid) => { emit("index-progress", { serviceId: sid, jobId: "mock", docPath: null, fileName: null, done: 0, total: 0, docProgress: 1, phase: "done", message: null }); },
     cancelIndex: async () => {},
     exportService: async (_sid, dest) => `${dest}\\docask-export.zip`,
@@ -363,4 +384,12 @@ export function createMockBackend(): Backend {
   };
 
   return backend;
+}
+
+/** SVG stand-ins for pictures kept from documents (mock only). */
+function mockPicture(id: number): string {
+  const svg = id === 1
+    ? `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="400"><rect width="640" height="400" fill="#eef2ff"/><rect x="0" y="0" width="640" height="44" fill="#1F4FD1"/><text x="20" y="29" font-size="18" fill="#fff" font-family="sans-serif">ระบบลางาน · ยื่นใบลา</text><text x="40" y="100" font-size="16" fill="#333" font-family="sans-serif">ประเภทการลา: ลาพักร้อน</text><rect x="40" y="120" width="300" height="36" rx="6" fill="#fff" stroke="#99a"/><text x="40" y="200" font-size="16" fill="#333" font-family="sans-serif">วันที่เริ่ม – วันที่สิ้นสุด</text><rect x="40" y="220" width="300" height="36" rx="6" fill="#fff" stroke="#99a"/><rect x="40" y="300" width="140" height="44" rx="8" fill="#1F4FD1"/><text x="70" y="328" font-size="16" fill="#fff" font-family="sans-serif">ส่งคำขอ</text></svg>`
+    : `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="480"><rect width="480" height="480" fill="#f8fafc"/><g font-family="sans-serif" font-size="16" fill="#111"><rect x="140" y="30" width="200" height="56" rx="10" fill="#dbeafe"/><text x="190" y="64">พนักงานยื่นใบลา</text><rect x="140" y="170" width="200" height="56" rx="10" fill="#fef3c7"/><text x="170" y="204">หัวหน้าอนุมัติ</text><rect x="140" y="310" width="200" height="56" rx="10" fill="#dcfce7"/><text x="185" y="344">HR บันทึกวันลา</text></g><path d="M240 86v84M240 226v84" stroke="#555" stroke-width="3"/></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }

@@ -1,4 +1,4 @@
-use super::{ocr, Extractor, Page};
+use super::{keep_images, ocr, Extractor, Page};
 use crate::errors::{AppError, AppResult};
 use once_cell::sync::OnceCell;
 use pdfium_render::prelude::{PdfPage, PdfPageObjectCommon, PdfPageObjectsCommon, PdfRenderConfig, Pdfium};
@@ -66,48 +66,46 @@ fn extract_pdfium(pdfium: &Pdfium, path: &Path) -> AppResult<Vec<Page>> {
         .load_pdf_from_file(path, None)
         .map_err(|e| AppError::new("pdf", format!("อ่าน PDF ไม่ได้: {e:?}")))?;
     let engine = ocr::engine();
+    let keep = keep_images();
     let mut seen_images: HashSet<[u8; 16]> = HashSet::new();
     let mut out = Vec::new();
 
     for (i, page) in doc.pages().iter().enumerate() {
-        let mut text = deduped_text(&page).unwrap_or_else(|| page.text().map(|t| t.all()).unwrap_or_default());
+        let text = deduped_text(&page).unwrap_or_else(|| page.text().map(|t| t.all()).unwrap_or_default());
         let chars = text.chars().filter(|c| !c.is_whitespace()).count();
+        let mut p = Page::new(Some(i as u32 + 1), text);
 
-        if let Some(ocr) = engine {
-            if chars < SCANNED_PAGE_CHARS {
-                // scanned page: render and OCR everything on it
-                let cfg = PdfRenderConfig::new().set_target_width(1700).set_maximum_height(2400);
-                if let Ok(img) = page.render_with_config(&cfg).and_then(|b| b.as_image()) {
-                    if let Ok(t) = ocr.recognize(&img) {
-                        if t.chars().filter(|c| !c.is_whitespace()).count() > chars {
-                            text = t;
-                        }
+        if chars < SCANNED_PAGE_CHARS && (engine.is_some() || keep) {
+            // scanned page: render it; OCR everything on it, keep the picture of the page
+            let cfg = PdfRenderConfig::new().set_target_width(1700).set_maximum_height(2400);
+            if let Ok(img) = page.render_with_config(&cfg).and_then(|b| b.as_image()) {
+                if let Some(t) = engine.and_then(|o| o.recognize(&img).ok()) {
+                    if t.chars().filter(|c| !c.is_whitespace()).count() > chars {
+                        p.text = t;
                     }
                 }
-            } else {
-                // text page: OCR only the pictures (screenshots etc.), once per distinct image
-                for obj in page.objects().iter() {
-                    let Some(io) = obj.as_image_object() else { continue };
-                    let (w, h) = (io.width().unwrap_or(0), io.height().unwrap_or(0));
-                    if w < MIN_IMAGE_W || h < MIN_IMAGE_H {
-                        continue;
-                    }
-                    let Ok(img) = io.get_raw_image() else { continue };
-                    let digest: [u8; 16] = Sha256::digest(img.as_bytes())[..16].try_into().expect("16 bytes");
-                    if !seen_images.insert(digest) {
-                        continue; // repeated logo/header image
-                    }
-                    if let Ok(t) = ocr.recognize(&img) {
-                        if !t.trim().is_empty() {
-                            text.push_str(&format!("\n{IMAGE_MARK}\n{t}\n"));
-                        }
-                    }
+                p.set_page_image(&img);
+            }
+        } else if engine.is_some() || keep {
+            // text page: OCR / keep the pictures (screenshots etc.), once per distinct image
+            for obj in page.objects().iter() {
+                let Some(io) = obj.as_image_object() else { continue };
+                let (w, h) = (io.width().unwrap_or(0), io.height().unwrap_or(0));
+                if w < MIN_IMAGE_W || h < MIN_IMAGE_H {
+                    continue;
                 }
+                let Ok(img) = io.get_raw_image() else { continue };
+                let digest: [u8; 16] = Sha256::digest(img.as_bytes())[..16].try_into().expect("16 bytes");
+                if !seen_images.insert(digest) {
+                    continue; // repeated logo/header image
+                }
+                let t = engine.and_then(|o| o.recognize(&img).ok());
+                p.push_image(Some(&img), t.as_deref());
             }
         }
 
-        if !text.trim().is_empty() {
-            out.push(Page { page: Some(i as u32 + 1), text });
+        if !p.text.trim().is_empty() {
+            out.push(p);
         }
     }
     Ok(out)
@@ -126,7 +124,7 @@ fn extract_text_only(path: &Path) -> AppResult<Vec<Page>> {
     Ok(pages
         .into_iter()
         .enumerate()
-        .map(|(i, text)| Page { page: Some(i as u32 + 1), text })
+        .map(|(i, text)| Page::new(Some(i as u32 + 1), text))
         .filter(|p| !p.text.trim().is_empty())
         .collect())
 }

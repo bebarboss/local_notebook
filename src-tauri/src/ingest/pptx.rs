@@ -1,4 +1,4 @@
-use super::{ocr, Extractor, Page};
+use super::{decode_image, keep_images, ocr, Extractor, Page};
 use crate::errors::{AppError, AppResult};
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -41,11 +41,12 @@ pub fn extract_zip<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> AppResult<Ve
     for (num, name) in slides {
         let xml = read_entry(zip, &name)?;
         let mut text = slide_text(&xml)?;
+        let mut images = Vec::new();
 
         // relationships: pictures and speaker notes of this slide
         let rels_name = format!("ppt/slides/_rels/slide{num}.xml.rels");
         let rels = read_entry(zip, &rels_name).unwrap_or_default();
-        for (kind, target) in relationships(&rels) {
+        for (_, kind, target) in relationships(&rels) {
             let full = resolve("ppt/slides", &target);
             if kind.ends_with("/notesSlide") {
                 if let Ok(nx) = read_entry(zip, &full) {
@@ -56,16 +57,18 @@ pub fn extract_zip<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> AppResult<Ve
                         text.push_str(&format!("\nหมายเหตุผู้บรรยาย:\n{notes}\n"));
                     }
                 }
-            } else if kind.ends_with("/image") && engine.is_some() && seen_media.insert(full.clone()) {
-                if let Ok(bytes) = read_bytes(zip, &full) {
-                    if let Some(t) = ocr::bytes_text(&bytes) {
-                        text.push_str(&format!("\n{}\n{t}\n", super::pdf::IMAGE_MARK));
-                    }
+            } else if kind.ends_with("/image") && (engine.is_some() || keep_images()) && seen_media.insert(full.clone()) {
+                if let Some(img) = read_bytes(zip, &full).ok().and_then(|b| decode_image(&b)) {
+                    images.push(img);
                 }
             }
         }
-        if !text.trim().is_empty() {
-            pages.push(Page { page: Some(num), text });
+        let mut page = Page::new(Some(num), text);
+        for img in &images {
+            page.push_image(Some(img), ocr::image_text(img).as_deref());
+        }
+        if !page.text.trim().is_empty() {
+            pages.push(page);
         }
     }
     Ok(pages)
@@ -118,19 +121,21 @@ pub fn slide_text(xml: &str) -> AppResult<String> {
     Ok(out)
 }
 
-/// (Type, Target) pairs from a .rels file.
-fn relationships(xml: &str) -> Vec<(String, String)> {
+/// (Id, Type, Target) of the internal relationships in a .rels file.
+pub fn relationships(xml: &str) -> Vec<(String, String, String)> {
     let mut reader = Reader::from_str(xml);
     let mut out = Vec::new();
     loop {
         match reader.read_event() {
             Ok(Event::Empty(e)) | Ok(Event::Start(e)) if e.local_name().as_ref() == b"Relationship" => {
+                let mut id = String::new();
                 let mut kind = String::new();
                 let mut target = String::new();
                 let mut external = false;
                 for a in e.attributes().flatten() {
                     let v = a.unescape_value().map(|c| c.into_owned()).unwrap_or_default();
                     match a.key.local_name().as_ref() {
+                        b"Id" => id = v,
                         b"Type" => kind = v,
                         b"Target" => target = v,
                         b"TargetMode" => external = v == "External",
@@ -138,7 +143,7 @@ fn relationships(xml: &str) -> Vec<(String, String)> {
                     }
                 }
                 if !external && !target.is_empty() {
-                    out.push((kind, target));
+                    out.push((id, kind, target));
                 }
             }
             Ok(Event::Eof) | Err(_) => break,
@@ -149,7 +154,7 @@ fn relationships(xml: &str) -> Vec<(String, String)> {
 }
 
 /// Resolve a relative zip path like `../media/image1.png` against `ppt/slides`.
-fn resolve(base: &str, target: &str) -> String {
+pub fn resolve(base: &str, target: &str) -> String {
     if let Some(abs) = target.strip_prefix('/') {
         return abs.to_string();
     }

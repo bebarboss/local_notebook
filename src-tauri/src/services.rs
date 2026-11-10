@@ -17,6 +17,9 @@ pub struct Service {
     /// individual files added with "+ เพิ่ม" (outside the watched folders)
     #[serde(default)]
     pub files: Vec<String>,
+    /// files inside the folders that the user removed from this service
+    #[serde(default)]
+    pub excluded: Vec<String>,
     pub model: String,
     pub effort: String,
     pub top_k: u32,
@@ -49,10 +52,23 @@ pub struct ServiceStats {
     pub service_id: String,
     pub documents: i64,
     pub chunks: i64,
+    /// total size of the source files
     pub bytes: i64,
+    /// size of index.db on disk (text + vectors + pictures)
+    pub index_bytes: i64,
     pub skipped: i64,
     pub indexing: i64,
     pub last_indexed_at: Option<i64>,
+}
+
+/// `path` is somewhere below folder `dir` (case-insensitive, Windows paths).
+pub fn in_dir(path: &str, dir: &str) -> bool {
+    let p = path.replace('/', "\\").to_lowercase();
+    let mut d = dir.replace('/', "\\").to_lowercase();
+    if !d.ends_with('\\') {
+        d.push('\\');
+    }
+    p.starts_with(&d)
 }
 
 pub fn now_ms() -> i64 {
@@ -106,6 +122,7 @@ impl ServiceRegistry {
             color,
             folders: dedup(n.folders),
             files: vec![],
+            excluded: vec![],
             model: n.model,
             effort,
             top_k: n.top_k.clamp(1, 30),
@@ -128,6 +145,7 @@ impl ServiceRegistry {
         cur.effort = effort;
         cur.folders = dedup(s.folders);
         cur.files = dedup(s.files);
+        cur.excluded = dedup(s.excluded);
         cur.model = s.model;
         cur.top_k = s.top_k.clamp(1, 30);
         cur.system_prompt = s.system_prompt.trim().to_string();
@@ -140,6 +158,7 @@ impl ServiceRegistry {
     pub fn add_files(&mut self, id: &str, files: &[String]) -> AppResult<Service> {
         let cur = self.items.iter_mut().find(|x| x.id == id).ok_or_else(|| AppError::new("not_found", "ไม่พบ service นี้"))?;
         for f in files {
+            cur.excluded.retain(|x| !x.eq_ignore_ascii_case(f));
             if !cur.files.iter().any(|x| x.eq_ignore_ascii_case(f)) {
                 cur.files.push(f.clone());
             }
@@ -150,11 +169,30 @@ impl ServiceRegistry {
         Ok(out)
     }
 
+    /// Take one document out of the service. Files added one by one are forgotten;
+    /// files that live in a watched folder are excluded so the next scan skips them.
+    /// The file on disk is never touched.
     pub fn remove_file(&mut self, id: &str, path: &str) -> AppResult<()> {
         if let Some(cur) = self.items.iter_mut().find(|x| x.id == id) {
+            let before = cur.files.len();
             cur.files.retain(|f| !f.eq_ignore_ascii_case(path));
+            let in_folder = cur.folders.iter().any(|d| in_dir(path, d));
+            if (cur.files.len() == before || in_folder) && !cur.excluded.iter().any(|x| x.eq_ignore_ascii_case(path)) {
+                cur.excluded.push(path.to_string());
+            }
+            cur.updated_at = now_ms();
         }
         self.save()
+    }
+
+    /// Undo `remove_file` for a folder file.
+    pub fn restore_file(&mut self, id: &str, path: &str) -> AppResult<Service> {
+        let cur = self.items.iter_mut().find(|x| x.id == id).ok_or_else(|| AppError::new("not_found", "ไม่พบ service นี้"))?;
+        cur.excluded.retain(|x| !x.eq_ignore_ascii_case(path));
+        cur.updated_at = now_ms();
+        let out = cur.clone();
+        self.save()?;
+        Ok(out)
     }
 
     pub fn touch(&mut self, id: &str) {
