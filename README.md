@@ -1,239 +1,281 @@
 # DocAsk
 
-ถามตอบจากเอกสารในเครื่อง (RAG) ด้วย LLM ของบริษัทผ่าน **Gosoft Agent Gateway**
-แอป desktop สำหรับ Windows x64 สร้างด้วย **Tauri v2** (Rust + React/TypeScript/Vite)
+แอปถามตอบจากเอกสารในเครื่อง (local RAG) สำหรับ Windows ใช้ LLM ผ่าน **Gosoft Agent Gateway**
+เอกสารและ index อยู่ในเครื่องทั้งหมด อ่านได้ทั้ง PDF, Word, PowerPoint, ข้อความ และรูปภาพ (มี OCR ภาษาไทยในตัว)
 
-- เอกสารต้นฉบับและ vector อยู่ในเครื่องเท่านั้น (`%APPDATA%\DocAsk`) — ส่งออกไปเฉพาะท่อนที่ค้นเจอ + ประวัติแชตไปยัง Gateway ตอนถาม
-- Embedding รันบน CPU (ONNX Runtime ผ่าน `fastembed`) ไม่ต้องมี GPU
-- Virtual Key เก็บใน **Windows Credential Manager** เท่านั้น (ไม่อยู่ในไฟล์, log, frontend หรือ clipboard)
+## ⬇️ ดาวน์โหลด
 
-รายละเอียดความต้องการทั้งหมดอยู่ใน [SPEC.md](SPEC.md)
+**[ดาวน์โหลดเวอร์ชันล่าสุด](https://github.com/bebarboss/local_notebook/releases/latest)** แล้วเลือกไฟล์ `DocAsk_x.y.z_x64-setup.exe`
+
+| ไฟล์ | ใช้เมื่อ |
+|---|---|
+| `DocAsk_x.y.z_x64-setup.exe` | **แนะนำ** ติดตั้งให้ผู้ใช้คนเดียว ไม่ต้องใช้สิทธิ์ admin |
+| `DocAsk_x.y.z_x64_en-US.msi` | ติดตั้งแบบ silent / ผ่านระบบจัดการเครื่อง (`msiexec /i <ไฟล์>.msi /qn`) |
+
+## 🚀 ติดตั้งและเริ่มใช้งาน
+
+**ต้องมี:** Windows 10/11 64-bit · VPN ของบริษัท (ตอนถามคำถาม) · Virtual Key ของ Gateway (ขึ้นต้น `sk-`)
+
+1. **ติดตั้ง** — ดับเบิลคลิก `DocAsk_x.y.z_x64-setup.exe`
+   ถ้า Windows ขึ้น "Windows protected your PC" ให้กด **More info › Run anyway** (ตัวติดตั้งไม่ได้เซ็นด้วยใบรับรอง)
+2. **Setup Wizard** (ขึ้นอัตโนมัติเมื่อเปิดครั้งแรก)
+   1. Gateway URL — ใช้ค่าเริ่มต้น `https://agent-gateway.gosoft.co.th` ได้เลย
+   2. Virtual Key — วาง key แล้วกดบันทึก (เก็บใน Windows Credential Manager)
+   3. โมเดล — ใช้ 6 โมเดลตั้งต้น หรือ **นำเข้าจาก VS Code**
+   4. ทดสอบ — กดทดสอบ โมเดลที่ผ่านจะพร้อมใช้
+3. **โมเดล Embedding** — ตั้งค่า › Embedding และ Index › **ดาวน์โหลด** `multilingual-e5-small` (~120 MB ครั้งเดียว)
+4. **สร้าง Service** — เมนูซ้าย › จัดการ › เพิ่ม service › เลือกโฟลเดอร์เอกสาร แล้วรอ index เสร็จ
+5. **ถาม** — แชตใหม่ › เลือก service › พิมพ์คำถาม · กด `[1]` `[2]` ในคำตอบเพื่อดูท่อนเอกสารที่อ้างถึง
+
+**อัปเดต:** เมื่อมีเวอร์ชันใหม่ แอปจะขึ้นแถบแจ้งตอนเปิดโปรแกรม กด **อัปเดต** แล้วแอปจะติดตั้งและเปิดใหม่เอง
+ข้อมูลเดิม (แชต, index, ตั้งค่า, key) ยังอยู่ครบ
+
+> ⚠️ ใช้ **Virtual Key รายบุคคล** เท่านั้น ห้ามใช้ Master Key และห้ามส่ง screenshot ที่เห็น key
 
 ---
 
-## 1. ติดตั้งเครื่องมือสำหรับพัฒนา (Windows)
+## หลักการทำงาน
 
-| เครื่องมือ | วิธีติดตั้ง |
+### ภาพรวม
+
+```mermaid
+flowchart LR
+    subgraph PC["เครื่องผู้ใช้"]
+        F["📁 โฟลเดอร์เอกสาร<br/>pdf · docx · pptx · txt · md · รูป"]
+        subgraph APP["DocAsk"]
+            UI["หน้าจอ<br/>React"]
+            CORE["Rust backend"]
+            IDX[("index ต่อ service<br/>SQLite: ท่อนข้อความ + vector")]
+            EMB["Embedding<br/>multilingual-e5 · ONNX/CPU"]
+            OCR["OCR<br/>PaddleOCR · ONNX/CPU"]
+        end
+        KEY["🔑 Windows<br/>Credential Manager"]
+    end
+    GW["Gosoft Agent Gateway<br/>(LLM)"]
+
+    F -->|อ่านไฟล์| CORE
+    CORE <--> OCR
+    CORE <--> EMB
+    CORE <--> IDX
+    UI <-->|Tauri IPC| CORE
+    KEY -->|อ่าน key| CORE
+    CORE -->|"คำถาม + ท่อนที่ค้นเจอ<br/>(ผ่าน VPN, HTTPS)"| GW
+    GW -->|คำตอบแบบ streaming| CORE
+```
+
+- **ไม่ส่งออกจากเครื่อง:** ไฟล์เอกสาร, index, vector, รูปที่ทำ OCR
+- **ส่งไปที่ Gateway ตอนถามเท่านั้น:** คำถาม, ท่อนเอกสารที่ค้นเจอ (ค่าเริ่มต้น 5 ท่อน) และประวัติแชต 6 รอบล่าสุด
+- **Virtual Key** อยู่ใน Credential Manager มีแค่ Rust ที่อ่านได้ หน้าจอเห็นแค่ 4 ตัวท้าย
+
+### 1. การทำ index เอกสาร
+
+```mermaid
+flowchart TD
+    A["ไฟล์ถูกเพิ่ม / แก้ / ลบ<br/>ในโฟลเดอร์ของ service"] --> B["Windows แจ้งแอป<br/>(file watcher)"]
+    S["เปิดแอป · กด index ใหม่<br/>· เปลี่ยนตั้งค่า"] --> C
+    B --> W["รอ 3 วินาที<br/>รวมการเปลี่ยนแปลง"] --> C["เช็กรายการไฟล์<br/>ชื่อ · ขนาด · วันที่แก้ไข"]
+    C --> D{"ไฟล์เปลี่ยนไหม"}
+    D -->|ไม่เปลี่ยน| SKIP["ข้าม"]
+    D -->|ถูกลบ| DEL["ลบท่อนออกจาก index"]
+    D -->|ใหม่ / ถูกแก้| E["แยกข้อความตามชนิดไฟล์"]
+    E --> G["ตัดท่อน ~1000 ตัวอักษร<br/>overlap 150 · ไม่ตัดกลางสระ/วรรณยุกต์"]
+    G --> H["Embedding ทีละ 32 ท่อน<br/>ได้ vector ต่อท่อน"]
+    H --> I[("บันทึกลง index.db<br/>ของ service นั้น")]
+```
+
+แอปไม่ได้สแกนตลอดเวลา จะทำงานเฉพาะตอนที่มีไฟล์เปลี่ยน และทำ embedding เฉพาะไฟล์ใหม่หรือไฟล์ที่ถูกแก้
+ถ้าเปลี่ยนโมเดล embedding, ขนาดท่อน หรือเปิด/ปิด OCR แอปจะ index ใหม่ทั้งหมดหนึ่งครั้ง
+
+**การแยกข้อความตามชนิดไฟล์**
+
+| ชนิด | วิธีอ่าน |
 |---|---|
-| Node.js 20 ขึ้นไป | `winget install OpenJS.NodeJS.LTS` |
-| Rust (stable, MSVC) | `winget install Rustlang.Rustup` แล้วเปิด terminal ใหม่ `rustup default stable-msvc` |
-| Visual Studio Build Tools 2022 (C++) | `winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"` |
-| WebView2 Runtime | มีใน Windows 10/11 อยู่แล้ว |
+| `.pdf` | ข้อความจาก PDFium (เก็บเลขหน้า) · หน้าที่เป็นภาพสแกน → OCR ทั้งหน้า · รูปในหน้า เช่น screenshot → OCR ต่อท้ายหน้านั้น |
+| `.docx` | ข้อความในเอกสาร + OCR รูปที่แทรกไว้ |
+| `.pptx` | ทีละสไลด์ (เลขสไลด์ = เลขหน้าในการอ้างอิง) + speaker notes + OCR รูปในสไลด์ |
+| `.txt` `.md` | ข้อความล้วน (UTF-8 / UTF-16) |
+| `.png` `.jpg` `.jpeg` `.bmp` `.webp` `.tif` | OCR ทั้งรูป |
 
-> Build Tools ต้องมี workload **Desktop development with C++** และ Windows SDK
-> (ONNX Runtime และ SQLite ถูก compile/link แบบ static ตอน build)
+ยังไม่รองรับ: `.doc` / `.ppt` รุ่นเก่า (ให้ Save As เป็น `.docx` / `.pptx`), `.xlsx`, ลายมือ, ข้อความแนวตั้ง
 
-ตรวจสอบ:
+### 2. OCR (อ่านข้อความในรูป)
 
-```powershell
-node -v; npm -v; cargo -V; rustc -V
+```mermaid
+flowchart LR
+    IMG["รูป / หน้า PDF สแกน"] --> DET["① หาตำแหน่งข้อความ<br/>PP-OCRv3 detection<br/>→ กล่องรอบข้อความ"]
+    DET --> REC["② อ่านทีละกล่อง<br/>PP-OCRv5 ไทย+อังกฤษ<br/>ปรับสูง 48px · ถอดแบบ CTC"]
+    REC --> LINE["③ เรียงเป็นบรรทัด<br/>บน→ล่าง · ซ้าย→ขวา"]
+    LINE --> TXT["ข้อความ<br/>→ ตัดท่อน → embedding"]
 ```
 
-## 2. คำสั่งที่ใช้บ่อย
+- โมเดล PaddleOCR (แปลงเป็น ONNX) และ `pdfium.dll` แนบมากับตัวติดตั้งแล้ว รวมประมาณ 17 MB
+- รันบน CPU ใช้เวลาประมาณ 0.5–2 วินาทีต่อรูปหรือหน้าสแกน
+- กล่องข้อความที่ความมั่นใจต่ำกว่า 0.5 จะถูกตัดทิ้ง รูปเล็กกว่า 120×40 px (เช่นไอคอน) จะไม่ถูกส่งไป OCR และรูปที่ซ้ำกันทุกหน้า เช่นโลโก้ จะ OCR แค่ครั้งเดียว
+- เปิด/ปิดได้ที่ ตั้งค่า › Embedding และ Index › OCR ข้อความในรูปภาพ
 
-```powershell
-npm install              # ติดตั้ง dependency ฝั่ง frontend + Tauri CLI
-npm run dev              # เปิดหน้าจอในเบราว์เซอร์ http://localhost:5173 (mock mode อัตโนมัติ)
-npm run tauri dev        # แอปจริง + hot reload
-npm run tauri build      # สร้างตัวติดตั้ง MSI + NSIS
-cd src-tauri; cargo test # unit test ฝั่ง Rust
-npm run typecheck        # ตรวจ TypeScript
+### 3. การถามตอบ
+
+```mermaid
+sequenceDiagram
+    actor U as ผู้ใช้
+    participant UI as หน้าจอ
+    participant R as Rust backend
+    participant DB as index.db
+    participant GW as Gateway (LLM)
+
+    U->>UI: พิมพ์คำถาม
+    UI->>R: ask(service, คำถาม)
+    R->>R: embedding คำถาม (query: …)
+    R->>DB: เทียบกับทุกท่อน (cosine)
+    DB-->>R: top-k ท่อน (คะแนน ≥ 0.3)
+    R-->>UI: แหล่งอ้างอิง [1] [2] …
+    R->>GW: system prompt + ประวัติ 6 รอบ<br/>+ คำถาม + ท่อนเอกสารพร้อมเลข [n]
+    loop streaming
+        GW-->>R: ข้อความทีละส่วน
+        R-->>UI: แสดงทันที
+    end
+    R->>R: บันทึกแชต
+    R-->>UI: เสร็จ
 ```
 
-ไฟล์ติดตั้งจะอยู่ที่
+- **Prompt** สั่งให้ตอบเป็นภาษาเดียวกับคำถาม ใช้เฉพาะข้อมูลจากท่อนเอกสาร (ห้ามใช้ความรู้ภายนอก) และใส่เลข `[n]` อ้างอิง ถ้าในเอกสารไม่มีคำตอบ ต้องบอกว่าไม่พบ
+  แต่ละ service เพิ่ม system prompt ของตัวเองได้
+- **ถามต่อในแชตเดิม** — ส่งคำถามและคำตอบ 6 รอบล่าสุดไปด้วย แต่ค้นเอกสารใหม่ทุกครั้ง (ไม่ส่งท่อนเอกสารของรอบก่อน)
+- **ค้นทุก service** — เปิดได้ที่ช่องพิมพ์ แอปจะค้นทุก index แล้วรวมผลตามคะแนน
 
-- `src-tauri\target\release\bundle\msi\DocAsk_<version>_x64_en-US.msi`
-- `src-tauri\target\release\bundle\nsis\DocAsk_<version>_x64-setup.exe`
+### 4. Service และพื้นที่จัดเก็บ
 
-## 3. Mock mode (ดูหน้าจอโดยไม่ต้องมี Rust/VPN/Key)
+แต่ละ service คือกลุ่มเอกสารที่มี index แยกกัน (`%APPDATA%\DocAsk\services\<id>\index.db`) และมีโมเดล, reasoning effort, top-k
+และ system prompt ของตัวเอง ลบ, ส่งออก หรือ index ใหม่ทีละ service ได้
 
-ถ้า frontend ไม่ได้รันใน Tauri (เช่น `npm run dev` แล้วเปิดในเบราว์เซอร์) หรือ build ด้วย `DOCASK_MOCK=1`
-`src/lib/api.ts` จะใช้ข้อมูลตัวอย่างใน `src/lib/mock.ts` แทนทุก command และแสดงป้าย **MOCK MODE** มุมขวาล่าง
+ไม่จำกัดพื้นที่ต่อ service ไฟล์ต้นฉบับไม่ถูกคัดลอกมาเก็บ index ใช้พื้นที่ประมาณ **10–20 KB ต่อหน้าเอกสาร**
+(เอกสาร 1,000 หน้า ≈ 15 MB) การค้นหาเทียบทุกท่อนโดยตรง จึงเร็วพอสำหรับเอกสารหลายพันหน้าต่อ service
 
-- 4 services (HR, POS, จัดซื้อ, ประชุม) พร้อมเอกสารตัวอย่าง รวมไฟล์ที่กำลัง index และ PDF สแกนที่ถูกข้าม
-- คำตอบแบบ streaming สมมติพร้อม `[1][2]`
-- ผลทดสอบ 6 โมเดล (gothink3 ได้ 403)
-- ไม่เรียกเครือข่ายใดๆ
-
-ตัวช่วยสำหรับดูหน้าจอ (เฉพาะ mock):
-
-- `http://localhost:5173/?setup=done&page=chat` — ข้าม wizard ไปหน้าแชต (`page` = `chat` | `services` | `settings` | `setup`)
-- ใน DevTools console: `docaskMock.vpn(false)` จำลอง VPN หลุด, `docaskMock.vpn(true)` กลับมาปกติ
-
-```powershell
-npm run dev:mock         # บังคับ mock แม้รันใน Tauri
+```
+%APPDATA%\DocAsk\
+  settings.json            ตั้งค่าแอป (ไม่มี key)
+  gateway.json             Gateway URL (ไม่มี key)
+  models.json              รายการโมเดล LLM
+  services.json            รายการ service
+  models\<embedding>\      โมเดล embedding ที่ดาวน์โหลด
+  services\<id>\index.db   index ของแต่ละ service
+  chats.db                 ประวัติแชต
 ```
 
-## 4. ตั้งค่าครั้งแรก (Setup Wizard)
+ลบทั้งหมดได้ที่ ตั้งค่า › เกี่ยวกับ › ลบข้อมูลทั้งหมด (การถอนติดตั้งไม่ลบข้อมูลเหล่านี้)
 
-แอปเปิด wizard 4 ขั้นอัตโนมัติ (เปิดซ้ำได้ที่ ตั้งค่า › เกี่ยวกับ › Setup Wizard)
+### 5. การอัปเดตโปรแกรม
 
-1. **Provider** — Group / Endpoint Display Name `Gosoft Agent Gateway`, Gateway URL `https://agent-gateway.gosoft.co.th` (base API `/v1`, แก้ได้ + ปุ่ม "คืนค่าตามคู่มือ"), API Type `Chat Completions`
-2. **Virtual Key** — ใส่ key ที่ได้จาก Admin (ขึ้นต้น `sk-`) แอปบันทึกลง Windows Credential Manager ชื่อ `DocAsk/Gosoft Agent Gateway`
-   หลังบันทึกแอปแสดงแค่ `sk-••••` + 4 ตัวท้าย
-   **ใช้ Virtual Key รายบุคคลเท่านั้น ห้ามใช้ LiteLLM Master Key และห้ามส่ง Screenshot ที่เห็น Key**
-3. **โมเดล** — 6 โมเดลตามคู่มือ (`godev1–3`, `gothink1–3`) หรือกด **นำเข้าจาก VS Code** แล้วเลือก `chatLanguageModels.json`
-   (แอปไม่อ่านฟิลด์ `apiKey` ในไฟล์นั้น) — ค่าเก็บที่ `%APPDATA%\DocAsk\models.json` ไม่มี key
-4. **ทดสอบ** — ส่ง `Reply exactly: GOSOFT LITELLM OK` ทีละโมเดล โมเดลที่ไม่ผ่านจะถูกซ่อนไว้ก่อน
+```mermaid
+flowchart LR
+    T["push tag v*"] --> GA["GitHub Actions<br/>build MSI + NSIS<br/>เซ็นด้วยกุญแจ updater"]
+    GA --> REL["GitHub Release<br/>ตัวติดตั้ง + .sig + latest.json"]
+    APP["DocAsk ที่ติดตั้งไว้<br/>(ตอนเปิดแอป)"] -->|อ่าน latest.json| REL
+    APP --> CHK{"เวอร์ชันใหม่กว่า<br/>+ ลายเซ็นถูกต้อง?"}
+    CHK -->|ใช่| INS["ดาวน์โหลด · ติดตั้ง · เปิดใหม่"]
+```
 
-เปลี่ยน key ภายหลัง: ตั้งค่า › Gateway และ Key › **Update API Key** (ทดสอบซ้ำโดยไม่ต้องตั้ง 6 โมเดลใหม่)
+แอปจะติดตั้งเฉพาะไฟล์ที่เซ็นด้วยกุญแจของโปรเจกต์นี้เท่านั้น เครื่องที่ติดตั้งแบบ NSIS จะอัปเดตด้วย NSIS และเครื่องที่ติดตั้งแบบ MSI จะอัปเดตด้วย MSI
 
-## 5. โมเดล Embedding (ไม่แนบในตัวติดตั้ง)
+## แก้ปัญหาที่พบบ่อย
 
-ไปที่ ตั้งค่า › Embedding และ Index (แอปมีแถบเตือนจนกว่าจะตั้งค่า)
+| อาการ | ตรวจสอบ |
+|---|---|
+| ต่อ Gateway ไม่ได้ | ต่อ VPN แล้วลองใหม่ · ตรวจ Gateway URL · แอปใช้ proxy และ certificate ของ Windows อัตโนมัติ |
+| 401 | Key หมดอายุ ผิด หรือถูก revoke — ตั้งค่า › Gateway และ Key › Update API Key |
+| 403 | ไม่มีสิทธิ์ใช้โมเดลนี้ — ตรวจสิทธิ์กับ Admin |
+| 404 | Gateway URL หรือชื่อโมเดลไม่ถูกต้อง |
+| 429 | เกินโควตา — รอสักครู่หรือติดต่อ Admin |
+| ดาวน์โหลดโมเดล embedding ไม่ได้ | เครือข่ายบล็อก huggingface.co — ดาวน์โหลดจากเครื่องอื่น แล้วใช้ "เลือกโฟลเดอร์" (ดูด้านล่าง) |
+| PDF ภาษาไทยอ่านออกมาเพี้ยน | กด `[n]` ดูข้อความที่อ่านได้ · ลองพิมพ์เป็น PDF ใหม่ หรือแปลงเป็นรูปให้ OCR อ่าน |
+| PDF สแกน / รูป ถูกข้าม | ตรวจว่าเปิด OCR อยู่ · รูปที่ไม่มีข้อความจะแสดง "ไม่พบข้อความในรูปภาพ" |
 
-| โมเดล | ขนาดโดยประมาณ | หมายเหตุ |
+<details>
+<summary><b>ใช้โมเดล embedding แบบ offline</b></summary>
+
+| โมเดล | ขนาด | หมายเหตุ |
 |---|---|---|
 | `multilingual-e5-small` (int8) | ~120 MB | ค่าเริ่มต้น เร็ว |
 | `multilingual-e5-base` (int8) | ~280 MB | แม่นขึ้น |
 | `bge-m3` (int8) | ~570 MB | แม่นที่สุด ใช้ RAM มาก |
 
-**(ก) ดาวน์โหลดในแอป** — ดึงจาก Hugging Face (`Xenova/<model>`) พร้อมแถบความคืบหน้า เก็บที่ `%APPDATA%\DocAsk\models\<model>\`
-
-**(ข) Offline / เครือข่ายบล็อก huggingface.co** — ดาวน์โหลดจากเครื่องอื่นแล้วคัดลอกมา จากนั้นกด "เลือกโฟลเดอร์"
-โฟลเดอร์ต้องมีโครงสร้าง:
+ดาวน์โหลดไฟล์จาก `https://huggingface.co/Xenova/<model>` วางเป็นโครงสร้างนี้ แล้วกด "เลือกโฟลเดอร์" ในหน้าตั้งค่า
 
 ```
 multilingual-e5-small\
-  onnx\model_quantized.onnx      ← https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx
+  onnx\model_quantized.onnx
   tokenizer.json
   config.json
   special_tokens_map.json
   tokenizer_config.json
 ```
+</details>
 
-(ใช้ `model.onnx` แบบไม่ quantize ได้เช่นกัน) เปลี่ยนโมเดล, ขนาดท่อน หรือ overlap แล้ว แอปจะ index ใหม่ทั้งหมดในรอบถัดไป
+---
 
-### รุ่นที่แนบโมเดลในตัวติดตั้ง
+## สำหรับนักพัฒนา
 
-วางโมเดลไว้ที่ `models\multilingual-e5-small\` (root ของ repo — ถูก `.gitignore` ไว้) แล้ว build ด้วย
+<details>
+<summary><b>Build จาก source</b></summary>
+
+เครื่องมือ: Node.js 20+, Rust stable (MSVC), Visual Studio Build Tools 2022 (workload *Desktop development with C++*)
 
 ```powershell
-npm run tauri build -- --features bundled-model --config src-tauri/tauri.bundled-model.conf.json
+npm install
+npm run dev              # หน้าจอในเบราว์เซอร์ http://localhost:5173 (mock mode อัตโนมัติ ไม่ต้องมี Rust)
+npm run tauri dev        # แอปจริง + hot reload
+npm run tauri build      # ตัวติดตั้ง MSI + NSIS (ต้องมี env TAURI_SIGNING_PRIVATE_KEY)
+cd src-tauri; cargo test # unit test ฝั่ง Rust
+npm run typecheck
 ```
 
-## 6. การใช้งาน
+- โมเดล OCR และ `pdfium.dll` ไม่อยู่ใน git — `scripts/fetch-ocr.mjs` ดาวน์โหลดเวอร์ชันที่ pin ไว้ให้อัตโนมัติก่อน dev/build
+- build โดยไม่เซ็น: `npm run tauri build -- --config '{"bundle":{"createUpdaterArtifacts":false}}'`
+- Mock mode: `http://localhost:5173/?setup=done&page=chat` ข้าม wizard · ใน console `docaskMock.vpn(false)` จำลอง VPN หลุด
+</details>
 
-1. **Service** (เมนูซ้าย › จัดการ) — สร้างกลุ่มเอกสาร: ชื่อ, รหัสย่อ 2–3 ตัว, สี, โฟลเดอร์ (หลายโฟลเดอร์ได้), โมเดลเริ่มต้น, reasoning effort, top-k, system prompt เพิ่มเติม
-   แต่ละ service มี index ของตัวเอง `%APPDATA%\DocAsk\services\<id>\index.db` — ลบ/ส่งออก/index ใหม่ทีละ service ได้
-2. แอปแปลงเอกสาร → ตัดท่อน (~1000 ตัวอักษร, overlap 150, ไม่ตัดกลางสระ/วรรณยุกต์) → embedding → เก็บใน SQLite
-   ติดตามโฟลเดอร์อัตโนมัติ index เฉพาะไฟล์ใหม่/แก้ไข และลบท่อนของไฟล์ที่ถูกลบ (ดูชนิดไฟล์ในข้อ 6.1)
-3. **แชตใหม่** — เลือก service ก่อน แล้วพิมพ์คำถาม แชตผูกกับ service นั้นตลอด (เปิด "ค้นทุก service" ได้ที่ช่องพิมพ์)
-4. คำตอบแสดงแบบ streaming พร้อม `[n]` — กดเพื่อดูท่อนต้นฉบับ (ไฟล์, หน้า, คะแนน) และ "เปิดไฟล์ต้นฉบับ"
-5. ถามต่อในแชตเดิมจะส่งคำถาม/คำตอบ 6 รอบล่าสุด (ตั้งค่าได้) — ไม่ส่งท่อนเอกสารของรอบเก่า และค้นเอกสารใหม่ทุกครั้ง
+<details>
+<summary><b>ออกเวอร์ชันใหม่</b></summary>
 
-### 6.1 ชนิดไฟล์ที่รองรับ และ OCR
+1. แก้ `"version"` ใน `package.json` และ `src-tauri/Cargo.toml`
+2. commit แล้ว push tag ที่ตรงกับเวอร์ชัน
+   ```powershell
+   git tag v0.3.0; git push origin main v0.3.0
+   ```
+3. GitHub Actions ([release.yml](.github/workflows/release.yml)) จะ build, เซ็น และสร้าง Release พร้อม `latest.json`
 
-| ชนิด | วิธีอ่าน |
-|---|---|
-| `.pdf` | ข้อความจาก PDFium (เก็บเลขหน้า) · หน้าที่เป็นภาพทั้งหน้า (สแกน) → OCR ทั้งหน้า · รูปในหน้า เช่น screenshot → OCR เพิ่มต่อท้ายหน้านั้น |
-| `.docx` | ข้อความใน `word/document.xml` + OCR รูปใน `word/media/` |
-| `.pptx` | ทีละสไลด์ (เลขสไลด์ = เลขหน้าในแหล่งอ้างอิง) + speaker notes + OCR รูปในสไลด์ |
-| `.txt` `.md` | ข้อความล้วน (UTF-8 / UTF-16) |
-| `.png` `.jpg` `.jpeg` `.bmp` `.webp` `.tif` | OCR ทั้งรูป |
+ต้องตั้ง secret `TAURI_SIGNING_PRIVATE_KEY` (เนื้อหาไฟล์ `%USERPROFILE%\.tauri\docask-updater.key`) ไว้ใน repo หนึ่งครั้ง
+**ห้าม commit กุญแจลับ** ถ้าทำหาย เครื่องที่ติดตั้งไปแล้วจะรับอัปเดตไม่ได้อีก
+</details>
 
-**OCR** ใช้ PaddleOCR (ตรวจตำแหน่งข้อความ PP-OCRv3 + อ่านภาษาไทย/อังกฤษ PP-OCRv5) ผ่าน ONNX Runtime บน CPU —
-ทำงานในเครื่องทั้งหมด และแนบมากับตัวติดตั้งแล้ว (โมเดล ~10 MB + `pdfium.dll` ~7 MB)
-ความเร็วประมาณ 0.5–2 วินาทีต่อรูป/หน้าสแกน · เปิด/ปิดได้ที่ ตั้งค่า › Embedding และ Index › OCR ข้อความในรูปภาพ
-
-ไฟล์ OCR และ PDFium ไม่อยู่ใน git — `scripts/fetch-ocr.mjs` ดาวน์โหลดเวอร์ชันที่ pin ไว้ลง `src-tauri/resources/`
-อัตโนมัติก่อน `tauri dev` / `tauri build` (รันเองได้ด้วย `node scripts/fetch-ocr.mjs`)
-
-ยังไม่รองรับ: `.doc` / `.ppt` (รุ่นเก่า — Save As เป็น `.docx` / `.pptx`), `.xlsx`, ลายมือ, ข้อความแนวตั้ง
-
-## 7. แก้ปัญหาที่พบบ่อย
-
-| อาการ | ตรวจสอบ |
-|---|---|
-| ต่อ Gateway ไม่ได้ | ต่อ VPN บริษัทแล้วลองใหม่ · ตรวจ Gateway URL · แอปใช้ proxy ของ Windows และ certificate store ของเครื่องอัตโนมัติ |
-| 401 | Virtual Key หมดอายุ ผิด หรือถูก revoke — กด Update API Key |
-| 403 | ไม่มีสิทธิ์ใช้โมเดลนี้ ตรวจสิทธิ์ Model/Policy และชนิดของ Key กับ Admin |
-| 404 | Gateway URL หรือชื่อโมเดล (Public Model ID) ไม่ถูกต้อง |
-| 429 | เกินโควตา RPM, TPM หรือ budget — รอสักครู่หรือติดต่อ Admin |
-| ไม่เห็นโมเดล | ทดสอบโมเดลอีกครั้ง (ตั้งค่า › Gateway › ทดสอบ) หรือ ตั้งค่า › โมเดล › "แสดงโมเดลที่ซ่อน" |
-| ดาวน์โหลดโมเดลไม่ได้ | เครือข่ายบล็อก huggingface.co — ใช้วิธี (ข) เลือกโฟลเดอร์ |
-| PDF ภาษาไทยอ่านออกมาเพี้ยน | กดชิป `[n]` ดูข้อความที่อ่านได้ · แอปแก้อักษรไทยซ้ำจาก PDF ที่สร้างด้วย Chrome/Skia ให้อัตโนมัติ · ถ้ายังเพี้ยน ลองพิมพ์เป็น PDF ใหม่ หรือแปลงเป็นรูปแล้วให้ OCR อ่าน |
-| PDF สแกน / รูป ถูกข้าม | ตรวจว่าเปิด OCR อยู่ (ตั้งค่า › Embedding และ Index) · รูปที่ไม่มีข้อความจะแสดง "ไม่พบข้อความในรูปภาพ" |
-| `npm run tauri build` error เรื่อง `link.exe` / MSVC | ติดตั้ง VS Build Tools (C++) ตามข้อ 1 · ถ้ามี Git `link.exe` บัง PATH ให้เปิดผ่าน "Developer PowerShell for VS" |
-| ลบข้อมูลทั้งหมด | ตั้งค่า › เกี่ยวกับ › ลบข้อมูลทั้งหมด (ลบ `%APPDATA%\DocAsk` และ key) — การถอนติดตั้งจะไม่ลบข้อมูลผู้ใช้ |
-
-## 8. แพ็กและแจกจ่าย (สำหรับ IT)
-
-- **NSIS** `DocAsk_x.y.z_x64-setup.exe` — ติดตั้งแบบ `currentUser` ไม่ต้องใช้สิทธิ์ admin มีภาษาไทย
-- **MSI** — silent install: `msiexec /i DocAsk_x.y.z_x64_en-US.msi /qn`
-- WebView2: `bundle.windows.webviewInstallMode` ตั้งเป็น `downloadBootstrapper` (เปลี่ยนเป็น `skip` ได้ถ้าเครื่องมีอยู่แล้ว) — ไม่ฝัง runtime
-- Code signing: ใส่ `certificateThumbprint` และ `timestampUrl` ใน `src-tauri/tauri.conf.json` บนเครื่อง build ของ IT เท่านั้น
-  **ห้าม commit ใบรับรองหรือรหัสผ่านลง repo**
-- เวอร์ชันมาจาก `package.json` (tauri.conf.json อ้างถึง) แสดงที่ ตั้งค่า › เกี่ยวกับ
-
-## 9. โครงสร้างโค้ด
+<details>
+<summary><b>โครงสร้างโค้ด</b></summary>
 
 ```
 src-tauri/src/
-  main.rs, lib.rs          จุดเริ่มแอป, ลงทะเบียน command
-  commands.rs              Tauri commands ทั้งหมด (+ RAG ask, prompt)
-  config.rs                paths, settings, gateway, models.json, นำเข้าจาก VS Code
-  secrets.rs               Virtual Key ↔ Windows Credential Manager (keyring)
-  errors.rs, redact.rs     ข้อความ error ตาม SPEC §3.3, ตัด sk-... ออกทุกข้อความ
-  llm.rs                   Chat Completions + SSE streaming (reqwest, rustls + Windows cert store)
-  gateway_test.rs          ทดสอบ "GOSOFT LITELLM OK"
-  ingest/                  Extractor trait, pdf (PDFium) / docx / pptx / text / image, ocr (PaddleOCR ONNX),
-                           chunker ภาษาไทย, watcher, indexer
-  embed.rs                 fastembed (ONNX, CPU) + ดาวน์โหลด/เลือกโฟลเดอร์โมเดล
-  store.rs, search.rs      SQLite ต่อ service + brute-force dot product (trait VectorStore)
+  lib.rs, commands.rs      จุดเริ่มแอป, Tauri commands, RAG ask + prompt
+  config.rs, secrets.rs    settings, models.json, Virtual Key ↔ Credential Manager
+  llm.rs, gateway_test.rs  Chat Completions + SSE streaming, ทดสอบโมเดล
+  errors.rs, redact.rs     ข้อความ error, ตัด sk-... ออกจากทุกข้อความ
+  ingest/                  pdf / docx / pptx / text / image, ocr, chunker ภาษาไทย, watcher, indexer
+  embed.rs                 fastembed (ONNX, CPU)
+  store.rs, search.rs      SQLite ต่อ service + vector search
   services.rs, chats.rs    service registry, ประวัติแชต
+  updater.rs               ตรวจ/ติดตั้งอัปเดต
 src/
-  App.tsx, state.tsx, theme.css (design tokens), i18n/th.ts
   pages/      Chat, NewChat, Services, Setup, Settings
-  components/ Sidebar, MessageList, Composer, CitationChip, SourcePanel, DocPanel, ServiceCard,
-              ServiceEditor, ModelPicker, StatusPill, ProgressBar, TroubleshootTable, GatewayForms, Markdown, ui
-  lib/        api.ts (invoke/listen wrapper), mock.ts, types.ts, gateway.ts
+  components/ Sidebar, MessageList, Composer, SourcePanel, ServiceEditor, …
+  lib/        api.ts (IPC wrapper), mock.ts, types.ts
 ```
+</details>
 
-### Unit tests (Rust)
+<details>
+<summary><b>ความปลอดภัย</b></summary>
 
-`cargo test` ครอบคลุม: chunker (ไทย/อังกฤษ/ผสม, ไม่ตัดกลางสระ-วรรณยุกต์), vector search, `redact()`,
-การแยก index ต่อ service, ประวัติแชต (N รอบล่าสุด), การ parse SSE, การนำเข้า VS Code (ไม่อ่าน apiKey), prompt
+- หน้าจอเรียกได้เฉพาะ Tauri IPC (CSP `connect-src ipc:`) ไม่มี HTTP ออกจากหน้าจอ
+- การอ่านไฟล์, เรียก Gateway และจัดการ key อยู่ใน Rust ทั้งหมด หน้าจอรู้แค่ "มี key แล้ว" และ 4 ตัวท้าย
+- ทุกข้อความ error ผ่าน `redact()` (ตัด `sk-...`, `Bearer ...`, ฟิลด์ api_key)
+- ไม่มี API key ใน repo, test หรือ config
 
-## 10. ความปลอดภัย
-
-- Frontend เรียกได้เฉพาะ Tauri IPC (CSP `connect-src ipc:`) ไม่มี HTTP ออกจาก frontend
-- Capabilities: `core:default` + `dialog:allow-open` เท่านั้น — การอ่านไฟล์, เรียก Gateway และจัดการ key อยู่ใน Rust ทั้งหมด
-- Frontend รู้แค่ "มี key แล้ว/ยังไม่มี" และ 4 ตัวท้าย · ช่องกรอก key ปิดการ copy/cut
-- ทุกข้อความ error ผ่าน `redact()` (ตัด `sk-...`, `Bearer ...`, ฟิลด์ api_key ใน JSON)
-- ไม่มี API key ใดๆ ใน repo, test, README หรือ config
-
-## 11. อัปเดตโปรแกรม (in-app update)
-
-แอปตรวจหาเวอร์ชันใหม่จากไฟล์ `latest.json` บน server ของบริษัท แล้วดาวน์โหลด ตรวจลายเซ็น ติดตั้ง และเปิดใหม่ให้เอง
-ข้อมูลผู้ใช้ (แชต, index, การตั้งค่า, Key) ไม่หายหลังอัปเดต
-
-**ฝั่งผู้ใช้**: แถบ "มี DocAsk เวอร์ชันใหม่" ขึ้นตอนเปิดแอป (ปิดได้ที่ ตั้งค่า › เกี่ยวกับ › ตรวจอัปเดตอัตโนมัติ)
-หรือกด ตั้งค่า › เกี่ยวกับ › **ตรวจหาอัปเดต** · URL อัปเดตแก้ได้ในหน้าเดียวกัน (ต้องเป็น https)
-
-### กุญแจเซ็นอัปเดต (ทำครั้งเดียว)
-
-```powershell
-npx tauri signer generate --ci -w "$env:USERPROFILE\.tauri\docask-updater.key"
-```
-
-- `docask-updater.key` = **กุญแจลับ** เก็บไว้กับคนที่ออก release เท่านั้น สำรองไว้ที่ปลอดภัย **ห้าม commit**
-  ถ้าทำหาย เครื่องที่ติดตั้งไปแล้วจะรับอัปเดตไม่ได้อีก ต้องติดตั้งใหม่ด้วยมือ
-- `docask-updater.key.pub` = กุญแจสาธารณะ ใส่ไว้ใน `src-tauri/tauri.conf.json` › `plugins.updater.pubkey` แล้ว
-- แอปจะไม่ติดตั้งไฟล์ที่ไม่ได้เซ็นด้วยกุญแจนี้
-
-### ออกเวอร์ชันใหม่
-
-1. แก้ `"version"` ใน `package.json` (เช่น `0.1.0` → `0.2.0`)
-2. รัน (ระบุที่ที่จะวางไฟล์บน server)
-   ```powershell
-   .\scripts\release.ps1 -BaseUrl https://files.example.internal/docask -Notes "- ค้นเร็วขึ้น`n- แก้ PDF ไทย"
-   ```
-   สคริปต์จะ build MSI + NSIS ที่เซ็นแล้ว และสร้างโฟลเดอร์ `release\<version>\` ที่มีตัวติดตั้งทั้งสอง + `latest.json`
-   (ตัวติดตั้งที่ build ด้วยสคริปต์นี้จะตั้ง URL อัปเดตเป็น `<BaseUrl>/latest.json` ไว้ให้)
-3. อัปโหลดทุกไฟล์ใน `release\<version>\` ขึ้น `<BaseUrl>/` (ทับ `latest.json` เดิม)
-
-เครื่องที่ติดตั้งแบบ NSIS จะอัปเดตด้วย NSIS, เครื่องที่ติดตั้งแบบ MSI จะอัปเดตด้วย MSI (ระบุแยกใน `latest.json`)
-
-> `npm run tauri build` ธรรมดาต้องมี env `TAURI_SIGNING_PRIVATE_KEY` ด้วย เพราะเปิด `createUpdaterArtifacts` ไว้ —
-> ถ้าจะ build โดยไม่เซ็น ให้ใช้ `npm run tauri build -- --config '{"bundle":{"createUpdaterArtifacts":false}}'`
+รายละเอียดความต้องการทั้งหมดอยู่ใน [SPEC.md](SPEC.md)
+</details>
