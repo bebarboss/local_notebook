@@ -1,0 +1,217 @@
+// Thin wrapper over Tauri invoke/listen. Falls back to an in-memory mock when the
+// page is not running inside Tauri, or when built with DOCASK_MOCK=1.
+// The frontend never sees the API key — only hasKey + last 4 chars.
+
+import type {
+  AppError,
+  AppInfo,
+  AskRequest,
+  AskStarted,
+  Chat,
+  ChatDelta,
+  ChatDone,
+  ChatSources,
+  DocItem,
+  DownloadProgress,
+  EmbeddingModelId,
+  EmbeddingStatus,
+  GatewayInfo,
+  GatewayStatus,
+  IndexProgress,
+  Message,
+  ModelConfig,
+  Service,
+  ServiceStats,
+  Settings,
+  TestResult,
+  UpdateInfo,
+  UpdateProgress,
+} from "./types";
+import { createMockBackend } from "./mock";
+
+
+
+export interface EventMap {
+  "chat-delta": ChatDelta;
+  "chat-sources": ChatSources;
+  "chat-done": ChatDone;
+  "chat-error": { requestId: string; chatId: string; error: AppError };
+  "index-progress": IndexProgress;
+  "gateway-test-result": TestResult;
+  "embed-download": DownloadProgress;
+  "gateway-status": GatewayStatus;
+  "services-changed": null;
+  "update-progress": UpdateProgress;
+}
+
+export type EventName = keyof EventMap;
+export type Unlisten = () => void;
+
+export interface NewService {
+  name: string;
+  code: string;
+  color: string;
+  folders: string[];
+  model: string;
+  effort: Service["effort"];
+  topK: number;
+  systemPrompt: string;
+}
+
+export interface Backend {
+  mock: boolean;
+  appInfo(): Promise<AppInfo>;
+  // settings
+  getSettings(): Promise<Settings>;
+  saveSettings(s: Settings): Promise<Settings>;
+  // gateway + key
+  getGateway(): Promise<GatewayInfo>;
+  setGatewayUrl(url: string): Promise<GatewayInfo>;
+  resetGatewayUrl(): Promise<GatewayInfo>;
+  saveApiKey(key: string): Promise<GatewayInfo>;
+  removeProvider(): Promise<void>;
+  gatewayStatus(): Promise<GatewayStatus>;
+  checkGateway(): Promise<GatewayStatus>;
+  // models
+  listModels(): Promise<ModelConfig[]>;
+  saveModels(models: ModelConfig[]): Promise<ModelConfig[]>;
+  resetModels(): Promise<ModelConfig[]>;
+  importVsCodeModels(path: string): Promise<ModelConfig[]>;
+  testModels(models?: string[]): Promise<TestResult[]>;
+  // services
+  listServices(): Promise<Service[]>;
+  serviceStats(): Promise<ServiceStats[]>;
+  createService(s: NewService): Promise<Service>;
+  updateService(s: Service): Promise<Service>;
+  deleteService(id: string, deleteChats: boolean): Promise<void>;
+  listDocuments(serviceId: string): Promise<DocItem[]>;
+  addDocuments(serviceId: string, paths: string[]): Promise<void>;
+  removeDocument(serviceId: string, docId: number): Promise<void>;
+  reindexService(serviceId: string, full: boolean): Promise<void>;
+  cancelIndex(serviceId: string): Promise<void>;
+  exportService(serviceId: string, destDir: string): Promise<string>;
+  // chats
+  listChats(serviceId: string | null, query: string): Promise<Chat[]>;
+  getChat(chatId: string): Promise<Chat>;
+  getMessages(chatId: string): Promise<Message[]>;
+  renameChat(chatId: string, title: string): Promise<Chat>;
+  deleteChat(chatId: string): Promise<void>;
+  deleteAllChats(): Promise<void>;
+  ask(req: AskRequest): Promise<AskStarted>;
+  stop(requestId: string): Promise<void>;
+  openSource(path: string): Promise<void>;
+  // embedding
+  embeddingStatus(): Promise<EmbeddingStatus>;
+  downloadEmbedding(model: EmbeddingModelId): Promise<void>;
+  useEmbeddingFolder(model: EmbeddingModelId, folder: string): Promise<EmbeddingStatus>;
+  reindexAll(): Promise<void>;
+  wipeAllData(): Promise<void>;
+  // updates
+  checkUpdate(): Promise<UpdateInfo>;
+  installUpdate(): Promise<void>;
+  // dialogs
+  pickFolder(): Promise<string | null>;
+  pickFiles(): Promise<string[]>;
+  pickJson(): Promise<string | null>;
+  // events
+  on<E extends EventName>(event: E, cb: (payload: EventMap[E]) => void): Promise<Unlisten>;
+}
+
+function inTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+export function toAppError(e: unknown): AppError {
+  if (e && typeof e === "object" && "message" in e) {
+    const o = e as { code?: string; message: string };
+    return { code: o.code ?? "unknown", message: String(o.message) };
+  }
+  return { code: "unknown", message: String(e) };
+}
+
+function createTauriBackend(): Backend {
+  // lazy imports keep the browser/mock bundle free of Tauri internals at startup
+  const core = import("@tauri-apps/api/core");
+  const ev = import("@tauri-apps/api/event");
+  const dialog = import("@tauri-apps/plugin-dialog");
+
+  const call = async <T>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
+    const { invoke } = await core;
+    try {
+      return await invoke<T>(cmd, args);
+    } catch (e) {
+      throw toAppError(e);
+    }
+  };
+
+  return {
+    mock: false,
+    appInfo: () => call("app_info"),
+    getSettings: () => call("get_settings"),
+    saveSettings: (settings) => call("save_settings", { settings }),
+    getGateway: () => call("get_gateway"),
+    setGatewayUrl: (url) => call("set_gateway_url", { url }),
+    resetGatewayUrl: () => call("reset_gateway_url"),
+    saveApiKey: (key) => call("save_api_key", { key }),
+    removeProvider: () => call("remove_provider"),
+    gatewayStatus: () => call("gateway_status"),
+    checkGateway: () => call("check_gateway"),
+    listModels: () => call("list_models"),
+    saveModels: (models) => call("save_models", { models }),
+    resetModels: () => call("reset_models"),
+    importVsCodeModels: (path) => call("import_vscode_models", { path }),
+    testModels: (models) => call("test_models", { models: models ?? null }),
+    listServices: () => call("list_services"),
+    serviceStats: () => call("service_stats"),
+    createService: (service) => call("create_service", { service }),
+    updateService: (service) => call("update_service", { service }),
+    deleteService: (id, deleteChats) => call("delete_service", { id, deleteChats }),
+    listDocuments: (serviceId) => call("list_documents", { serviceId }),
+    addDocuments: (serviceId, paths) => call("add_documents", { serviceId, paths }),
+    removeDocument: (serviceId, docId) => call("remove_document", { serviceId, docId }),
+    reindexService: (serviceId, full) => call("reindex_service", { serviceId, full }),
+    cancelIndex: (serviceId) => call("cancel_index", { serviceId }),
+    exportService: (serviceId, destDir) => call("export_service", { serviceId, destDir }),
+    listChats: (serviceId, query) => call("list_chats", { serviceId, query }),
+    getChat: (chatId) => call("get_chat", { chatId }),
+    getMessages: (chatId) => call("get_messages", { chatId }),
+    renameChat: (chatId, title) => call("rename_chat", { chatId, title }),
+    deleteChat: (chatId) => call("delete_chat", { chatId }),
+    deleteAllChats: () => call("delete_all_chats"),
+    ask: (req) => call("ask", { req }),
+    stop: (requestId) => call("stop_generation", { requestId }),
+    openSource: (path) => call("open_source_file", { path }),
+    embeddingStatus: () => call("embedding_status"),
+    downloadEmbedding: (model) => call("download_embedding", { model }),
+    useEmbeddingFolder: (model, folder) => call("use_embedding_folder", { model, folder }),
+    reindexAll: () => call("reindex_all"),
+    wipeAllData: () => call("wipe_all_data"),
+    checkUpdate: () => call("check_update"),
+    installUpdate: () => call("install_update"),
+    pickFolder: async () => {
+      const { open } = await dialog;
+      const r = await open({ directory: true, multiple: false });
+      return typeof r === "string" ? r : null;
+    },
+    pickFiles: async () => {
+      const { open } = await dialog;
+      const r = await open({
+        multiple: true,
+        filters: [{ name: "เอกสาร", extensions: ["pdf", "docx", "txt", "md"] }],
+      });
+      if (!r) return [];
+      return Array.isArray(r) ? r : [r];
+    },
+    pickJson: async () => {
+      const { open } = await dialog;
+      const r = await open({ multiple: false, filters: [{ name: "JSON", extensions: ["json"] }] });
+      return typeof r === "string" ? r : null;
+    },
+    on: async (event, cb) => {
+      const { listen } = await ev;
+      return listen(event, (e) => cb(e.payload as never));
+    },
+  };
+}
+
+export const api: Backend = !inTauri() || __DOCASK_MOCK__ ? createMockBackend() : createTauriBackend();

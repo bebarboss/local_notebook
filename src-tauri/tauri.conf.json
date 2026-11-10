@@ -1,0 +1,81 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DocAsk",
+  "version": "../package.json",
+  "identifier": "th.co.gosoft.docask",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "DocAsk",
+        "width": 1320,
+        "height": 840,
+        "minWidth": 900,
+        "minHeight": 600,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src ipc: http://ipc.localhost",
+      "freezePrototype": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "msi",
+      "nsis"
+    ],
+    "publisher": "Gosoft (Thailand)",
+    "category": "Productivity",
+    "shortDescription": "ถามตอบจากเอกสารในเครื่อง",
+    "longDescription": "DocAsk แปลงเอกสารเป็น vector ในเครื่อง แล้วถาม LLM ของบริษัทผ่าน Gosoft Agent Gateway",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "resources": [],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "",
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "allowDowngrades": false,
+      "wix": {
+        "language": [
+          "en-US"
+        ],
+        "upgradeCode": "8c3f5f0e-6d1a-4b7e-9a51-2f1d0c9b7e11"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "Thai",
+          "English"
+        ],
+        "displayLanguageSelector": false
+      }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYwNEVGRjAyRkZDQ0QyMUYKUldRZjBzei9BdjlPOEYzNjlod0hkU0laV29nYkNsYXo2NFlaK2lrVWdOSk5OUUpjamFWOThyZTMK",
+      "endpoints": [],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

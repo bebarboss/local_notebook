@@ -1,0 +1,56 @@
+[package]
+name = "docask"
+version = "0.1.0"
+description = "DocAsk — ถามตอบจากเอกสารในเครื่อง (RAG) ผ่าน Gosoft Agent Gateway"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "docask_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+default = []
+# Build variant that ships the embedding model inside the installer (see README).
+bundled-model = []
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-updater = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+tokio-util = "0.7"
+futures-util = "0.3"
+# rustls + Windows certificate store (corporate CA); system proxy is read by reqwest on Windows.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots", "http2", "charset"] }
+keyring = { version = "3", features = ["windows-native"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+fastembed = { version = "4", default-features = false, features = ["ort-download-binaries"] }
+pdf-extract = "0.7"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.36"
+unicode-segmentation = "1.12"
+notify = "6"
+sha2 = "0.10"
+hex = "0.4"
+dirs = "5"
+uuid = { version = "1", features = ["v4"] }
+regex = "1"
+once_cell = "1"
+log = "0.4"
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "unwind"   # pdf-extract may panic on odd files; we catch_unwind around it
+strip = true

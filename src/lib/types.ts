@@ -1,0 +1,230 @@
+// Shared types — must mirror the serde structs in src-tauri (camelCase).
+
+export type Effort = "low" | "medium" | "high";
+export type ThemeMode = "light" | "dark" | "system";
+
+export interface Service {
+  id: string;
+  name: string;
+  code: string; // 2–3 letters
+  color: string;
+  folders: string[];
+  /** individual files added with "+ เพิ่ม" outside the watched folders */
+  files: string[];
+  model: string;
+  effort: Effort;
+  topK: number;
+  systemPrompt: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ServiceStats {
+  serviceId: string;
+  documents: number;
+  chunks: number;
+  bytes: number;
+  skipped: number;
+  indexing: number;
+  lastIndexedAt: number | null;
+}
+
+export type DocStatus = "ready" | "indexing" | "queued" | "skipped" | "error";
+
+export interface DocItem {
+  id: number;
+  path: string;
+  name: string;
+  kind: string; // PDF / DOCX / TXT / MD
+  status: DocStatus;
+  chunkCount: number;
+  bytes: number;
+  progress: number; // 0..1 while indexing
+  message: string | null; // reason for skip/error
+}
+
+export interface Source {
+  n: number;
+  serviceId: string;
+  serviceName: string;
+  docPath: string;
+  fileName: string;
+  page: number | null;
+  ord: number;
+  score: number;
+  text: string;
+}
+
+export type Role = "user" | "assistant";
+
+export interface Message {
+  id: number;
+  chatId: string;
+  role: Role;
+  content: string;
+  model: string | null;
+  reasoningEffort: Effort | null;
+  sources: Source[];
+  elapsedMs: number | null;
+  error: string | null;
+  createdAt: number;
+}
+
+export interface Chat {
+  id: string;
+  serviceId: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ModelConfig {
+  id: string;
+  name: string;
+  url: string;
+  toolCalling: boolean;
+  vision: boolean;
+  thinking: boolean;
+  contextWindow: number;
+  maxOutputTokens: number;
+  supportsReasoningEffort: Effort[];
+  reasoningEffortFormat: string;
+  enabled: boolean;
+  /** hidden after failing the connection test */
+  hidden: boolean;
+}
+
+export interface GatewayInfo {
+  groupName: string;
+  displayName: string;
+  url: string;
+  defaultUrl: string;
+  apiType: string;
+  hasKey: boolean;
+  keyLast4: string | null;
+  lastTestAt: number | null;
+  lastTestPassed: number | null;
+  lastTestTotal: number | null;
+}
+
+export type GatewayState = "unknown" | "ok" | "unreachable" | "error";
+
+export interface GatewayStatus {
+  state: GatewayState;
+  message: string | null;
+  checkedAt: number;
+}
+
+export interface TestResult {
+  model: string;
+  ok: boolean;
+  reply: string | null;
+  error: string | null;
+  status: number | null;
+  elapsedMs: number;
+}
+
+export interface Settings {
+  theme: ThemeMode;
+  userName: string;
+  setupDone: boolean;
+  historyTurns: number;
+  autoDeleteDays: number; // 0 = never
+  topK: number;
+  threshold: number;
+  chunkSize: number;
+  chunkOverlap: number;
+  embeddingModel: EmbeddingModelId;
+  lastServiceId: string | null;
+  /** latest.json URL for in-app updates; empty = updates off */
+  updateUrl: string;
+  autoCheckUpdate: boolean;
+}
+
+export type EmbeddingModelId = "multilingual-e5-small" | "multilingual-e5-base" | "bge-m3";
+
+export interface EmbeddingStatus {
+  model: EmbeddingModelId;
+  ready: boolean;
+  path: string | null;
+  sizeBytes: number | null;
+}
+
+export interface DownloadProgress {
+  model: EmbeddingModelId;
+  file: string;
+  downloaded: number;
+  total: number | null;
+  done: boolean;
+  error: string | null;
+}
+
+export interface IndexProgress {
+  serviceId: string;
+  jobId: string;
+  docPath: string | null;
+  fileName: string | null;
+  done: number;
+  total: number;
+  docProgress: number;
+  phase: "scanning" | "extracting" | "embedding" | "done" | "cancelled" | "error";
+  message: string | null;
+}
+
+export interface AskRequest {
+  chatId: string | null;
+  serviceId: string;
+  question: string;
+  model: string;
+  effort: Effort;
+  allServices: boolean;
+}
+
+export interface AskStarted {
+  requestId: string;
+  chatId: string;
+  userMessage: Message;
+}
+
+export interface ChatDelta {
+  requestId: string;
+  chatId: string;
+  delta: string;
+}
+
+export interface ChatSources {
+  requestId: string;
+  chatId: string;
+  sources: Source[];
+}
+
+export interface ChatDone {
+  requestId: string;
+  chatId: string;
+  message: Message;
+}
+
+export interface AppInfo {
+  version: string;
+  dataDir: string;
+  mock: boolean;
+}
+
+export interface AppError {
+  code: string;
+  message: string;
+}
+
+export interface UpdateInfo {
+  available: boolean;
+  currentVersion: string;
+  version: string | null;
+  notes: string | null;
+  date: string | null;
+}
+
+export interface UpdateProgress {
+  downloaded: number;
+  total: number | null;
+  done: boolean;
+}

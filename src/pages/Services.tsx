@@ -1,0 +1,78 @@
+import { useState } from "react";
+import { ArrowLeft, Plus } from "lucide-react";
+import { api } from "../lib/api";
+import type { Service } from "../lib/types";
+import { useApp } from "../state";
+import { ServiceCard } from "../components/ServiceCard";
+import { ServiceEditor } from "../components/ServiceEditor";
+import { SkeletonList } from "../components/ui";
+
+export default function ServicesPage() {
+  const app = useApp();
+  const { services, stats, go, activeServiceId, setActiveServiceId, ready, toast } = app;
+  const [editing, setEditing] = useState<Service | "new" | null>(null);
+
+  const addDocs = async (s: Service) => {
+    const files = await api.pickFiles();
+    if (!files.length) return;
+    try {
+      await api.addDocuments(s.id, files);
+      toast(`เพิ่ม ${files.length} ไฟล์ใน ${s.code} กำลังทำ index`);
+      app.refreshServices();
+    } catch (e) { toast((e as { message: string }).message); }
+  };
+
+  return (
+    <main className="page" aria-label="จัดการ Service">
+      <div className="page-inner">
+        <div className="page-head">
+          <div className="l">
+            <button className="back-link" onClick={() => go({ name: "newchat" })}><ArrowLeft size={14} strokeWidth={1.8} aria-hidden="true" />กลับไปแชต</button>
+            <h1 className="page-title">Service</h1>
+            <p className="muted">แยกเอกสารเป็นกลุ่ม แต่ละ service มี index และการตั้งค่าของตัวเอง ตอนถามจะค้นเฉพาะใน service ที่เลือก</p>
+          </div>
+          <button className="btn btn-primary btn-lg" onClick={() => setEditing("new")}>
+            <Plus size={16} strokeWidth={2.2} aria-hidden="true" /> สร้าง service ใหม่
+          </button>
+        </div>
+
+        {!ready ? (
+          <SkeletonList rows={2} h={220} />
+        ) : (
+          <div className="svc-grid">
+            {services.map((s) => (
+              <ServiceCard
+                key={s.id}
+                service={s}
+                stats={stats[s.id]}
+                active={s.id === activeServiceId}
+                onOpen={() => { setActiveServiceId(s.id); go({ name: "newchat" }); }}
+                onSettings={() => setEditing(s)}
+                onAddDocs={() => addDocs(s)}
+              />
+            ))}
+            <button className="svc-new" onClick={() => setEditing("new")}>
+              <Plus size={24} strokeWidth={1.8} aria-hidden="true" />
+              <span style={{ fontWeight: 600 }}>สร้าง service ใหม่</span>
+              <span style={{ fontSize: 12 }}>เลือกโฟลเดอร์ ตั้งชื่อ และเลือกโมเดลเริ่มต้น</span>
+            </button>
+          </div>
+        )}
+
+        <div className="info-box" style={{ fontSize: 13, padding: "14px 16px" }}>
+          แต่ละ service มีฐาน vector แยกไฟล์กัน ลบหรือส่งออกทีละ service ได้ และคำถามใน service หนึ่งจะไม่ค้นเจอเอกสารของ service อื่น ยกเว้นเปิด "ค้นทุก service" ในช่องพิมพ์
+        </div>
+      </div>
+
+      {editing && (
+        <ServiceEditor
+          service={editing === "new" ? null : editing}
+          onClose={(saved) => {
+            setEditing(null);
+            if (saved && editing === "new") { setActiveServiceId(saved.id); toast(`สร้าง ${saved.name} แล้ว กำลังทำ index`); }
+          }}
+        />
+      )}
+    </main>
+  );
+}

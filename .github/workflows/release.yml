@@ -1,0 +1,51 @@
+# Push a tag like v0.2.0 → builds signed MSI + NSIS on Windows and publishes a GitHub Release
+# with latest.json. Installed copies of DocAsk pick it up on their next start.
+#
+# One-time setup: repo Settings › Secrets and variables › Actions › New repository secret
+#   TAURI_SIGNING_PRIVATE_KEY = contents of %USERPROFILE%\.tauri\docask-updater.key
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Check tag matches package.json version
+        shell: pwsh
+        run: |
+          $v = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ("v$v" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} != package.json version v$v" }
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          DOCASK_UPDATE_URL: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: DocAsk ${{ github.ref_name }}
+          releaseBody: "ติดตั้งครั้งแรก: ดาวน์โหลด DocAsk_*_x64-setup.exe · เครื่องที่ติดตั้งแล้วจะได้รับอัปเดตในแอปอัตโนมัติ"
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
