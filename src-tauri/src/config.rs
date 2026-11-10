@@ -56,6 +56,8 @@ pub struct Settings {
     /// latest.json URL for in-app updates (empty = updates off)
     pub update_url: String,
     pub auto_check_update: bool,
+    /// OCR pictures, scanned PDF pages and image files
+    pub ocr_enabled: bool,
 }
 
 impl Default for Settings {
@@ -74,6 +76,7 @@ impl Default for Settings {
             last_service_id: None,
             update_url: crate::updater::DEFAULT_UPDATE_URL.to_string(),
             auto_check_update: true,
+            ocr_enabled: true,
         }
     }
 }

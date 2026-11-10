@@ -1,8 +1,11 @@
-//! Document ingestion: extract → chunk → embed → store, incrementally, in the background.
+﻿//! Document ingestion: extract → chunk → embed → store, incrementally, in the background.
 
 pub mod chunker;
 pub mod docx;
+pub mod image;
+pub mod ocr;
 pub mod pdf;
+pub mod pptx;
 pub mod text;
 pub mod watcher;
 
@@ -32,7 +35,13 @@ pub trait Extractor: Send + Sync {
 }
 
 fn extractors() -> Vec<Box<dyn Extractor>> {
-    vec![Box::new(pdf::PdfExtractor), Box::new(docx::DocxExtractor), Box::new(text::TextExtractor)]
+    vec![
+        Box::new(pdf::PdfExtractor),
+        Box::new(docx::DocxExtractor),
+        Box::new(pptx::PptxExtractor),
+        Box::new(text::TextExtractor),
+        Box::new(image::ImageExtractor),
+    ]
 }
 
 pub fn extractor_for(path: &Path) -> Option<Box<dyn Extractor>> {
@@ -220,7 +229,7 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
     progress(None, 0, 0, 0.0, "scanning", None);
 
     // a different embedding model (or chunk settings) invalidates every vector
-    let signature = format!("{}|{}|{}", model.as_str(), opts.size, opts.overlap);
+    let signature = format!("{}|{}|{}|ocr{}", model.as_str(), opts.size, opts.overlap, u8::from(ocr::engine().is_some()));
     {
         let mut s = store.lock();
         let old = s.meta("signature")?;
@@ -297,8 +306,8 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
                 continue;
             }
             Ok(c) => c,
-            Err(e) if e.code == "scanned_pdf" => {
-                store.lock().upsert_document(&p, &hash, *mtime, *bytes, "skipped", Some(pdf::SCANNED_PDF))?;
+            Err(e) if matches!(e.code.as_str(), "scanned_pdf" | "ocr_off" | "no_text") => {
+                store.lock().upsert_document(&p, &hash, *mtime, *bytes, "skipped", Some(&e.message))?;
                 continue;
             }
             Err(e) => {
@@ -346,6 +355,34 @@ mod tests {
         let c = extract_chunks(&f, ChunkOptions { size: 500, overlap: 50 }).unwrap();
         assert!(c.len() > 3);
         assert!(c.iter().all(|(p, _)| p.is_none()));
+    }
+
+    /// Real models + pdfium: `cargo test real_documents -- --ignored --nocapture`
+    /// with DOCASK_TEST_RES=<src-tauri/resources> and DOCASK_TEST_DIR=<folder with mixed.pdf, scanned.pdf, screen.png>.
+    #[test]
+    #[ignore]
+    fn real_documents() {
+        let res = PathBuf::from(std::env::var("DOCASK_TEST_RES").expect("DOCASK_TEST_RES"));
+        let dir = PathBuf::from(std::env::var("DOCASK_TEST_DIR").expect("DOCASK_TEST_DIR"));
+        ocr::init(res.join("ocr"));
+        pdf::init(res.join("pdfium").join("pdfium.dll"));
+        for name in ["mixed.pdf", "scanned.pdf", "screen.png"] {
+            let t = std::time::Instant::now();
+            let pages = extractor_for(&dir.join(name)).unwrap().extract(&dir.join(name)).unwrap();
+            println!("===== {name} ({:?})", t.elapsed());
+            for p in &pages {
+                println!("--- page {:?}
+{}", p.page, p.text.trim());
+            }
+            let all: String = pages.iter().map(|p| p.text.as_str()).collect();
+            assert!(all.contains("ลาออก"), "{name}: Thai text missing");
+            if name == "mixed.pdf" {
+                assert!(all.contains("คู่มือการแจ้งลาออก"), "Thai text layer not de-duplicated");
+                assert!(all.contains("เอกสารนี้อธิบายขั้นตอน"), "Thai text layer not de-duplicated");
+                assert!(all.contains("ผู้ดำเนินการ"), "SARA AM cluster not de-duplicated");
+            }
+            assert!(all.contains("Job Data"), "{name}: English text from image missing");
+        }
     }
 
     #[test]

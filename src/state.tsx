@@ -50,6 +50,7 @@ export const DEFAULT_SETTINGS: Settings = {
   lastServiceId: null,
   updateUrl: "",
   autoCheckUpdate: true,
+  ocrEnabled: true,
 };
 
 export function AppProvider({ children }: { children: ReactNode }) {

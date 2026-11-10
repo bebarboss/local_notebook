@@ -20,7 +20,23 @@ impl Extractor for DocxExtractor {
         zip.by_name("word/document.xml")
             .map_err(|_| AppError::new("docx", "ไม่พบ word/document.xml ในไฟล์ DOCX"))?
             .read_to_string(&mut xml)?;
-        Ok(vec![Page { page: None, text: document_xml_to_text(&xml)? }])
+        let mut text = document_xml_to_text(&xml)?;
+
+        // pictures inside the document (screenshots, scanned inserts) → OCR
+        if super::ocr::engine().is_some() {
+            let mut media: Vec<String> = zip.file_names().filter(|n| n.starts_with("word/media/")).map(str::to_string).collect();
+            media.sort();
+            for name in media {
+                let mut bytes = Vec::new();
+                if zip.by_name(&name).ok().and_then(|mut f| f.read_to_end(&mut bytes).ok()).is_none() {
+                    continue;
+                }
+                if let Some(t) = super::ocr::bytes_text(&bytes) {
+                    text.push_str(&format!("\n{}\n{t}\n", super::pdf::IMAGE_MARK));
+                }
+            }
+        }
+        Ok(vec![Page { page: None, text }])
     }
 }
 

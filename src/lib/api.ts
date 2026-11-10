@@ -107,6 +107,7 @@ export interface Backend {
   reindexAll(): Promise<void>;
   wipeAllData(): Promise<void>;
   // updates
+  ocrStatus(): Promise<{ available: boolean; enabled: boolean }>;
   checkUpdate(): Promise<UpdateInfo>;
   installUpdate(): Promise<void>;
   // dialogs
@@ -186,6 +187,7 @@ function createTauriBackend(): Backend {
     useEmbeddingFolder: (model, folder) => call("use_embedding_folder", { model, folder }),
     reindexAll: () => call("reindex_all"),
     wipeAllData: () => call("wipe_all_data"),
+    ocrStatus: () => call("ocr_status"),
     checkUpdate: () => call("check_update"),
     installUpdate: () => call("install_update"),
     pickFolder: async () => {
@@ -197,7 +199,7 @@ function createTauriBackend(): Backend {
       const { open } = await dialog;
       const r = await open({
         multiple: true,
-        filters: [{ name: "เอกสาร", extensions: ["pdf", "docx", "txt", "md"] }],
+        filters: [{ name: "เอกสารและรูปภาพ", extensions: ["pdf", "docx", "pptx", "txt", "md", "png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff"] }],
       });
       if (!r) return [];
       return Array.isArray(r) ? r : [r];

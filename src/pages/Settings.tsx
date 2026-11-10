@@ -307,6 +307,7 @@ function EmbeddingSection() {
             try { await app.updateSettings({ embeddingModel: model }); setSt(await api.useEmbeddingFolder(model, f)); app.toast("ใช้โมเดลจากโฟลเดอร์แล้ว"); } catch (e) { app.toast((e as { message: string }).message); }
           }}><FolderOpen size={16} strokeWidth={1.8} aria-hidden="true" />เลือกโฟลเดอร์</button>
         </div>
+        <OcrRow />
         <div className="list-row">
           <div className="l"><span className="t">Index ใหม่ทั้งหมด</span><span className="d">ลบ vector เดิมทุก service แล้วทำใหม่ด้วยโมเดลปัจจุบัน</span></div>
           <button className="btn" disabled={!st?.ready} onClick={() => setConfirmReindex(true)}>Index ใหม่ทั้งหมด</button>
@@ -464,5 +465,31 @@ function UpdateRows() {
       </div>
       {found && <UpdateDialog info={found} onClose={() => setFound(null)} />}
     </>
+  );
+}
+
+function OcrRow() {
+  const { settings, updateSettings, toast } = useApp();
+  const [available, setAvailable] = useState<boolean | null>(null);
+  useEffect(() => { api.ocrStatus().then((s) => setAvailable(s.available)).catch(() => setAvailable(false)); }, []);
+  return (
+    <div className="list-row">
+      <div className="l">
+        <span className="t">OCR ข้อความในรูปภาพ</span>
+        <span className="d">
+          อ่านข้อความจาก PDF สแกน, รูปภาพ (.png .jpg ฯลฯ) และรูปใน PDF / Word / PowerPoint เช่น screenshot หน้าจอระบบ ·
+          ไทย + อังกฤษ (PaddleOCR) ทำงานในเครื่อง · เปิด/ปิดแล้วจะ index ใหม่ทั้งหมด
+        </span>
+        {available === false && <span className="d" style={{ color: "var(--warn-text)" }}>ไม่พบไฟล์โมเดล OCR ในตัวติดตั้ง</span>}
+      </div>
+      <Switch
+        checked={settings.ocrEnabled}
+        label="OCR ข้อความในรูปภาพ"
+        onChange={async (v) => {
+          await updateSettings({ ocrEnabled: v });
+          toast(v ? "เปิด OCR แล้ว — เอกสารจะถูก index ใหม่" : "ปิด OCR แล้ว");
+        }}
+      />
+    </div>
   );
 }

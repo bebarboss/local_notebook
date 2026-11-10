@@ -26,6 +26,8 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             let state = AppState::new(&handle).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            init_resources(app.handle());
+            ingest::ocr::set_enabled(state.settings.lock().ocr_enabled);
             app.manage(state);
 
             // watch every service folder and catch up on changes made while closed
@@ -85,9 +87,31 @@ pub fn run() {
             commands::download_embedding,
             commands::use_embedding_folder,
             commands::wipe_all_data,
+            commands::ocr_status,
             updater::check_update,
             updater::install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DocAsk");
+}
+
+/// Find the bundled OCR models and pdfium.dll: installed resource dir first,
+/// then `src-tauri/resources` when running from source.
+fn init_resources(app: &tauri::AppHandle) {
+    let mut roots = Vec::new();
+    if let Ok(r) = app.path().resource_dir() {
+        roots.push(r.join("resources"));
+        roots.push(r);
+    }
+    roots.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"));
+    if let Some(root) = roots.iter().find(|r| r.join("ocr").join("rec.onnx").is_file()) {
+        ingest::ocr::init(root.join("ocr"));
+    }
+    let dll = roots
+        .iter()
+        .flat_map(|r| [r.join("pdfium.dll"), r.join("pdfium").join("pdfium.dll")])
+        .find(|p| p.is_file());
+    if let Some(dll) = dll {
+        ingest::pdf::init(dll);
+    }
 }

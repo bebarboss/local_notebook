@@ -116,11 +116,30 @@ npm run tauri build -- --features bundled-model --config src-tauri/tauri.bundled
 
 1. **Service** (เมนูซ้าย › จัดการ) — สร้างกลุ่มเอกสาร: ชื่อ, รหัสย่อ 2–3 ตัว, สี, โฟลเดอร์ (หลายโฟลเดอร์ได้), โมเดลเริ่มต้น, reasoning effort, top-k, system prompt เพิ่มเติม
    แต่ละ service มี index ของตัวเอง `%APPDATA%\DocAsk\services\<id>\index.db` — ลบ/ส่งออก/index ใหม่ทีละ service ได้
-2. แอปแปลง `.pdf .docx .txt .md` → ตัดท่อน (~1000 ตัวอักษร, overlap 150, ไม่ตัดกลางสระ/วรรณยุกต์) → embedding → เก็บใน SQLite
-   ติดตามโฟลเดอร์อัตโนมัติ index เฉพาะไฟล์ใหม่/แก้ไข และลบท่อนของไฟล์ที่ถูกลบ · PDF สแกน (ไม่มีข้อความ) จะถูกข้าม
+2. แอปแปลงเอกสาร → ตัดท่อน (~1000 ตัวอักษร, overlap 150, ไม่ตัดกลางสระ/วรรณยุกต์) → embedding → เก็บใน SQLite
+   ติดตามโฟลเดอร์อัตโนมัติ index เฉพาะไฟล์ใหม่/แก้ไข และลบท่อนของไฟล์ที่ถูกลบ (ดูชนิดไฟล์ในข้อ 6.1)
 3. **แชตใหม่** — เลือก service ก่อน แล้วพิมพ์คำถาม แชตผูกกับ service นั้นตลอด (เปิด "ค้นทุก service" ได้ที่ช่องพิมพ์)
 4. คำตอบแสดงแบบ streaming พร้อม `[n]` — กดเพื่อดูท่อนต้นฉบับ (ไฟล์, หน้า, คะแนน) และ "เปิดไฟล์ต้นฉบับ"
 5. ถามต่อในแชตเดิมจะส่งคำถาม/คำตอบ 6 รอบล่าสุด (ตั้งค่าได้) — ไม่ส่งท่อนเอกสารของรอบเก่า และค้นเอกสารใหม่ทุกครั้ง
+
+### 6.1 ชนิดไฟล์ที่รองรับ และ OCR
+
+| ชนิด | วิธีอ่าน |
+|---|---|
+| `.pdf` | ข้อความจาก PDFium (เก็บเลขหน้า) · หน้าที่เป็นภาพทั้งหน้า (สแกน) → OCR ทั้งหน้า · รูปในหน้า เช่น screenshot → OCR เพิ่มต่อท้ายหน้านั้น |
+| `.docx` | ข้อความใน `word/document.xml` + OCR รูปใน `word/media/` |
+| `.pptx` | ทีละสไลด์ (เลขสไลด์ = เลขหน้าในแหล่งอ้างอิง) + speaker notes + OCR รูปในสไลด์ |
+| `.txt` `.md` | ข้อความล้วน (UTF-8 / UTF-16) |
+| `.png` `.jpg` `.jpeg` `.bmp` `.webp` `.tif` | OCR ทั้งรูป |
+
+**OCR** ใช้ PaddleOCR (ตรวจตำแหน่งข้อความ PP-OCRv3 + อ่านภาษาไทย/อังกฤษ PP-OCRv5) ผ่าน ONNX Runtime บน CPU —
+ทำงานในเครื่องทั้งหมด และแนบมากับตัวติดตั้งแล้ว (โมเดล ~10 MB + `pdfium.dll` ~7 MB)
+ความเร็วประมาณ 0.5–2 วินาทีต่อรูป/หน้าสแกน · เปิด/ปิดได้ที่ ตั้งค่า › Embedding และ Index › OCR ข้อความในรูปภาพ
+
+ไฟล์ OCR และ PDFium ไม่อยู่ใน git — `scripts/fetch-ocr.mjs` ดาวน์โหลดเวอร์ชันที่ pin ไว้ลง `src-tauri/resources/`
+อัตโนมัติก่อน `tauri dev` / `tauri build` (รันเองได้ด้วย `node scripts/fetch-ocr.mjs`)
+
+ยังไม่รองรับ: `.doc` / `.ppt` (รุ่นเก่า — Save As เป็น `.docx` / `.pptx`), `.xlsx`, ลายมือ, ข้อความแนวตั้ง
 
 ## 7. แก้ปัญหาที่พบบ่อย
 
@@ -133,7 +152,8 @@ npm run tauri build -- --features bundled-model --config src-tauri/tauri.bundled
 | 429 | เกินโควตา RPM, TPM หรือ budget — รอสักครู่หรือติดต่อ Admin |
 | ไม่เห็นโมเดล | ทดสอบโมเดลอีกครั้ง (ตั้งค่า › Gateway › ทดสอบ) หรือ ตั้งค่า › โมเดล › "แสดงโมเดลที่ซ่อน" |
 | ดาวน์โหลดโมเดลไม่ได้ | เครือข่ายบล็อก huggingface.co — ใช้วิธี (ข) เลือกโฟลเดอร์ |
-| PDF ภาษาไทยอ่านออกมาเพี้ยน | เปลี่ยน `ingest/pdf.rs` เป็น `pdfium-render` (ใช้ trait `Extractor` เดิม) |
+| PDF ภาษาไทยอ่านออกมาเพี้ยน | กดชิป `[n]` ดูข้อความที่อ่านได้ · แอปแก้อักษรไทยซ้ำจาก PDF ที่สร้างด้วย Chrome/Skia ให้อัตโนมัติ · ถ้ายังเพี้ยน ลองพิมพ์เป็น PDF ใหม่ หรือแปลงเป็นรูปแล้วให้ OCR อ่าน |
+| PDF สแกน / รูป ถูกข้าม | ตรวจว่าเปิด OCR อยู่ (ตั้งค่า › Embedding และ Index) · รูปที่ไม่มีข้อความจะแสดง "ไม่พบข้อความในรูปภาพ" |
 | `npm run tauri build` error เรื่อง `link.exe` / MSVC | ติดตั้ง VS Build Tools (C++) ตามข้อ 1 · ถ้ามี Git `link.exe` บัง PATH ให้เปิดผ่าน "Developer PowerShell for VS" |
 | ลบข้อมูลทั้งหมด | ตั้งค่า › เกี่ยวกับ › ลบข้อมูลทั้งหมด (ลบ `%APPDATA%\DocAsk` และ key) — การถอนติดตั้งจะไม่ลบข้อมูลผู้ใช้ |
 
@@ -157,7 +177,8 @@ src-tauri/src/
   errors.rs, redact.rs     ข้อความ error ตาม SPEC §3.3, ตัด sk-... ออกทุกข้อความ
   llm.rs                   Chat Completions + SSE streaming (reqwest, rustls + Windows cert store)
   gateway_test.rs          ทดสอบ "GOSOFT LITELLM OK"
-  ingest/                  Extractor trait, pdf/docx/text, chunker ภาษาไทย, watcher, indexer
+  ingest/                  Extractor trait, pdf (PDFium) / docx / pptx / text / image, ocr (PaddleOCR ONNX),
+                           chunker ภาษาไทย, watcher, indexer
   embed.rs                 fastembed (ONNX, CPU) + ดาวน์โหลด/เลือกโฟลเดอร์โมเดล
   store.rs, search.rs      SQLite ต่อ service + brute-force dot product (trait VectorStore)
   services.rs, chats.rs    service registry, ประวัติแชต

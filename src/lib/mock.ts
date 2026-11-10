@@ -96,7 +96,7 @@ export function createMockBackend(): Backend {
   let settings: Settings = {
     theme: "system", userName: "navaritrod", setupDone: false, historyTurns: 6, autoDeleteDays: 0,
     topK: 5, threshold: 0.3, chunkSize: 1000, chunkOverlap: 150, embeddingModel: "multilingual-e5-small", lastServiceId: "hr",
-    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true,
+    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true,
   };
   try {
     const saved = localStorage.getItem("docask-mock-settings");
@@ -279,7 +279,7 @@ export function createMockBackend(): Backend {
       }
       const userMessage: Message = { id: ++seq, chatId, role: "user", content: req.question, model: null, reasoningEffort: null, sources: [], elapsedMs: null, error: null, createdAt: now() };
       messages[chatId].push(userMessage);
-      const requestId = uid("req");
+      const requestId = req.requestId ?? uid("req");
       const st = { stopped: false };
       streams.set(requestId, st);
       const cid = chatId;
@@ -302,6 +302,8 @@ export function createMockBackend(): Backend {
         const c = chats.find((x) => x.id === cid);
         if (c) c.updatedAt = now();
         streams.delete(requestId);
+        status = { state: "ok", message: null, checkedAt: now() };
+        emit("gateway-status", status);
         emit("chat-done", { requestId, chatId: cid, message: msg });
       })();
       return { requestId, chatId, userMessage };
@@ -322,6 +324,7 @@ export function createMockBackend(): Backend {
     useEmbeddingFolder: async (model, folder) => { embedding = { model, ready: true, path: folder, sizeBytes: null }; return clone(embedding); },
     reindexAll: async () => {},
     wipeAllData: async () => { try { localStorage.removeItem("docask-mock-settings"); } catch { /* ignore */ } location.reload(); },
+    ocrStatus: async () => ({ available: true, enabled: settings.ocrEnabled }),
     checkUpdate: async () => {
       await wait(500);
       if (!settings.updateUrl) throw { code: "update_no_url", message: "ยังไม่ได้ตั้ง URL อัปเดต — ไปที่ ตั้งค่า › เกี่ยวกับ" };

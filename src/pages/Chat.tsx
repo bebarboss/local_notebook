@@ -65,6 +65,10 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
   }, [chatId]);
 
   // ---- streaming events
+  // Subscribe ONCE. Re-subscribing on every context change (e.g. a gateway-status
+  // event) leaves a gap in which chat-done can be lost and the UI stays "streaming".
+  const appRef = useRef(app);
+  appRef.current = app;
   useEffect(() => {
     const offs = [
       api.on("chat-sources", (p) => setStream((s) => (s && s.requestId === p.requestId ? { ...s, sources: p.sources } : s))),
@@ -73,17 +77,17 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
         if (streamRef.current?.requestId !== p.requestId) return;
         setMessages((m) => [...(m ?? []), p.message]);
         setStream(null);
-        bumpChats();
+        appRef.current.bumpChats();
       }),
       api.on("chat-error", (p) => {
         if (streamRef.current?.requestId !== p.requestId) return;
         setStream((s) => (s ? { ...s, error: p.error.message } : s));
-        bumpChats();
-        if (p.error.code === "gateway_unreachable") app.recheckGateway();
+        appRef.current.bumpChats();
+        if (p.error.code === "gateway_unreachable") appRef.current.recheckGateway();
       }),
     ];
     return () => offs.forEach((o) => o.then((f) => f()));
-  }, [bumpChats, app]);
+  }, []);
 
   // keep scrolled to bottom while streaming
   useEffect(() => {
@@ -97,11 +101,15 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
       const req: AskRequest = {
         chatId: chat?.id ?? (chatId === "new" ? null : chatId),
         serviceId, question, model, effort, allServices, ...override,
+        // known before the call, so no early delta/done event can be missed
+        requestId: crypto.randomUUID(),
       };
-      setStream({ requestId: null, chatId: req.chatId, content: "", sources: [], error: null });
+      const fresh: Stream = { requestId: req.requestId!, chatId: req.chatId, content: "", sources: [], error: null };
+      streamRef.current = fresh;
+      setStream(fresh);
       try {
         const r = await api.ask(req);
-        setStream((s) => (s ? { ...s, requestId: r.requestId, chatId: r.chatId } : s));
+        setStream((s) => (s && s.requestId === r.requestId ? { ...s, chatId: r.chatId } : s));
         setMessages((m) => [...(m ?? []), r.userMessage]);
         if (!req.chatId) {
           const c = await api.getChat(r.chatId).catch(() => null);

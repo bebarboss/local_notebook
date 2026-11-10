@@ -10,3 +10,4 @@ models/
 *.onnx
 tsconfig.tsbuildinfo
 release/
+src-tauri/resources/
