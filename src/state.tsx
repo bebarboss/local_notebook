@@ -53,6 +53,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ocrEnabled: true,
   keepImages: true,
   rerank: true,
+  hybrid: true,
 };
 
 export function AppProvider({ children }: { children: ReactNode }) {

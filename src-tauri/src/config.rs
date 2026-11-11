@@ -62,6 +62,8 @@ pub struct Settings {
     pub keep_images: bool,
     /// re-order search hits with the reranker model (when it is downloaded)
     pub rerank: bool,
+    /// also search by exact words (trigram keyword index) and fuse with vector search
+    pub hybrid: bool,
 }
 
 impl Default for Settings {
@@ -83,6 +85,7 @@ impl Default for Settings {
             ocr_enabled: true,
             keep_images: true,
             rerank: true,
+            hybrid: true,
         }
     }
 }

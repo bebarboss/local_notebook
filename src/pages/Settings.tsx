@@ -347,6 +347,7 @@ function SearchSection() {
       <div className="list-card">
         <NumberRow label="top-k เริ่มต้น" desc="ค่าเริ่มต้นของ service ใหม่ (แต่ละ service ตั้งเองได้)" value={settings.topK} min={1} max={30} onSave={(v) => updateSettings({ topK: v })} />
         <NumberRow label="Threshold" desc="ตัดท่อนที่คะแนนความเกี่ยวข้องต่ำกว่าค่านี้ (0–1)" value={settings.threshold} min={0} max={1} step={0.05} onSave={(v) => updateSettings({ threshold: v })} />
+        <HybridRow />
         <RerankRow />
         <NumberRow label="ขนาดท่อน (ตัวอักษร)" desc="เปลี่ยนแล้วจะ index ใหม่ทั้งหมดในรอบถัดไป" value={settings.chunkSize} min={300} max={4000} step={50} onSave={(v) => updateSettings({ chunkSize: v })} />
         <NumberRow label="Overlap (ตัวอักษร)" desc="ส่วนที่ซ้อนกันระหว่างท่อน · เปลี่ยนแล้วจะ index ใหม่ทั้งหมด" value={settings.chunkOverlap} min={0} max={1000} step={10} onSave={(v) => updateSettings({ chunkOverlap: v })} />
@@ -527,6 +528,29 @@ function RerankRow() {
   );
 }
 
+function HybridRow() {
+  const { settings, updateSettings, toast } = useApp();
+  return (
+    <div className="list-row">
+      <div className="l">
+        <span className="t">ค้นด้วยคำตรงตัวด้วย (hybrid search)</span>
+        <span className="d">
+          ค้นตามความหมาย (vector) คู่กับค้นคำที่ตรงตัว แล้วรวมผล · ช่วยมากกับรหัส เลขที่สัญญา ชื่อคน ชื่อเฉพาะ ·
+          ทำงานในเครื่อง แทบไม่ช้าลง
+        </span>
+      </div>
+      <Switch
+        checked={settings.hybrid}
+        label="ค้นด้วยคำตรงตัวด้วย (hybrid search)"
+        onChange={async (v) => {
+          await updateSettings({ hybrid: v });
+          toast(v ? "เปิด hybrid search แล้ว" : "ปิดแล้ว — ค้นตามความหมายอย่างเดียว");
+        }}
+      />
+    </div>
+  );
+}
+
 function KeepImagesRow() {
   const { settings, updateSettings, toast } = useApp();
   return (
@@ -534,7 +558,7 @@ function KeepImagesRow() {
       <div className="l">
         <span className="t">แสดงรูปจากเอกสาร</span>
         <span className="d">
-          เก็บรูปใน PDF / Word / PowerPoint และหน้าสแกนไว้ในเครื่อง แล้วแสดงใต้คำตอบและในแหล่งอ้างอิง ·
+          เก็บรูปใน PDF / Word / PowerPoint และหน้าสแกนไว้ในเครื่อง แล้วแสดงเมื่อเปิดแหล่งอ้างอิง ·
           index ใหญ่ขึ้นราว 50–150 KB ต่อรูป · รูปไม่ถูกส่งไป Gateway · เปิด/ปิดแล้วจะ index ใหม่ทั้งหมด
         </span>
       </div>

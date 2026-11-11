@@ -97,7 +97,7 @@ export function createMockBackend(): Backend {
   let settings: Settings = {
     theme: "system", userName: "navaritrod", setupDone: false, historyTurns: 6, autoDeleteDays: 0,
     topK: 5, threshold: 0.3, chunkSize: 1000, chunkOverlap: 150, embeddingModel: "multilingual-e5-small", lastServiceId: "hr",
-    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true, rerank: true,
+    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true, rerank: true, hybrid: true,
   };
   try {
     const saved = localStorage.getItem("docask-mock-settings");
@@ -310,7 +310,8 @@ export function createMockBackend(): Backend {
         const started = now();
         const { text, sources } = answerFor(req.question, svc);
         const base = req.allServices ? sources.map((s) => ({ ...s })) : sources;
-        const srcs = settings.rerank && reranker.ready ? base.map((s, i) => ({ ...s, rerankScore: 0.97 - i * 0.21 })) : base;
+        const ranked = settings.rerank && reranker.ready ? base.map((s, i) => ({ ...s, rerankScore: 0.97 - i * 0.21 })) : base;
+        const srcs = settings.hybrid ? ranked.map((s, i) => (i === 0 ? { ...s, keyword: true } : s)) : ranked;
         await wait(400);
         emit("chat-sources", { requestId, chatId: cid, sources: srcs });
         let out = "";

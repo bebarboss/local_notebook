@@ -59,6 +59,8 @@ export interface Source {
   score: number;
   /** cross-encoder relevance 0–1 when reranking was used */
   rerankScore?: number | null;
+  /** found by keyword (exact words) search */
+  keyword?: boolean;
   text: string;
 }
 
@@ -166,6 +168,8 @@ export interface Settings {
   keepImages: boolean;
   /** re-order search hits with the reranker model (when downloaded) */
   rerank: boolean;
+  /** fuse keyword (exact words) search with vector search */
+  hybrid: boolean;
 }
 
 export type EmbeddingModelId = "multilingual-e5-small" | "multilingual-e5-base" | "bge-m3";

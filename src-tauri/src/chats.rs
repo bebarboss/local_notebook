@@ -31,6 +31,9 @@ pub struct SourceRef {
     /// cross-encoder relevance 0–1 when reranking was used
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rerank_score: Option<f32>,
+    /// found by keyword (exact words) search
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keyword: bool,
     pub text: String,
 }
 

@@ -18,6 +18,7 @@ export function SourcePanel({ source, onClose }: { source: Source; onClose: () =
           <span className="k">ความเกี่ยวข้อง</span>
           <span className="mono">
             {source.rerankScore != null ? <>{source.rerankScore.toFixed(3)} <span className="muted">(reranker · vector {source.score.toFixed(3)})</span></> : source.score.toFixed(3)}
+            {source.keyword && <span className="muted"> · ตรงคำค้น</span>}
           </span>
         </div>
       </div>

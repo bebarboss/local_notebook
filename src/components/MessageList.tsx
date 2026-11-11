@@ -4,9 +4,6 @@ import type { Message, Source } from "../lib/types";
 import { th } from "../i18n/th";
 import { initials, useApp } from "../state";
 import { Markdown } from "./Markdown";
-import { SourcePanel } from "./SourcePanel";
-import { sourceLabel } from "./CitationChip";
-import { AnswerImages } from "./SourceImages";
 import { ErrorState } from "./ui";
 
 export interface StreamingState {
@@ -16,7 +13,7 @@ export interface StreamingState {
 }
 
 export function MessageList({
-  messages, streaming, onRetry, showServiceInSources, retryDisabled,
+  messages, streaming, onRetry, retryDisabled,
 }: {
   messages: Message[]; streaming: StreamingState | null; onRetry: (question: string) => void; showServiceInSources: boolean; retryDisabled: boolean;
 }) {
@@ -31,7 +28,6 @@ export function MessageList({
           <AiMsg
             key={m.id}
             msg={m}
-            showService={showServiceInSources}
             retryDisabled={retryDisabled}
             onRetry={() => {
               const q = [...messages.slice(0, i)].reverse().find((x) => x.role === "user");
@@ -66,14 +62,13 @@ export function UserMsg({ text, avatar }: { text: string; avatar: string }) {
   );
 }
 
-function AiMsg({ msg, onRetry, showService, retryDisabled }: { msg: Message; onRetry: () => void; showService: boolean; retryDisabled: boolean }) {
+// sources are reached through the numbered citations inside the answer only
+function AiMsg({ msg, onRetry, retryDisabled }: { msg: Message; onRetry: () => void; retryDisabled: boolean }) {
   const [copied, setCopied] = useState(false);
-  const [openSrc, setOpenSrc] = useState<Source | null>(null);
   const info = [msg.model, msg.reasoningEffort, msg.elapsedMs != null ? th.seconds(msg.elapsedMs) : null].filter(Boolean).join(" · ");
   return (
     <div className="ai-msg">
       {msg.content && <Markdown text={msg.content} sources={msg.sources} />}
-      {msg.content && msg.sources.length > 0 && <AnswerImages msg={msg} onSource={setOpenSrc} />}
       {msg.error && <ErrorState message={msg.error} />}
       <div className="ai-meta">
         <button
@@ -94,14 +89,6 @@ function AiMsg({ msg, onRetry, showService, retryDisabled }: { msg: Message; onR
         </button>
         {info && <span className="info">{info}</span>}
       </div>
-      {msg.sources.length > 0 && (
-        <div className="ai-sources" aria-label="แหล่งอ้างอิง">
-          {msg.sources.map((s) => (
-            <button key={s.n} className="source-chip" onClick={() => setOpenSrc(s)}>{sourceLabel(s, showService)}</button>
-          ))}
-        </div>
-      )}
-      {openSrc && <SourcePanel source={openSrc} onClose={() => setOpenSrc(null)} />}
     </div>
   );
 }

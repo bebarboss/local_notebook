@@ -718,14 +718,19 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, question: &str) -> 
     let targets: Vec<Service> = if all { state.services.lock().list() } else { vec![svc.clone()] };
     let k = svc.top_k as usize;
     let rerank = state.settings.lock().rerank && crate::rerank::Reranker::status().ready;
+    let hybrid = state.settings.lock().hybrid;
     let want = if rerank { crate::rerank::candidates(k) } else { k };
     let mut hits = Vec::new();
     for s in targets {
         let store = state.stores.get(&s.id)?;
-        let found = store.lock().search(&qv, want, threshold)?;
+        let found = if hybrid {
+            store.lock().hybrid_search(&qv, question, want, threshold)?
+        } else {
+            store.lock().search(&qv, want, threshold)?
+        };
         hits.extend(found.into_iter().map(|h| (s.clone(), h)));
     }
-    hits.sort_by(|a, b| b.1.score.total_cmp(&a.1.score));
+    hits.sort_by(|a, b| b.1.fused.total_cmp(&a.1.fused).then(b.1.score.total_cmp(&a.1.score)));
     hits.truncate(want);
 
     // second stage: the cross-encoder reads question + passage together
@@ -763,6 +768,7 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, question: &str) -> 
             ord: h.ord,
             score: h.score,
             rerank_score,
+            keyword: h.keyword,
             text: h.text,
         })
         .collect())
@@ -941,7 +947,7 @@ mod tests {
             id: "hr".into(), name: "HR".into(), code: "HR".into(), color: "#1F4FD1".into(), folders: vec![], files: vec![], excluded: vec![],
             model: "godev1".into(), effort: "medium".into(), top_k: 5, system_prompt: "ตอบสั้น".into(), created_at: 0, updated_at: 0,
         };
-        let src = vec![SourceRef { n: 1, service_id: "hr".into(), service_name: "HR".into(), doc_path: "a.pdf".into(), file_name: "a.pdf".into(), page: Some(4), ord: 0, score: 0.9, rerank_score: None, text: "ลา 10 วัน".into() }];
+        let src = vec![SourceRef { n: 1, service_id: "hr".into(), service_name: "HR".into(), doc_path: "a.pdf".into(), file_name: "a.pdf".into(), page: Some(4), ord: 0, score: 0.9, rerank_score: None, keyword: false, text: "ลา 10 วัน".into() }];
         let hist = vec![("q0".to_string(), "a0".to_string())];
         let m = build_prompt(&svc, &src, &hist, "ลาได้กี่วัน", false);
         assert_eq!(m.len(), 4);
