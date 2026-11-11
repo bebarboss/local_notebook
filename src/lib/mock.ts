@@ -11,6 +11,7 @@ import type {
   Message,
   ModelConfig,
   Service,
+  RerankStatus,
   ServiceStats,
   Settings,
   Source,
@@ -96,7 +97,7 @@ export function createMockBackend(): Backend {
   let settings: Settings = {
     theme: "system", userName: "navaritrod", setupDone: false, historyTurns: 6, autoDeleteDays: 0,
     topK: 5, threshold: 0.3, chunkSize: 1000, chunkOverlap: 150, embeddingModel: "multilingual-e5-small", lastServiceId: "hr",
-    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true,
+    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true, rerank: true,
   };
   try {
     const saved = localStorage.getItem("docask-mock-settings");
@@ -115,6 +116,7 @@ export function createMockBackend(): Backend {
   let embedding: EmbeddingStatus = { model: "multilingual-e5-small", ready: true, path: "%APPDATA%\\DocAsk\\models\\multilingual-e5-small", sizeBytes: 118e6 };
   const streams = new Map<string, { stopped: boolean }>();
   let updateAvailable = false;
+  let reranker: RerankStatus & { model: "mmarco-mMiniLMv2-L12" } = { model: "mmarco-mMiniLMv2-L12", ready: false, path: "%APPDATA%\\DocAsk\\models\\mmarco-mMiniLMv2-L12", sizeBytes: null };
 
   // simulate the indexing file in HR advancing
   const indexTimer = setInterval(() => {
@@ -307,7 +309,8 @@ export function createMockBackend(): Backend {
       (async () => {
         const started = now();
         const { text, sources } = answerFor(req.question, svc);
-        const srcs = req.allServices ? sources.map((s) => ({ ...s })) : sources;
+        const base = req.allServices ? sources.map((s) => ({ ...s })) : sources;
+        const srcs = settings.rerank && reranker.ready ? base.map((s, i) => ({ ...s, rerankScore: 0.97 - i * 0.21 })) : base;
         await wait(400);
         emit("chat-sources", { requestId, chatId: cid, sources: srcs });
         let out = "";
@@ -346,6 +349,18 @@ export function createMockBackend(): Backend {
     reindexAll: async () => {},
     wipeAllData: async () => { try { localStorage.removeItem("docask-mock-settings"); } catch { /* ignore */ } location.reload(); },
     ocrStatus: async () => ({ available: true, enabled: settings.ocrEnabled }),
+    rerankStatus: async () => ({ ...reranker }),
+    downloadReranker: async () => {
+      const total = 118.6e6;
+      let got = 0;
+      const t = setInterval(() => {
+        got = Math.min(total, got + total / 8);
+        const done = got >= total;
+        if (done) { clearInterval(t); reranker = { ...reranker, ready: true, sizeBytes: total }; }
+        emit("embed-download", { model: reranker.model, file: done ? "" : "onnx/model_quantized.onnx", downloaded: got, total, done, error: null });
+      }, 250);
+    },
+    useRerankerFolder: async (folder) => (reranker = { ...reranker, ready: true, path: folder, sizeBytes: 118.6e6 }),
     checkUpdate: async () => {
       await wait(500);
       if (!settings.updateUrl) throw { code: "update_no_url", message: "ยังไม่ได้ตั้ง URL อัปเดต — ไปที่ ตั้งค่า › เกี่ยวกับ" };

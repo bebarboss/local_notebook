@@ -372,10 +372,15 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
     {
         let mut s = store.lock();
         let old = s.meta("signature")?;
-        if full || old.as_deref() != Some(signature.as_str()) {
+        let old_model = old.as_deref().and_then(|o| o.split('|').next());
+        if old_model != Some(model.as_str()) {
+            // other model → old vectors are useless
             s.clear()?;
-            s.set_meta("signature", &signature)?;
+        } else if full || old.as_deref() != Some(signature.as_str()) {
+            // same model: re-extract every file, but keep vectors of unchanged text
+            s.requeue_all()?;
         }
+        s.set_meta("signature", &signature)?;
     }
 
     let files = collect_files(&svc.folders, &svc.files, &svc.excluded);
@@ -455,22 +460,31 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
             }
         };
 
-        let mut chunks: Vec<NewChunk> = Vec::with_capacity(pieces.len());
-        let n = pieces.len();
-        for batch in pieces.chunks(32) {
+        // text that was already embedded (file edited, OCR/picture setting changed) keeps its vector
+        let mut known = store.lock().chunk_vectors(doc_id)?;
+        let mut vecs: Vec<Option<Vec<f32>>> = pieces.iter().map(|(_, t)| known.remove(t)).collect();
+        let todo: Vec<usize> = (0..pieces.len()).filter(|&j| vecs[j].is_none()).collect();
+        let n = todo.len().max(1);
+        let mut done = 0usize;
+        for batch in todo.chunks(32) {
             if cancel.load(Ordering::Relaxed) {
                 store.lock().upsert_document(&p, &hash, 0, *bytes, "queued", None)?;
                 progress(None, i, total, 0.0, "cancelled", Some("ยกเลิกการทำ index แล้ว".into()));
                 return Ok(());
             }
-            let texts: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
-            let vecs = state.embedder.embed_passages(model, &texts)?;
-            for ((page, text), emb) in batch.iter().zip(vecs) {
-                let ord = chunks.len() as i64;
-                chunks.push(NewChunk { page: *page, ord, text: text.clone(), embedding: emb });
+            let texts: Vec<String> = batch.iter().map(|&j| pieces[j].1.clone()).collect();
+            for (&j, emb) in batch.iter().zip(state.embedder.embed_passages(model, &texts)?) {
+                vecs[j] = Some(emb);
             }
-            progress(Some(path.as_path()), i, total, chunks.len() as f32 / n as f32, "embedding", None);
+            done += batch.len();
+            progress(Some(path.as_path()), i, total, done as f32 / n as f32, "embedding", None);
         }
+        let chunks: Vec<NewChunk> = pieces
+            .into_iter()
+            .zip(vecs)
+            .enumerate()
+            .map(|(ord, ((page, text), emb))| NewChunk { page, ord: ord as i64, text, embedding: emb.expect("every chunk embedded") })
+            .collect();
         {
             let mut s = store.lock();
             s.upsert_document(&p, &hash, *mtime, *bytes, "indexing", None)?;
@@ -577,6 +591,55 @@ mod tests {
                 assert_eq!(ex.images.len(), 1);
                 assert_eq!(ex.images[0].page, Some(1), "pptx picture must stay on slide 1");
             }
+        }
+    }
+
+    /// Where does indexing time go? `cargo test --release bench_index -- --ignored --nocapture`
+    /// with DOCASK_TEST_RES, DOCASK_TEST_DIR and DOCASK_TEST_EMBED (multilingual-e5-small folder).
+    #[test]
+    #[ignore]
+    fn bench_index() {
+        use std::time::Instant;
+        let res = PathBuf::from(std::env::var("DOCASK_TEST_RES").expect("DOCASK_TEST_RES"));
+        let dir = PathBuf::from(std::env::var("DOCASK_TEST_DIR").expect("DOCASK_TEST_DIR"));
+        let emb = PathBuf::from(std::env::var("DOCASK_TEST_EMBED").expect("DOCASK_TEST_EMBED"));
+        ocr::init(res.join("ocr"));
+        pdf::init(res.join("pdfium").join("pdfium.dll"));
+        let t = Instant::now();
+        ocr::engine().expect("ocr");
+        println!("OCR model load: {:?}", t.elapsed());
+        let t = Instant::now();
+        let te = crate::embed::Embedder::load(ModelId::MultilingualE5Small, &emb).unwrap();
+        println!("embedding model load: {:?}", t.elapsed());
+
+        let mut all_chunks = Vec::new();
+        for name in ["mixed.pdf", "scanned.pdf", "screen.png", "sample.docx", "sample.pptx"] {
+            let p = dir.join(name);
+            if !p.exists() {
+                continue;
+            }
+            let t = Instant::now();
+            let ex = extract_chunks(&p, ChunkOptions::default()).unwrap();
+            println!("extract {name}: {:?} → {} chunks, {} pictures", t.elapsed(), ex.chunks.len(), ex.images.len());
+            all_chunks.extend(ex.chunks.into_iter().map(|(_, c)| c));
+        }
+
+        // a typical text-heavy document: 100 chunks of ~1000 Thai characters
+        let base: String = all_chunks.join(" ");
+        let mut thai = Vec::new();
+        let chars: Vec<char> = base.chars().collect();
+        for i in 0..100 {
+            let start = (i * 997) % chars.len().max(1);
+            let s: String = chars.iter().cycle().skip(start).take(1000).collect();
+            thai.push(format!("passage: {s}"));
+        }
+        let tok = te.token_count(&thai[0]);
+        println!("tokens in one 1000-char Thai chunk: {tok} (model max 512)");
+        for round in 0..2 {
+            let t = Instant::now();
+            te.embed(&thai, crate::encoder::Pooling::Mean, 4).unwrap();
+            let e = t.elapsed();
+            println!("embed 100 chunks (round {round}, {:?}): {e:?} ({:.1} chunks/s)", crate::encoder::Layout::auto(), 100.0 / e.as_secs_f64());
         }
     }
 

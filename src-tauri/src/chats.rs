@@ -28,6 +28,9 @@ pub struct SourceRef {
     pub page: Option<u32>,
     pub ord: i64,
     pub score: f32,
+    /// cross-encoder relevance 0–1 when reranking was used
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerank_score: Option<f32>,
     pub text: String,
 }
 

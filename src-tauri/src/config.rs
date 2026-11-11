@@ -60,6 +60,8 @@ pub struct Settings {
     pub ocr_enabled: bool,
     /// keep pictures from documents and show them with answers
     pub keep_images: bool,
+    /// re-order search hits with the reranker model (when it is downloaded)
+    pub rerank: bool,
 }
 
 impl Default for Settings {
@@ -80,6 +82,7 @@ impl Default for Settings {
             auto_check_update: true,
             ocr_enabled: true,
             keep_images: true,
+            rerank: true,
         }
     }
 }

@@ -57,7 +57,16 @@ export interface Source {
   page: number | null;
   ord: number;
   score: number;
+  /** cross-encoder relevance 0–1 when reranking was used */
+  rerankScore?: number | null;
   text: string;
+}
+
+export interface RerankStatus {
+  model: string;
+  ready: boolean;
+  path: string | null;
+  sizeBytes: number | null;
 }
 
 /** A picture kept from a document (fetch the pixels with api.imageData). */
@@ -155,6 +164,8 @@ export interface Settings {
   ocrEnabled: boolean;
   /** keep pictures from documents and show them with answers */
   keepImages: boolean;
+  /** re-order search hits with the reranker model (when downloaded) */
+  rerank: boolean;
 }
 
 export type EmbeddingModelId = "multilingual-e5-small" | "multilingual-e5-base" | "bge-m3";
@@ -167,7 +178,8 @@ export interface EmbeddingStatus {
 }
 
 export interface DownloadProgress {
-  model: EmbeddingModelId;
+  /** embedding model id, or the reranker model name */
+  model: EmbeddingModelId | "mmarco-mMiniLMv2-L12";
   file: string;
   downloaded: number;
   total: number | null;

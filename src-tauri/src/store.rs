@@ -168,6 +168,19 @@ impl SqliteStore {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Text → vector of a document's current chunks (to reuse when it is re-indexed).
+    pub fn chunk_vectors(&self, doc_id: i64) -> AppResult<std::collections::HashMap<String, Vec<f32>>> {
+        let mut st = self.conn.prepare("SELECT text, embedding FROM chunks WHERE doc_id=?1")?;
+        let rows = st.query_map([doc_id], |r| Ok((r.get::<_, String>(0)?, from_blob(&r.get::<_, Vec<u8>>(1)?))))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Make the next scan re-extract every file (chunks stay until each file is redone).
+    pub fn requeue_all(&mut self) -> AppResult<()> {
+        self.conn.execute("UPDATE documents SET mtime=0, hash=''", [])?;
+        Ok(())
+    }
+
     pub fn image_data(&self, id: i64) -> AppResult<Option<Vec<u8>>> {
         Ok(self.conn.query_row("SELECT data FROM images WHERE id=?1", [id], |r| r.get(0)).optional()?)
     }
@@ -373,6 +386,19 @@ mod tests {
         assert!(ids(&s, "C:\\b.docx", None, 0).is_empty());
         s.delete_document("C:\\a.pdf").unwrap();
         assert!(ids(&s, "C:\\a.pdf", Some(2), 1).is_empty());
+    }
+
+    #[test]
+    fn vectors_survive_requeue() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = SqliteStore::open(&dir.path().join("index.db")).unwrap();
+        let d = s.upsert_document("C:\\a.txt", "h", 5, 1, "indexing", None).unwrap();
+        s.replace_chunks(d, &[NewChunk { page: None, ord: 0, text: "เดิม".into(), embedding: v(&[1.0, 0.0]) }], &[]).unwrap();
+        s.requeue_all().unwrap();
+        let doc = s.get_document("C:\\a.txt").unwrap().unwrap();
+        assert_eq!((doc.mtime, doc.hash.as_str()), (0, ""), "file must be picked up again");
+        let known = s.chunk_vectors(d).unwrap();
+        assert_eq!(known.get("เดิม").map(|x| x.len()), Some(2), "vector kept for reuse");
     }
 
     /// Two services = two files; neither sees the other's chunks.

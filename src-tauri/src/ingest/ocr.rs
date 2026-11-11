@@ -54,6 +54,8 @@ pub struct Ocr {
     rec: Session,
     dict: Vec<String>,
     rec_height: usize,
+    /// text lines recognised in parallel (rec session uses few threads each)
+    rec_workers: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -75,8 +77,7 @@ fn ort_err(e: impl std::fmt::Display) -> AppError {
     AppError::new("ocr", format!("OCR ผิดพลาด: {e}"))
 }
 
-fn session(path: &Path) -> AppResult<Session> {
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8);
+fn session(path: &Path, threads: usize) -> AppResult<Session> {
     Session::builder()
         .map_err(ort_err)?
         .with_intra_threads(threads)
@@ -87,8 +88,18 @@ fn session(path: &Path) -> AppResult<Session> {
 
 impl Ocr {
     pub fn load(dir: &Path) -> AppResult<Self> {
-        let det = session(&dir.join("det.onnx"))?;
-        let rec = session(&dir.join("rec.onnx"))?;
+        // measured: one line at a time on all threads beats lines in parallel
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8);
+        Self::load_with(dir, crate::encoder::Layout { intra: cores, workers: 1 })
+    }
+
+    /// Detection is one big image → all threads; recognition is many small line images →
+    /// a few threads each, several lines at once.
+    pub fn load_with(dir: &Path, layout: crate::encoder::Layout) -> AppResult<Self> {
+        let all = (layout.intra * layout.workers).max(1);
+        let det = session(&dir.join("det.onnx"), all)?;
+        let rec = session(&dir.join("rec.onnx"), layout.intra)?;
+        let rec_workers = layout.workers;
         let dict: Vec<String> = std::fs::read_to_string(dir.join("dict.txt"))?
             .lines()
             .map(|l| l.trim_end_matches('\r').to_string())
@@ -104,7 +115,7 @@ impl Ocr {
             .filter(|h| *h > 0)
             .map(|h| h as usize)
             .unwrap_or(48);
-        Ok(Self { det, rec, dict, rec_height })
+        Ok(Self { det, rec, dict, rec_height, rec_workers })
     }
 
     /// Recognize all text in an image, returned as lines (top → bottom, left → right).
@@ -115,9 +126,7 @@ impl Ocr {
         }
         let rgb = img.to_rgb8();
         let mut boxes = self.detect(&rgb)?;
-        for b in boxes.iter_mut() {
-            b.text = self.read_box(&rgb, b)?;
-        }
+        self.read_boxes(&rgb, &mut boxes)?;
         boxes.retain(|b| !b.text.trim().is_empty());
         Ok(group_lines(boxes))
     }
@@ -169,6 +178,27 @@ impl Ocr {
             }
         }
         Ok(out)
+    }
+
+    /// Recognise every box, `rec_workers` at a time (the session is shared).
+    fn read_boxes(&self, img: &RgbImage, boxes: &mut [TextBox]) -> AppResult<()> {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let texts: parking_lot::Mutex<Vec<(usize, AppResult<String>)>> = parking_lot::Mutex::new(Vec::new());
+        let snapshot: &[TextBox] = boxes;
+        std::thread::scope(|s| {
+            for _ in 0..self.rec_workers.min(snapshot.len()).max(1) {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(b) = snapshot.get(i) else { break };
+                    let r = self.read_box(img, b);
+                    texts.lock().push((i, r));
+                });
+            }
+        });
+        for (i, t) in texts.into_inner() {
+            boxes[i].text = t?;
+        }
+        Ok(())
     }
 
     fn read_box(&self, img: &RgbImage, b: &TextBox) -> AppResult<String> {
@@ -306,6 +336,37 @@ pub fn image_text(img: &DynamicImage) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `cargo test --release bench_ocr -- --ignored --nocapture` with DOCASK_TEST_RES / DOCASK_TEST_DIR
+    #[test]
+    #[ignore]
+    fn bench_ocr() {
+        let res = std::path::PathBuf::from(std::env::var("DOCASK_TEST_RES").expect("DOCASK_TEST_RES"));
+        let dir = std::path::PathBuf::from(std::env::var("DOCASK_TEST_DIR").expect("DOCASK_TEST_DIR"));
+        // a dense page: the screenshot stacked 5× (≈45 text lines)
+        let shot = image::open(dir.join("screen.png")).unwrap().to_rgb8();
+        let mut page = RgbImage::new(shot.width(), shot.height() * 5);
+        for k in 0..5 {
+            image::imageops::replace(&mut page, &shot, 0, (k * shot.height()) as i64);
+        }
+        use crate::encoder::Layout;
+        for layout in [Layout { intra: 8, workers: 1 }, Layout { intra: 4, workers: 2 }, Layout::auto(), Layout { intra: 1, workers: 7 }] {
+            let ocr = Ocr::load_with(&res.join("ocr"), layout).unwrap();
+            let mut first = String::new();
+            for round in 0..2 {
+                let t = std::time::Instant::now();
+                let mut boxes = ocr.detect(&page).unwrap();
+                let det = t.elapsed();
+                let t = std::time::Instant::now();
+                ocr.read_boxes(&page, &mut boxes).unwrap();
+                if round == 0 {
+                    first = boxes.iter().map(|b| b.text.clone()).collect::<Vec<_>>().join("|");
+                }
+                println!("{layout:?} round {round}: detect {det:?}, recognise {} lines {:?}", boxes.len(), t.elapsed());
+            }
+            assert!(first.contains("Job Data"));
+        }
+    }
 
     #[test]
     fn ctc_collapses_repeats_and_blanks() {

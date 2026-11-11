@@ -3,12 +3,14 @@
 pub mod chats;
 pub mod commands;
 pub mod config;
+pub mod encoder;
 pub mod embed;
 pub mod errors;
 pub mod gateway_test;
 pub mod ingest;
 pub mod llm;
 pub mod redact;
+pub mod rerank;
 pub mod search;
 pub mod secrets;
 pub mod services;
@@ -89,6 +91,9 @@ pub fn run() {
             commands::use_embedding_folder,
             commands::wipe_all_data,
             commands::ocr_status,
+            commands::rerank_status,
+            commands::download_reranker,
+            commands::use_reranker_folder,
             commands::restore_document,
             commands::source_images,
             commands::image_data,

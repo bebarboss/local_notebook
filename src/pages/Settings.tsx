@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft, FolderOpen, Download } from "lucide-react";
 import { api } from "../lib/api";
-import type { UpdateInfo, AppInfo, DownloadProgress, EmbeddingModelId, EmbeddingStatus, GatewayInfo, ModelConfig, ThemeMode } from "../lib/types";
+import type { UpdateInfo, AppInfo, DownloadProgress, EmbeddingModelId, EmbeddingStatus, GatewayInfo, ModelConfig, RerankStatus, ThemeMode } from "../lib/types";
 import { th } from "../i18n/th";
 import { formatBytes, useApp, type SettingsSection } from "../state";
 import { ApiKeyField, keyFormatError, ModelList, SecurityNotes, TestTable, useModelTest } from "../components/GatewayForms";
@@ -254,6 +254,7 @@ function EmbeddingSection() {
   useEffect(() => { load(); }, []);
   useEffect(() => {
     const off = api.on("embed-download", (p) => {
+      if (p.model === RERANK_MODEL) return; // shown by RerankRow
       setDl(p.done || p.error ? null : p);
       if (p.error) app.toast(p.error);
       if (p.done) { load(); app.toast("ดาวน์โหลดโมเดลเสร็จแล้ว"); }
@@ -310,7 +311,7 @@ function EmbeddingSection() {
         <OcrRow />
         <KeepImagesRow />
         <div className="list-row">
-          <div className="l"><span className="t">Index ใหม่ทั้งหมด</span><span className="d">ลบ vector เดิมทุก service แล้วทำใหม่ด้วยโมเดลปัจจุบัน</span></div>
+          <div className="l"><span className="t">Index ใหม่ทั้งหมด</span><span className="d">อ่านทุกไฟล์ใหม่ทุก service · ข้อความที่ไม่เปลี่ยนใช้ vector เดิม (เปลี่ยนโมเดลแล้วจึงทำ embedding ใหม่ทั้งหมด)</span></div>
           <button className="btn" disabled={!st?.ready} onClick={() => setConfirmReindex(true)}>Index ใหม่ทั้งหมด</button>
         </div>
       </div>
@@ -346,6 +347,7 @@ function SearchSection() {
       <div className="list-card">
         <NumberRow label="top-k เริ่มต้น" desc="ค่าเริ่มต้นของ service ใหม่ (แต่ละ service ตั้งเองได้)" value={settings.topK} min={1} max={30} onSave={(v) => updateSettings({ topK: v })} />
         <NumberRow label="Threshold" desc="ตัดท่อนที่คะแนนความเกี่ยวข้องต่ำกว่าค่านี้ (0–1)" value={settings.threshold} min={0} max={1} step={0.05} onSave={(v) => updateSettings({ threshold: v })} />
+        <RerankRow />
         <NumberRow label="ขนาดท่อน (ตัวอักษร)" desc="เปลี่ยนแล้วจะ index ใหม่ทั้งหมดในรอบถัดไป" value={settings.chunkSize} min={300} max={4000} step={50} onSave={(v) => updateSettings({ chunkSize: v })} />
         <NumberRow label="Overlap (ตัวอักษร)" desc="ส่วนที่ซ้อนกันระหว่างท่อน · เปลี่ยนแล้วจะ index ใหม่ทั้งหมด" value={settings.chunkOverlap} min={0} max={1000} step={10} onSave={(v) => updateSettings({ chunkOverlap: v })} />
       </div>
@@ -466,6 +468,62 @@ function UpdateRows() {
       </div>
       {found && <UpdateDialog info={found} onClose={() => setFound(null)} />}
     </>
+  );
+}
+
+const RERANK_MODEL = "mmarco-mMiniLMv2-L12" as const;
+
+function RerankRow() {
+  const { settings, updateSettings, toast } = useApp();
+  const [st, setSt] = useState<RerankStatus | null>(null);
+  const [dl, setDl] = useState<DownloadProgress | null>(null);
+  const load = () => api.rerankStatus().then(setSt).catch(() => {});
+  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const off = api.on("embed-download", (p) => {
+      if (p.model !== RERANK_MODEL) return;
+      setDl(p.done || p.error ? null : p);
+      if (p.error) toast(p.error);
+      if (p.done) { load(); toast("ดาวน์โหลดโมเดล reranker เสร็จแล้ว"); }
+    });
+    return () => { off.then((f) => f()); };
+  }, [toast]);
+  return (
+    <div className="list-row" style={{ alignItems: "flex-start" }}>
+      <div className="l">
+        <span className="t">จัดลำดับใหม่ (reranking)</span>
+        <span className="d">
+          ค้นด้วย vector ได้ท่อนที่ใกล้เคียง {Math.max(15, Math.min(30, settings.topK * 3))} ท่อน แล้วให้โมเดล reranker อ่านคำถามคู่กับแต่ละท่อนเพื่อเลือก top-k ที่ตรงที่สุด ·
+          แม่นขึ้นชัดเจนกับคำถามภาษาไทย แต่ใช้เวลาเพิ่มราว 1–2 วินาทีต่อคำถาม · ทำงานในเครื่อง
+        </span>
+        <span className="d">
+          {st ? (st.ready
+            ? <><span className="ok-text">พร้อมใช้งาน</span> · {st.model}{st.sizeBytes ? ` · ${formatBytes(st.sizeBytes)}` : ""}</>
+            : <span style={{ color: "var(--warn-text)" }}>ยังไม่มีโมเดล reranker (~120 MB)</span>) : "…"}
+        </span>
+        {dl && <div style={{ marginTop: 6 }}><ProgressBar value={dl.total ? dl.downloaded / dl.total : 0} label="ดาวน์โหลดโมเดล reranker" /><span className="d">{dl.file} · {formatBytes(dl.downloaded)}{dl.total ? ` / ${formatBytes(dl.total)}` : ""}</span></div>}
+        {st && !st.ready && (
+          <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+            <button className="btn" disabled={!!dl} onClick={() => api.downloadReranker().catch((e) => toast((e as { message: string }).message))}>
+              <Download size={16} strokeWidth={1.8} aria-hidden="true" />ดาวน์โหลด
+            </button>
+            <button className="btn" onClick={async () => {
+              const f = await api.pickFolder();
+              if (!f) return;
+              try { setSt(await api.useRerankerFolder(f)); toast("ใช้โมเดล reranker จากโฟลเดอร์แล้ว"); } catch (e) { toast((e as { message: string }).message); }
+            }}><FolderOpen size={16} strokeWidth={1.8} aria-hidden="true" />เลือกโฟลเดอร์</button>
+          </div>
+        )}
+      </div>
+      <Switch
+        checked={settings.rerank}
+        label="จัดลำดับใหม่ (reranking)"
+        onChange={async (v) => {
+          await updateSettings({ rerank: v });
+          toast(v ? (st?.ready ? "เปิด reranking แล้ว" : "เปิดแล้ว — ดาวน์โหลดโมเดลก่อนจึงจะทำงาน") : "ปิด reranking แล้ว");
+        }}
+      />
+    </div>
   );
 }
 

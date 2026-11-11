@@ -21,6 +21,7 @@ import type {
   IndexProgress,
   Message,
   ModelConfig,
+  RerankStatus,
   Service,
   ServiceStats,
   Settings,
@@ -113,6 +114,9 @@ export interface Backend {
   wipeAllData(): Promise<void>;
   // updates
   ocrStatus(): Promise<{ available: boolean; enabled: boolean }>;
+  rerankStatus(): Promise<RerankStatus>;
+  downloadReranker(): Promise<void>;
+  useRerankerFolder(folder: string): Promise<RerankStatus>;
   checkUpdate(): Promise<UpdateInfo>;
   installUpdate(): Promise<void>;
   // dialogs
@@ -196,6 +200,9 @@ function createTauriBackend(): Backend {
     reindexAll: () => call("reindex_all"),
     wipeAllData: () => call("wipe_all_data"),
     ocrStatus: () => call("ocr_status"),
+    rerankStatus: () => call("rerank_status"),
+    downloadReranker: () => call("download_reranker"),
+    useRerankerFolder: (folder) => call("use_reranker_folder", { folder }),
     checkUpdate: () => call("check_update"),
     installUpdate: () => call("install_update"),
     pickFolder: async () => {

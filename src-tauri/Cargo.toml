@@ -1,6 +1,6 @@
 [package]
 name = "docask"
-version = "0.3.0"
+version = "0.4.0"
 description = "DocAsk — ถามตอบจากเอกสารในเครื่อง (RAG) ผ่าน Gosoft Agent Gateway"
 edition = "2021"
 rust-version = "1.77"
@@ -30,11 +30,10 @@ futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots", "http2", "charset"] }
 keyring = { version = "3", features = ["windows-native"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
-fastembed = { version = "4", default-features = false, features = ["ort-download-binaries"] }
 pdf-extract = "0.7"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # OCR: PaddleOCR models run on the same ONNX Runtime that fastembed links
-ort = { version = "=2.0.0-rc.9", default-features = false, features = ["ndarray"] }
+ort = { version = "=2.0.0-rc.9", default-features = false, features = ["ndarray", "download-binaries"] }
 ndarray = "0.16"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff", "webp", "gif"] }
 # PDF page rendering + embedded image extraction (pdfium.dll shipped in resources/)
@@ -44,6 +43,7 @@ unicode-segmentation = "1.12"
 notify = "6"
 sha2 = "0.10"
 base64 = "0.22"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 hex = "0.4"
 dirs = "5"
 uuid = { version = "1", features = ["v4"] }

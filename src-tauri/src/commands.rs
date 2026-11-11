@@ -37,6 +37,7 @@ pub struct AppState {
     pub stores: Stores,
     pub chats: Mutex<ChatDb>,
     pub embedder: Arc<Embedder>,
+    pub reranker: Arc<crate::rerank::Reranker>,
     pub indexer: Arc<IndexManager>,
     pub watchers: Arc<Watchers>,
     pub streams: Mutex<HashMap<String, CancellationToken>>,
@@ -60,6 +61,7 @@ impl AppState {
             stores: Stores::default(),
             chats: Mutex::new(chats),
             embedder: Arc::new(Embedder::default()),
+            reranker: Arc::new(crate::rerank::Reranker::default()),
             watchers: Watchers::new(app.clone(), indexer.clone()),
             indexer,
             streams: Mutex::new(HashMap::new()),
@@ -715,18 +717,43 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, question: &str) -> 
 
     let targets: Vec<Service> = if all { state.services.lock().list() } else { vec![svc.clone()] };
     let k = svc.top_k as usize;
+    let rerank = state.settings.lock().rerank && crate::rerank::Reranker::status().ready;
+    let want = if rerank { crate::rerank::candidates(k) } else { k };
     let mut hits = Vec::new();
     for s in targets {
         let store = state.stores.get(&s.id)?;
-        let found = store.lock().search(&qv, k, threshold)?;
+        let found = store.lock().search(&qv, want, threshold)?;
         hits.extend(found.into_iter().map(|h| (s.clone(), h)));
     }
     hits.sort_by(|a, b| b.1.score.total_cmp(&a.1.score));
+    hits.truncate(want);
+
+    // second stage: the cross-encoder reads question + passage together
+    let mut rr: Vec<Option<f32>> = vec![None; hits.len()];
+    if rerank && hits.len() > 1 {
+        let reranker = state.reranker.clone();
+        let q = question.to_string();
+        let texts: Vec<String> = hits.iter().map(|(_, h)| h.text.clone()).collect();
+        match tauri::async_runtime::spawn_blocking(move || reranker.score(&q, &texts)).await {
+            Ok(Ok(scores)) => {
+                let mut order: Vec<usize> = (0..hits.len()).collect();
+                order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
+                let mut slots: Vec<Option<_>> = hits.into_iter().map(Some).collect();
+                hits = order.iter().map(|&i| slots[i].take().expect("each index once")).collect();
+                rr = order.iter().map(|&i| Some(scores[i])).collect();
+            }
+            // reranking is an improvement, never a reason to fail the question
+            Ok(Err(e)) => log::warn!("rerank failed, using vector order: {}", e.message),
+            Err(e) => log::warn!("rerank task failed: {e}"),
+        }
+    }
     hits.truncate(k);
+    rr.truncate(k);
     Ok(hits
         .into_iter()
+        .zip(rr)
         .enumerate()
-        .map(|(i, (s, h))| SourceRef {
+        .map(|(i, ((s, h), rerank_score))| SourceRef {
             n: i + 1,
             service_id: s.id,
             service_name: s.name,
@@ -735,6 +762,7 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, question: &str) -> 
             page: h.page,
             ord: h.ord,
             score: h.score,
+            rerank_score,
             text: h.text,
         })
         .collect())
@@ -829,6 +857,36 @@ pub fn use_embedding_folder(app: AppHandle, state: S<'_>, model: String, folder:
     Ok(st)
 }
 
+// ------------------------------------------------------------------ reranker
+
+#[tauri::command]
+pub fn rerank_status() -> crate::rerank::RerankStatus {
+    crate::rerank::Reranker::status()
+}
+
+#[tauri::command]
+pub async fn download_reranker(app: AppHandle) -> AppResult<()> {
+    let a = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let res = crate::rerank::download(|p: DownloadProgress| {
+            let _ = a.emit("embed-download", p);
+        })
+        .await;
+        match res {
+            Ok(_) => a.state::<AppState>().reranker.unload(),
+            Err(e) => {
+                let _ = a.emit("embed-download", DownloadProgress { model: crate::rerank::MODEL.into(), file: String::new(), downloaded: 0, total: None, done: false, error: Some(e.message) });
+            }
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn use_reranker_folder(state: S<'_>, folder: String) -> AppResult<crate::rerank::RerankStatus> {
+    state.reranker.use_folder(Path::new(&folder))
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OcrStatus {
@@ -849,6 +907,7 @@ pub fn wipe_all_data(state: S<'_>) -> AppResult<()> {
     state.watchers.clear();
     state.stores.close_all();
     state.embedder.unload();
+    state.reranker.unload();
     for t in state.streams.lock().values() {
         t.cancel();
     }
@@ -882,7 +941,7 @@ mod tests {
             id: "hr".into(), name: "HR".into(), code: "HR".into(), color: "#1F4FD1".into(), folders: vec![], files: vec![], excluded: vec![],
             model: "godev1".into(), effort: "medium".into(), top_k: 5, system_prompt: "ตอบสั้น".into(), created_at: 0, updated_at: 0,
         };
-        let src = vec![SourceRef { n: 1, service_id: "hr".into(), service_name: "HR".into(), doc_path: "a.pdf".into(), file_name: "a.pdf".into(), page: Some(4), ord: 0, score: 0.9, text: "ลา 10 วัน".into() }];
+        let src = vec![SourceRef { n: 1, service_id: "hr".into(), service_name: "HR".into(), doc_path: "a.pdf".into(), file_name: "a.pdf".into(), page: Some(4), ord: 0, score: 0.9, rerank_score: None, text: "ลา 10 วัน".into() }];
         let hist = vec![("q0".to_string(), "a0".to_string())];
         let m = build_prompt(&svc, &src, &hist, "ลาได้กี่วัน", false);
         assert_eq!(m.len(), 4);

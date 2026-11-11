@@ -1,15 +1,15 @@
-//! Local embeddings on CPU (ONNX Runtime via fastembed). Model files are NOT bundled:
+//! Local embeddings on CPU (ONNX Runtime, see `encoder.rs`). Model files are NOT bundled:
 //! they are downloaded from Hugging Face with progress, or picked from a folder.
 
 use crate::config::{data_dir, read_json, write_json};
 use crate::errors::{AppError, AppResult};
-use crate::search::normalize;
-use fastembed::{InitOptionsUserDefined, Pooling, TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel};
+use crate::encoder::{Encoder, Layout, Pooling};
 use futures_util::StreamExt;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -114,7 +114,7 @@ fn dir_size(dir: &Path) -> u64 {
 struct Loaded {
     model: ModelId,
     dir: PathBuf,
-    te: TextEmbedding,
+    enc: Arc<Encoder>,
 }
 
 pub struct Embedder {
@@ -173,48 +173,35 @@ impl Embedder {
         Ok(Self::status(model))
     }
 
-    fn ensure(&self, model: ModelId) -> AppResult<()> {
+    /// The loaded model (loads it on first use). The lock is held only to fetch it, so a
+    /// question can be embedded while the indexer is busy embedding a document.
+    fn encoder(&self, model: ModelId) -> AppResult<Arc<Encoder>> {
         let dir = Self::folder_for(model);
-        {
-            let g = self.loaded.lock();
-            if let Some(l) = g.as_ref() {
-                if l.model == model && l.dir == dir {
-                    return Ok(());
-                }
+        let mut g = self.loaded.lock();
+        if let Some(l) = g.as_ref() {
+            if l.model == model && l.dir == dir {
+                return Ok(l.enc.clone());
             }
         }
         if !folder_ok(&dir) {
             return Err(AppError::new("no_embedding_model", "ยังไม่มีโมเดล embedding — ไปที่ ตั้งค่า › Embedding และ Index เพื่อดาวน์โหลดหรือเลือกโฟลเดอร์"));
         }
-        let spec = model.spec();
-        let read = |name: &str| -> AppResult<Vec<u8>> {
-            let p = dir.join(name);
-            if p.is_file() { Ok(std::fs::read(p)?) } else { Ok(b"{}".to_vec()) }
-        };
-        let onnx = std::fs::read(find_onnx(&dir).expect("checked"))?;
-        let tokenizer = TokenizerFiles {
-            tokenizer_file: std::fs::read(dir.join("tokenizer.json"))?,
-            config_file: read("config.json")?,
-            special_tokens_map_file: read("special_tokens_map.json")?,
-            tokenizer_config_file: read("tokenizer_config.json")?,
-        };
-        let udm = UserDefinedEmbeddingModel::new(onnx, tokenizer).with_pooling(spec.pooling);
-        let te = TextEmbedding::try_new_from_user_defined(udm, InitOptionsUserDefined::new().with_max_length(spec.max_length))
-            .map_err(|e| AppError::new("embedding_load", format!("โหลดโมเดล embedding ไม่ได้: {e}")))?;
-        *self.loaded.lock() = Some(Loaded { model, dir, te });
-        Ok(())
+        let enc = Arc::new(Self::load(model, &dir)?);
+        *g = Some(Loaded { model, dir, enc: enc.clone() });
+        Ok(enc)
+    }
+
+    /// Load a model folder (onnx + tokenizer).
+    pub fn load(model: ModelId, dir: &Path) -> AppResult<Encoder> {
+        let onnx = find_onnx(dir).ok_or_else(|| AppError::new("no_embedding_model", "ไม่พบไฟล์ onnx ของโมเดล"))?;
+        Encoder::load(&onnx, dir, model.spec().max_length, false, Layout::auto())
+            .map_err(|e| AppError::new("embedding_load", format!("โหลดโมเดล embedding ไม่ได้: {}", e.message)))
     }
 
     fn embed(&self, model: ModelId, texts: Vec<String>) -> AppResult<Vec<Vec<f32>>> {
-        self.ensure(model)?;
-        let g = self.loaded.lock();
-        let l = g.as_ref().expect("ensured");
-        let mut out = l
-            .te
-            .embed(texts, Some(16))
-            .map_err(|e| AppError::new("embedding", format!("ทำ embedding ไม่สำเร็จ: {e}")))?;
-        out.iter_mut().for_each(|v| normalize(v));
-        Ok(out)
+        let enc = self.encoder(model)?;
+        enc.embed(&texts, model.spec().pooling, 4)
+            .map_err(|e| AppError::new("embedding", format!("ทำ embedding ไม่สำเร็จ: {}", e.message)))
     }
 
     /// Blocking — call from a background thread.
@@ -235,14 +222,36 @@ impl Embedder {
 }
 
 /// Download the model from Hugging Face into %APPDATA%\DocAsk\models\<id>\ with progress.
-pub async fn download(model: ModelId, mut progress: impl FnMut(DownloadProgress)) -> AppResult<EmbeddingStatus> {
+pub async fn download(model: ModelId, progress: impl FnMut(DownloadProgress)) -> AppResult<EmbeddingStatus> {
     let spec = model.spec();
     let dir = models_root().join(model.as_str());
-    std::fs::create_dir_all(dir.join("onnx"))?;
-    let mut files: Vec<(&str, bool)> = vec![(spec.onnx, true)];
-    files.extend(TOKENIZER_FILES.iter().map(|f| (*f, *f == "tokenizer.json")));
-    for (file, required) in files {
-        let url = format!("https://huggingface.co/{}/resolve/main/{}", spec.repo, file);
+    let mut files: Vec<(&str, &str, bool)> = vec![(spec.onnx, spec.onnx, true)];
+    files.extend(TOKENIZER_FILES.iter().map(|f| (*f, *f, *f == "tokenizer.json")));
+    let mut progress = progress;
+    fetch_hf(spec.repo, "main", &files, &dir, model.as_str(), &mut progress).await?;
+    // downloading resets any custom folder choice for this model
+    write_json(&choice_path(), &Choice { model: Some(model.as_str().into()), path: None })?;
+    let st = Embedder::status(model);
+    progress(DownloadProgress { model: model.as_str().into(), file: String::new(), downloaded: st.size_bytes.unwrap_or(0), total: st.size_bytes, done: true, error: None });
+    Ok(st)
+}
+
+/// Fetch `(remote path, local path, required)` files of a Hugging Face repo at `revision`
+/// into `dir`, reporting progress under `label`. Files land via `.part` + rename.
+pub async fn fetch_hf(
+    repo: &str,
+    revision: &str,
+    files: &[(&str, &str, bool)],
+    dir: &Path,
+    label: &str,
+    progress: &mut impl FnMut(DownloadProgress),
+) -> AppResult<()> {
+    for (remote, local, required) in files.iter().copied() {
+        let file = local;
+        if let Some(parent) = dir.join(local).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let url = format!("https://huggingface.co/{repo}/resolve/{revision}/{remote}");
         let resp = crate::llm::CLIENT.get(&url).send().await.map_err(|e| {
             if e.is_connect() || e.is_timeout() {
                 AppError::new("download", "ต่อ huggingface.co ไม่ได้ (เครือข่ายบริษัทอาจบล็อก) — ใช้ตัวเลือก (ข) เลือกโฟลเดอร์โมเดลแทน")
@@ -269,16 +278,12 @@ pub async fn download(model: ModelId, mut progress: impl FnMut(DownloadProgress)
             got += chunk.len() as u64;
             if got - last_emit > 512 * 1024 {
                 last_emit = got;
-                progress(DownloadProgress { model: model.as_str().into(), file: file.into(), downloaded: got, total, done: false, error: None });
+                progress(DownloadProgress { model: label.into(), file: file.into(), downloaded: got, total, done: false, error: None });
             }
         }
         out.flush()?;
         drop(out);
         std::fs::rename(&part, &dest)?;
     }
-    // downloading resets any custom folder choice for this model
-    write_json(&choice_path(), &Choice { model: Some(model.as_str().into()), path: None })?;
-    let st = Embedder::status(model);
-    progress(DownloadProgress { model: model.as_str().into(), file: String::new(), downloaded: st.size_bytes.unwrap_or(0), total: st.size_bytes, done: true, error: None });
-    Ok(st)
+    Ok(())
 }
