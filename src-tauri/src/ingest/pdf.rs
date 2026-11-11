@@ -143,18 +143,41 @@ fn has_thai_mark(s: &str) -> bool {
 fn deduped_text(page: &PdfPage) -> Option<String> {
     struct Run {
         t: String,
+        /// left / right edge from the glyph advance boxes (not the ink), so narrow glyphs
+        /// like ' or _ in a monospace font do not look like word gaps
         l: f32,
         r: f32,
-        b: f32,
-        top: f32,
+        /// baseline y — the same for every glyph on a line, also `_` and descenders
+        base: f32,
+        /// font size
         h: f32,
     }
+    let text = page.text().ok()?;
     let mut runs = Vec::new();
     for o in page.objects().iter() {
         let Some(t) = o.as_text_object() else { continue };
         let s = t.text();
         let Ok(q) = o.bounds() else { continue };
-        runs.push(Run { t: s, l: q.left().value, r: q.right().value, b: q.bottom().value, top: q.top().value, h: q.height().value.max(1.0) });
+        let h = t.scaled_font_size().value.max(1.0);
+        let (mut l, mut r, mut base) = (q.left().value, q.right().value, q.bottom().value);
+        if let Ok(chars) = t.chars(&text) {
+            let mut first = true;
+            for c in chars.iter() {
+                if let Ok(b) = c.loose_bounds() {
+                    if first {
+                        (l, r) = (b.left().value, b.right().value);
+                        if let Ok(y) = c.origin_y() {
+                            base = y.value;
+                        }
+                        first = false;
+                    } else {
+                        l = l.min(b.left().value);
+                        r = r.max(b.right().value);
+                    }
+                }
+            }
+        }
+        runs.push(Run { t: s, l, r, base, h });
     }
     let mut dups = 0usize;
     let mut out = String::new();
@@ -172,14 +195,14 @@ fn deduped_text(page: &PdfPage) -> Option<String> {
                 prev_right = prev_right.max(r.r);
                 continue;
             }
-            let below = r.top < p.b; // next line (PDF y grows upwards)
-            let new_column = r.b > p.top && r.l < p.l;
-            if below || new_column {
+            let size = p.h.max(r.h);
+            let new_line = (r.base - p.base).abs() > size * 0.5;
+            if new_line {
                 while out.ends_with(' ') {
                     out.pop();
                 }
                 out.push('\n');
-            } else if r.l - prev_right > p.h * 0.3 && !out.ends_with(' ') && !p.t.ends_with(' ') {
+            } else if r.l - prev_right > size * 0.2 && !out.ends_with(' ') && !p.t.ends_with(' ') && !r.t.starts_with(' ') {
                 out.push(' ');
             }
         }

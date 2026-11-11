@@ -214,7 +214,7 @@ function createTauriBackend(): Backend {
       const { open } = await dialog;
       const r = await open({
         multiple: true,
-        filters: [{ name: "เอกสารและรูปภาพ", extensions: ["pdf", "docx", "pptx", "txt", "md", "png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff"] }],
+        filters: [{ name: "เอกสารและรูปภาพ", extensions: ["pdf", "docx", "pptx", "txt", "md", "sql", "png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff"] }],
       });
       if (!r) return [];
       return Array.isArray(r) ? r : [r];

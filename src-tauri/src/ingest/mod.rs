@@ -13,7 +13,7 @@ use crate::commands::AppState;
 use crate::embed::{Embedder, ModelId};
 use crate::errors::{AppError, AppResult};
 use crate::store::{NewChunk, NewImage, VectorStore};
-use chunker::{chunk, normalize, ChunkOptions};
+use chunker::{chunk, normalize, section_title, ChunkOptions};
 use parking_lot::Mutex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -223,6 +223,8 @@ pub fn extract_chunks(path: &Path, opts: ChunkOptions) -> AppResult<Extracted> {
 pub fn chunk_pages(pages: Vec<Page>, opts: ChunkOptions) -> Extracted {
     let mut out = Extracted { chunks: Vec::new(), images: Vec::new() };
     let mut seen: HashSet<[u8; 16]> = HashSet::new();
+    // last top-level section heading seen ("07 Time & Labor …"), carried across pages
+    let mut section: Option<String> = None;
     for p in pages {
         let first_ord = out.chunks.len();
         let mut at: HashMap<usize, usize> = HashMap::new(); // picture → chunk ord
@@ -235,9 +237,24 @@ pub fn chunk_pages(pages: Vec<Page>, opts: ChunkOptions) -> Extracted {
                     None => clean.push(ch),
                 }
             }
-            let clean = normalize(&clean);
+            let mut clean = normalize(&clean);
             if clean.is_empty() {
                 continue; // markers carry over to the next chunk
+            }
+            // a chunk from the middle of a section gets the section's title in front, so
+            // "7.4 Reported Time" is found by questions about "Time & Labor" too
+            // (skipping a page-number line at the top)
+            let starts_with_section = clean
+                .lines()
+                .find(|l| !l.trim().chars().all(|c| c.is_ascii_digit()))
+                .and_then(section_title)
+                .is_some();
+            let next_section = clean.lines().filter_map(section_title).last().map(str::to_string);
+            if let (Some(s), false) = (&section, starts_with_section) {
+                clean = format!("{s} ›\n{clean}");
+            }
+            if next_section.is_some() {
+                section = next_section;
             }
             let ord = out.chunks.len();
             for i in pending.drain(..) {
@@ -362,7 +379,8 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
 
     // a different embedding model (or chunk settings) invalidates every vector
     let signature = format!(
-        "{}|{}|{}|ocr{}|img{}",
+        // chunk2: heading-aware chunks with section titles (v0.6)
+        "{}|{}|{}|ocr{}|img{}|chunk2",
         model.as_str(),
         opts.size,
         opts.overlap,
@@ -545,6 +563,97 @@ mod tests {
         set_keep_images(true);
         assert!(p.images.is_empty());
         assert!(p.text.contains("ในรูป"));
+    }
+
+    /// Print the pages and chunks the app makes from one file:
+    /// `cargo test --lib dump_document -- --ignored --nocapture` with DOCASK_TEST_RES and DOCASK_TEST_FILE.
+    #[test]
+    #[ignore]
+    fn dump_document() {
+        let res = PathBuf::from(std::env::var("DOCASK_TEST_RES").expect("DOCASK_TEST_RES"));
+        let file = PathBuf::from(std::env::var("DOCASK_TEST_FILE").expect("DOCASK_TEST_FILE"));
+        ocr::init(res.join("ocr"));
+        pdf::init(res.join("pdfium").join("pdfium.dll"));
+        let pages = extractor_for(&file).unwrap().extract(&file).unwrap();
+        let show_pages = std::env::var("DOCASK_TEST_PAGES").is_ok();
+        if show_pages {
+            for p in &pages {
+                println!("--- page {:?}\n{}", p.page, p.text.trim());
+            }
+        }
+        let ex = chunk_pages(pages, ChunkOptions::default());
+        for (ord, (page, text)) in ex.chunks.iter().enumerate() {
+            println!("===== chunk {ord} (page {page:?}, {} chars)\n{text}", text.chars().count());
+        }
+    }
+
+    /// Search quality on a real SQL manual: does the right entry come first?
+    /// `cargo test --release --lib bench_manual -- --ignored --nocapture` with DOCASK_TEST_RES,
+    /// DOCASK_TEST_FILE (SQL_Query_Manual.pdf), DOCASK_TEST_EMBED, optional DOCASK_TEST_RERANK.
+    #[test]
+    #[ignore]
+    fn bench_manual() {
+        use crate::encoder::{Encoder, Layout, Pooling};
+        use crate::store::SqliteStore;
+        let res = PathBuf::from(std::env::var("DOCASK_TEST_RES").expect("DOCASK_TEST_RES"));
+        let file = PathBuf::from(std::env::var("DOCASK_TEST_FILE").expect("DOCASK_TEST_FILE"));
+        pdf::init(res.join("pdfium").join("pdfium.dll"));
+        let ex = chunk_pages(extractor_for(&file).unwrap().extract(&file).unwrap(), ChunkOptions::default());
+        let emb_dir = PathBuf::from(std::env::var("DOCASK_TEST_EMBED").expect("DOCASK_TEST_EMBED"));
+        let emb = Encoder::load(&emb_dir.join("onnx").join("model_quantized.onnx"), &emb_dir, 512, false, Layout::auto()).unwrap();
+        let texts: Vec<String> = ex.chunks.iter().map(|(_, t)| t.clone()).collect();
+        let pv = emb.embed(&texts.iter().map(|t| format!("passage: {t}")).collect::<Vec<_>>(), Pooling::Mean, 4).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = SqliteStore::open(&dir.path().join("index.db")).unwrap();
+        let d = st.upsert_document("C:\\m.pdf", "h", 1, 1, "indexing", None).unwrap();
+        let chunks: Vec<NewChunk> = ex.chunks.iter().zip(&pv).enumerate()
+            .map(|(i, ((page, t), e))| NewChunk { page: *page, ord: i as i64, text: t.clone(), embedding: e.clone() }).collect();
+        st.replace_chunks(d, &chunks, &[]).unwrap();
+        let rr = std::env::var("DOCASK_TEST_RERANK").ok().map(|r| PathBuf::from(r).join("mm")).and_then(|dir| {
+            Encoder::load(&dir.join("onnx").join("model_quantized.onnx"), &dir, 512, true, Layout { intra: Layout::auto().intra * Layout::auto().workers, workers: 1 }).ok()
+        });
+        // (question, text that only the right entry contains)
+        let qs = [
+            ("ดูผู้อนุมัติการลาของพนักงานใช้ตารางไหน", "PS_GP_ABS_SS_STA"),
+            ("ขอ SQL ดูการยกเลิกลา", "PS_FS_ABS_CANCEL"),
+            ("ตรวจสอบเวลาเข้างาน clock time ของพนักงานในวันหนึ่ง", "PS_FS_RAW_PUNCH\nWHERE"),
+            ("ดู OT ของพนักงานวันที่กำหนดดูตารางอะไรบ้าง", "PS_XPS_TL_OT_VW"),
+            ("PS_TL_PAYABLE_TIME OT10 สถานะ SP", "OT10"),
+            ("ดูสิทธิ์ role ของ user", "PSROLEUSER"),
+            ("ข้อมูล consent ศาสนาตาม PDPA", "PS_GS_PDPA_REG_CON"),
+            ("ดูรูปโปรไฟล์ปัจจุบันของพนักงาน", "PS_EMPL_PHOTO"),
+            ("ปรับยอดเงินสดขาดเกินเป็น 0", "PS_FS_CASHIER_DAT"),
+            ("ผล payroll แถบ accumulators", "PS_GP_RSLT_ACUM_VW"),
+            ("หาชื่อคอลัมน์ของตาราง", "DBA_TAB_COLUMNS"),
+            ("ประวัติการอบรมของพนักงาน", "PS_TRAINING"),
+            ("กะการทำงาน shift table", "PS_SCH_SHIFT_TBL"),
+            ("ค่าความยากลำบาก hardship WHARD", "PS_JPM_JP_ITEMS"),
+            ("Retro trigger ของพนักงาน", "PS_GP_RTO_TRGR"),
+            ("รายชื่อพนักงาน ณ วันที่กำหนดตามบริษัทและ paygroup", "GP_PAYGROUP = '263FS'"),
+        ];
+        println!("{} chunks", texts.len());
+        for mode in ["vector", "hybrid", "hybrid+rerank"] {
+            if mode.ends_with("rerank") && rr.is_none() {
+                continue;
+            }
+            let mut ranks = Vec::new();
+            for (q, needle) in qs {
+                let qv = emb.embed(&[format!("query: {q}")], Pooling::Mean, 1).unwrap().pop().unwrap();
+                let want = if mode.ends_with("rerank") { 15 } else { 5 };
+                let mut hits = if mode == "vector" { st.search(&qv, want, 0.3).unwrap() } else { st.hybrid_search(&qv, q, want, 0.3).unwrap() };
+                if let Some(rr) = rr.as_ref().filter(|_| mode.ends_with("rerank")) {
+                    let s = rr.score_pairs(q, &hits.iter().map(|h| h.text.clone()).collect::<Vec<_>>(), 4).unwrap();
+                    let mut idx: Vec<usize> = (0..hits.len()).collect();
+                    idx.sort_by(|a, b| s[*b].total_cmp(&s[*a]));
+                    hits = idx.into_iter().map(|i| hits[i].clone()).collect();
+                }
+                hits.truncate(5);
+                ranks.push(hits.iter().position(|h| h.text.contains(needle)).map(|p| p + 1).unwrap_or(99));
+            }
+            let top1 = ranks.iter().filter(|&&r| r == 1).count();
+            let top5 = ranks.iter().filter(|&&r| r <= 5).count();
+            println!("{mode:<14} top-1 {top1}/{n}  in top-5 {top5}/{n}  ranks {ranks:?}", n = ranks.len());
+        }
     }
 
     /// Real models + pdfium: `cargo test real_documents -- --ignored --nocapture`

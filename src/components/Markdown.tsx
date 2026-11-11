@@ -1,8 +1,33 @@
 // Minimal, safe markdown subset for answers: paragraphs, **bold**, `code`, ```fences```,
 // bullet / numbered lists, and [n] citations rendered as CitationChip. No raw HTML.
-import { Fragment, type ReactNode } from "react";
+import { Fragment, useState, type ReactNode } from "react";
+import { Check, Copy } from "lucide-react";
 import type { Source } from "../lib/types";
 import { CitationChip } from "./CitationChip";
+
+/** Code / SQL from the documents, with a copy button (copies the code only). */
+function CodeBlock({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="code-block">
+      <button
+        className="icon-btn code-copy"
+        aria-label={copied ? "คัดลอกแล้ว" : "คัดลอกโค้ด"}
+        title={copied ? "คัดลอกแล้ว" : "คัดลอกโค้ด"}
+        onClick={async () => {
+          try {
+            await navigator.clipboard.writeText(text);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          } catch { /* clipboard unavailable */ }
+        }}
+      >
+        {copied ? <Check size={14} strokeWidth={1.8} /> : <Copy size={14} strokeWidth={1.8} />}
+      </button>
+      <pre><code>{text}</code></pre>
+    </div>
+  );
+}
 
 type Block =
   | { t: "p"; text: string }
@@ -80,7 +105,7 @@ export function Markdown({ text, sources, trailing }: { text: string; sources: S
         switch (b.t) {
           case "p": return <p key={i}>{inline(b.text, sources, `p${i}`)}{tail}</p>;
           case "h": return <p key={i}><strong>{inline(b.text, sources, `h${i}`)}</strong>{tail}</p>;
-          case "code": return <Fragment key={i}><pre><code>{b.text}</code></pre>{tail}</Fragment>;
+          case "code": return <Fragment key={i}><CodeBlock text={b.text} />{tail}</Fragment>;
           default: {
             const L = b.t;
             return (

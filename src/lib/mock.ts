@@ -146,6 +146,12 @@ export function createMockBackend(): Backend {
   };
 
   const answerFor = (q: string, svc: Service): { text: string; sources: Source[] } => {
+    if (/sql|คิวรี่|ตาราง/i.test(q) && svc.id === "hr") {
+      return {
+        text: "ดูผู้อนุมัติการลาได้จากตาราง **PS_GP_ABS_SS_STA** [1]\n\n```sql\nSELECT * FROM SYSADM.PS_GP_ABS_SS_STA WHERE EMPLID = '{EMPLID}';\n```\n[1]\n\nแทน `{EMPLID}` ด้วยรหัสพนักงาน 7 หลัก",
+        sources: hrSources,
+      };
+    }
     if (svc.id === "hr") return { text: messages.c1[1].content, sources: hrSources };
     const list = (docs[svc.id] ?? []).filter((d) => d.status === "ready");
     const sources: Source[] = list.slice(0, 2).map((d, i) => ({
