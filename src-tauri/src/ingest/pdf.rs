@@ -1,9 +1,9 @@
 use super::{keep_images, ocr, Extractor, Page};
 use crate::errors::{AppError, AppResult};
 use once_cell::sync::OnceCell;
-use pdfium_render::prelude::{PdfPage, PdfPageObjectCommon, PdfPageObjectsCommon, PdfRenderConfig, Pdfium};
+use pdfium_render::prelude::{PdfPage, PdfPageObjectCommon, PdfPageTextObject, PdfPageObjectsCommon, PdfRenderConfig, Pdfium};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub const SCANNED_PDF: &str = "ข้าม · PDF สแกน ไม่มีข้อความ (OCR ปิดอยู่หรือไม่มีโมเดล OCR)";
@@ -153,30 +153,40 @@ fn deduped_text(page: &PdfPage) -> Option<String> {
         h: f32,
     }
     let text = page.text().ok()?;
+    // Glyph boxes per text object. `PdfPageTextObject::chars` scans every character of the
+    // page for each object (quadratic: 15 s for a 14-page manual), so walk the page's
+    // characters once and group them by their object instead. Objects are told apart by
+    // their ink box + position — identical ones are identical drawings anyway.
+    type Key = [u32; 6];
+    fn key(o: &PdfPageTextObject<'_>) -> Option<Key> {
+        let q = o.bounds().ok()?;
+        let m = o.matrix().ok()?;
+        Some([q.left().value, q.right().value, q.bottom().value, q.top().value, m.e(), m.f()].map(f32::to_bits))
+    }
+    // object → (left, right, baseline of its first glyph)
+    let mut boxes: HashMap<Key, (f32, f32, f32)> = HashMap::new();
+    for c in text.chars().iter() {
+        let Ok(obj) = c.text_object() else { continue }; // generated space / line break
+        let (Some(k), Ok(b)) = (key(&obj), c.loose_bounds()) else { continue };
+        let (l, r) = (b.left().value, b.right().value);
+        boxes
+            .entry(k)
+            .and_modify(|e| {
+                e.0 = e.0.min(l);
+                e.1 = e.1.max(r);
+            })
+            .or_insert_with(|| (l, r, c.origin_y().map(|y| y.value).unwrap_or(b.bottom().value)));
+    }
     let mut runs = Vec::new();
     for o in page.objects().iter() {
         let Some(t) = o.as_text_object() else { continue };
-        let s = t.text();
+        // not `t.text()`: that re-analyses the whole page on every call
+        let s = text.for_object(t);
         let Ok(q) = o.bounds() else { continue };
         let h = t.scaled_font_size().value.max(1.0);
-        let (mut l, mut r, mut base) = (q.left().value, q.right().value, q.bottom().value);
-        if let Ok(chars) = t.chars(&text) {
-            let mut first = true;
-            for c in chars.iter() {
-                if let Ok(b) = c.loose_bounds() {
-                    if first {
-                        (l, r) = (b.left().value, b.right().value);
-                        if let Ok(y) = c.origin_y() {
-                            base = y.value;
-                        }
-                        first = false;
-                    } else {
-                        l = l.min(b.left().value);
-                        r = r.max(b.right().value);
-                    }
-                }
-            }
-        }
+        let (l, r, base) = key(t)
+            .and_then(|k| boxes.get(&k).copied())
+            .unwrap_or((q.left().value, q.right().value, q.bottom().value));
         runs.push(Run { t: s, l, r, base, h });
     }
     let mut dups = 0usize;
@@ -214,4 +224,46 @@ fn deduped_text(page: &PdfPage) -> Option<String> {
     let full = page.text().map(|t| t.all()).unwrap_or_default();
     let count = |s: &str| s.chars().filter(|c| !c.is_whitespace()).count();
     (dups >= 2 && count(&out) * 10 >= count(&full) * 6).then_some(out)
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    /// `cargo test --release --lib bench_pdf -- --ignored --nocapture` with DOCASK_TEST_RES, DOCASK_TEST_FILE
+    #[test]
+    #[ignore]
+    fn bench_pdf() {
+        use std::time::Instant;
+        let res = PathBuf::from(std::env::var("DOCASK_TEST_RES").unwrap());
+        init(res.join("pdfium").join("pdfium.dll"));
+        let file = PathBuf::from(std::env::var("DOCASK_TEST_FILE").unwrap());
+        let p = pdfium().unwrap();
+        let t = Instant::now();
+        let doc = p.load_pdf_from_file(&file, None).unwrap();
+        println!("load {:?}", t.elapsed());
+        use std::time::Duration;
+        let mut tm = [Duration::ZERO; 6];
+        for page in doc.pages().iter() {
+            let t = Instant::now();
+            let text = page.text().unwrap();
+            tm[0] += t.elapsed();
+            let t = Instant::now();
+            let all = text.chars();
+            let chars: Vec<_> = all.iter().collect();
+            tm[1] += t.elapsed();
+            let t = Instant::now();
+            for c in &chars { let _ = c.loose_bounds(); let _ = c.origin_y(); }
+            tm[2] += t.elapsed();
+            let t = Instant::now();
+            for c in &chars { let _ = c.text_object(); }
+            tm[3] += t.elapsed();
+            let t = Instant::now();
+            for o in page.objects().iter() { if let Some(x) = o.as_text_object() { let _ = text.for_object(x); } }
+            tm[4] += t.elapsed();
+            let t = Instant::now();
+            for o in page.objects().iter() { if let Some(x) = o.as_text_object() { let _ = x.scaled_font_size(); let _ = o.bounds(); let _ = x.matrix(); } }
+            tm[5] += t.elapsed();
+        }
+        println!("text {:?} chars {:?} bounds {:?} text_object {:?} obj.text {:?} obj.geom {:?}", tm[0], tm[1], tm[2], tm[3], tm[4], tm[5]);
+    }
 }

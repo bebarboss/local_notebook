@@ -330,6 +330,11 @@ impl IndexManager {
                 let again = jobs.get(&service_id).map(|j| j.rerun && !j.cancel.load(Ordering::Relaxed)).unwrap_or(false);
                 if !again {
                     jobs.remove(&service_id);
+                    let idle = jobs.is_empty();
+                    drop(jobs);
+                    if idle {
+                        crate::background::on_indexing_idle(&app);
+                    }
                     break;
                 }
             })
@@ -348,6 +353,10 @@ impl IndexManager {
             j.cancel.store(true, Ordering::Relaxed);
             j.rerun = false;
         }
+    }
+
+    pub fn any_running(&self) -> bool {
+        !self.jobs.lock().is_empty()
     }
 
     pub fn is_running(&self, service_id: &str) -> bool {
@@ -447,71 +456,205 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
         return Err(AppError::new("no_embedding_model", "ยังไม่มีโมเดล embedding — เอกสารรอคิวไว้ ไปที่ ตั้งค่า › Embedding และ Index"));
     }
 
-    for (i, (path, mtime, bytes)) in work.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            progress(None, i, total, 0.0, "cancelled", Some("ยกเลิกการทำ index แล้ว".into()));
-            return Ok(());
-        }
-        let p = path.to_string_lossy().into_owned();
-        progress(Some(path.as_path()), i, total, 0.0, "extracting", None);
-        let doc_id = store.lock().upsert_document(&p, "", 0, *bytes, "indexing", None)?;
-        let hash = match file_hash(path) {
-            Ok(h) => h,
-            Err(e) => {
-                store.lock().set_status(doc_id, "error", Some(&e.message))?;
-                continue;
-            }
-        };
-        let Extracted { chunks: pieces, images } = match extract_chunks(path, opts) {
-            Ok(c) if c.chunks.is_empty() => {
-                store.lock().upsert_document(&p, &hash, *mtime, *bytes, "skipped", Some("ข้าม · ไม่พบข้อความในไฟล์"))?;
-                continue;
-            }
-            Ok(c) => c,
-            Err(e) if matches!(e.code.as_str(), "scanned_pdf" | "ocr_off" | "no_text") => {
-                store.lock().upsert_document(&p, &hash, *mtime, *bytes, "skipped", Some(&e.message))?;
-                continue;
-            }
-            Err(e) => {
-                store.lock().upsert_document(&p, &hash, *mtime, *bytes, "error", Some(&e.message))?;
-                continue;
-            }
-        };
-
-        // text that was already embedded (file edited, OCR/picture setting changed) keeps its vector
-        let mut known = store.lock().chunk_vectors(doc_id)?;
-        let mut vecs: Vec<Option<Vec<f32>>> = pieces.iter().map(|(_, t)| known.remove(t)).collect();
-        let todo: Vec<usize> = (0..pieces.len()).filter(|&j| vecs[j].is_none()).collect();
-        let n = todo.len().max(1);
-        let mut done = 0usize;
-        for batch in todo.chunks(32) {
-            if cancel.load(Ordering::Relaxed) {
-                store.lock().upsert_document(&p, &hash, 0, *bytes, "queued", None)?;
-                progress(None, i, total, 0.0, "cancelled", Some("ยกเลิกการทำ index แล้ว".into()));
-                return Ok(());
-            }
-            let texts: Vec<String> = batch.iter().map(|&j| pieces[j].1.clone()).collect();
-            for (&j, emb) in batch.iter().zip(state.embedder.embed_passages(model, &texts)?) {
-                vecs[j] = Some(emb);
-            }
-            done += batch.len();
-            progress(Some(path.as_path()), i, total, done as f32 / n as f32, "embedding", None);
-        }
-        let chunks: Vec<NewChunk> = pieces
-            .into_iter()
-            .zip(vecs)
-            .enumerate()
-            .map(|(ord, ((page, text), emb))| NewChunk { page, ord: ord as i64, text, embedding: emb.expect("every chunk embedded") })
-            .collect();
-        {
-            let mut s = store.lock();
-            s.upsert_document(&p, &hash, *mtime, *bytes, "indexing", None)?;
-            s.replace_chunks(doc_id, &chunks, &images)?;
-        }
+    let store_ref: &Mutex<crate::store::SqliteStore> = &store;
+    let finished = index_files(store_ref, &work, opts, cancel, &|texts| state.embedder.embed_passages(model, texts), &progress)?;
+    if finished {
+        state.services.lock().touch(service_id);
     }
-    state.services.lock().touch(service_id);
-    progress(None, total, total, 1.0, "done", None);
     Ok(())
+}
+
+/// One file extracted and chunked, waiting for its missing vectors.
+struct Prepared {
+    path: PathBuf,
+    p: String,
+    hash: String,
+    mtime: i64,
+    bytes: i64,
+    doc_id: i64,
+    pieces: Vec<(Option<u32>, String)>,
+    images: Vec<NewImage>,
+    vecs: Vec<Option<Vec<f32>>>,
+    /// chunk indexes that still need a vector
+    todo: Vec<usize>,
+    /// how many of `todo` were handed to the embedder / came back
+    sent: usize,
+    embedded: usize,
+}
+
+/// Extract + chunk one file and look up the vectors it already has.
+/// `None` → nothing to embed (skipped / error recorded on the document).
+fn prepare(store: &Mutex<crate::store::SqliteStore>, path: &Path, mtime: i64, bytes: i64, opts: ChunkOptions) -> AppResult<Option<Prepared>> {
+    let p = path.to_string_lossy().into_owned();
+    let doc_id = store.lock().upsert_document(&p, "", 0, bytes, "indexing", None)?;
+    let hash = match file_hash(path) {
+        Ok(h) => h,
+        Err(e) => {
+            store.lock().set_status(doc_id, "error", Some(&e.message))?;
+            return Ok(None);
+        }
+    };
+    let Extracted { chunks: pieces, images } = match extract_chunks(path, opts) {
+        Ok(c) if c.chunks.is_empty() => {
+            store.lock().upsert_document(&p, &hash, mtime, bytes, "skipped", Some("ข้าม · ไม่พบข้อความในไฟล์"))?;
+            return Ok(None);
+        }
+        Ok(c) => c,
+        Err(e) if matches!(e.code.as_str(), "scanned_pdf" | "ocr_off" | "no_text") => {
+            store.lock().upsert_document(&p, &hash, mtime, bytes, "skipped", Some(&e.message))?;
+            return Ok(None);
+        }
+        Err(e) => {
+            store.lock().upsert_document(&p, &hash, mtime, bytes, "error", Some(&e.message))?;
+            return Ok(None);
+        }
+    };
+    // text that was already embedded (file edited, OCR/picture setting changed) keeps its vector
+    let mut known = store.lock().chunk_vectors(doc_id)?;
+    let vecs: Vec<Option<Vec<f32>>> = pieces.iter().map(|(_, t)| known.remove(t)).collect();
+    let todo: Vec<usize> = (0..pieces.len()).filter(|&j| vecs[j].is_none()).collect();
+    Ok(Some(Prepared { path: path.to_path_buf(), p, hash, mtime, bytes, doc_id, pieces, images, vecs, todo, sent: 0, embedded: 0 }))
+}
+
+fn save(store: &Mutex<crate::store::SqliteStore>, d: Prepared) -> AppResult<()> {
+    let chunks: Vec<NewChunk> = d
+        .pieces
+        .into_iter()
+        .zip(d.vecs)
+        .enumerate()
+        .map(|(ord, ((page, text), emb))| NewChunk { page, ord: ord as i64, text, embedding: emb.expect("every chunk embedded") })
+        .collect();
+    let mut s = store.lock();
+    s.upsert_document(&d.p, &d.hash, d.mtime, d.bytes, "indexing", None)?;
+    s.replace_chunks(d.doc_id, &chunks, &d.images)
+}
+
+/// Chunks per embedder call (the encoder splits it further across its workers).
+const EMBED_BATCH: usize = 32;
+/// Files extracted ahead of the embedder.
+const PREFETCH: usize = 2;
+
+type Progress<'a> = dyn Fn(Option<&Path>, usize, usize, f32, &'static str, Option<String>) + 'a;
+
+/// Index `work` as a pipeline: one thread extracts and chunks the next files while this
+/// thread embeds, and chunks of several small files share one embedder batch so every
+/// encoder worker has something to do. Files are saved in order as soon as they are
+/// complete. Returns false when cancelled.
+fn index_files(
+    store: &Mutex<crate::store::SqliteStore>,
+    work: &[(PathBuf, i64, i64)],
+    opts: ChunkOptions,
+    cancel: &AtomicBool,
+    embed: &dyn Fn(&[String]) -> AppResult<Vec<Vec<f32>>>,
+    progress: &Progress<'_>,
+) -> AppResult<bool> {
+    use std::collections::VecDeque;
+    use std::sync::mpsc::{sync_channel, TryRecvError};
+    let total = work.len();
+    let extracting: Mutex<Option<PathBuf>> = Mutex::new(None);
+    let (tx, rx) = sync_channel::<AppResult<Option<Prepared>>>(PREFETCH);
+
+    std::thread::scope(|scope| {
+        let ext = &extracting;
+        scope.spawn(move || {
+            for (path, mtime, bytes) in work {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                *ext.lock() = Some(path.clone());
+                let r = prepare(store, path, *mtime, *bytes, opts);
+                let failed = r.is_err();
+                // receiver gone → the embedder stopped (error / cancel)
+                if tx.send(r).is_err() || failed {
+                    break;
+                }
+            }
+        });
+
+        // owned here so it is dropped on return: an extractor blocked on `send` then stops
+        let rx = rx;
+        let mut queue: VecDeque<Prepared> = VecDeque::new();
+        let mut done = 0usize;
+        let mut open = true;
+        let requeue = |queue: &VecDeque<Prepared>| -> AppResult<()> {
+            for d in queue {
+                store.lock().upsert_document(&d.p, &d.hash, 0, d.bytes, "queued", None)?;
+            }
+            Ok(())
+        };
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                requeue(&queue)?;
+                progress(None, done, total, 0.0, "cancelled", Some("ยกเลิกการทำ index แล้ว".into()));
+                return Ok(false);
+            }
+            // take what the extractor already has, without waiting
+            while open {
+                match rx.try_recv() {
+                    Ok(Ok(Some(d))) => queue.push_back(d),
+                    Ok(Ok(None)) => done += 1,
+                    Ok(Err(e)) => {
+                        requeue(&queue)?;
+                        return Err(e);
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => open = false,
+                }
+            }
+            // files whose every chunk has a vector are saved, in order
+            while queue.front().is_some_and(|d| d.embedded == d.todo.len()) {
+                let d = queue.pop_front().expect("front");
+                save(store, d)?;
+                done += 1;
+            }
+            let waiting: usize = queue.iter().map(|d| d.todo.len() - d.sent).sum();
+            if waiting == 0 {
+                if queue.is_empty() && !open {
+                    break;
+                }
+                if open {
+                    let now = extracting.lock().clone();
+                    progress(now.as_deref(), done, total, 0.0, "extracting", None);
+                    match rx.recv() {
+                        Ok(Ok(Some(d))) => queue.push_back(d),
+                        Ok(Ok(None)) => done += 1,
+                        Ok(Err(e)) => {
+                            requeue(&queue)?;
+                            return Err(e);
+                        }
+                        Err(_) => open = false,
+                    }
+                }
+                continue;
+            }
+            // one batch across files, front first
+            let mut batch: Vec<(usize, usize)> = Vec::with_capacity(EMBED_BATCH);
+            for (qi, d) in queue.iter_mut().enumerate() {
+                while d.sent < d.todo.len() && batch.len() < EMBED_BATCH {
+                    batch.push((qi, d.todo[d.sent]));
+                    d.sent += 1;
+                }
+            }
+            let texts: Vec<String> = batch.iter().map(|&(qi, j)| queue[qi].pieces[j].1.clone()).collect();
+            let vecs = match embed(&texts) {
+                Ok(v) => v,
+                Err(e) => {
+                    requeue(&queue)?;
+                    return Err(e);
+                }
+            };
+            for (&(qi, j), v) in batch.iter().zip(vecs) {
+                queue[qi].vecs[j] = Some(v);
+                queue[qi].embedded += 1;
+            }
+            if let Some(d) = queue.front() {
+                let dp = d.embedded as f32 / d.todo.len().max(1) as f32;
+                progress(Some(d.path.as_path()), done, total, dp, "embedding", None);
+            }
+        }
+        progress(None, total, total, 1.0, "done", None);
+        Ok(true)
+    })
 }
 
 #[cfg(test)]
@@ -750,6 +893,105 @@ mod tests {
             let e = t.elapsed();
             println!("embed 100 chunks (round {round}, {:?}): {e:?} ({:.1} chunks/s)", crate::encoder::Layout::auto(), 100.0 / e.as_secs_f64());
         }
+    }
+
+    /// Pipeline vs one file at a time: `cargo test --release --lib bench_pipeline -- --ignored --nocapture`
+    /// with DOCASK_TEST_RES, DOCASK_TEST_DIR (every file in it is copied DOCASK_TEST_COPIES times,
+    /// default 10) and DOCASK_TEST_EMBED.
+    #[test]
+    #[ignore]
+    fn bench_pipeline() {
+        use crate::store::SqliteStore;
+        use std::time::Instant;
+        let res = PathBuf::from(std::env::var("DOCASK_TEST_RES").expect("DOCASK_TEST_RES"));
+        let dir = PathBuf::from(std::env::var("DOCASK_TEST_DIR").expect("DOCASK_TEST_DIR"));
+        let emb = PathBuf::from(std::env::var("DOCASK_TEST_EMBED").expect("DOCASK_TEST_EMBED"));
+        let copies: usize = std::env::var("DOCASK_TEST_COPIES").ok().and_then(|c| c.parse().ok()).unwrap_or(10);
+        ocr::init(res.join("ocr"));
+        pdf::init(res.join("pdfium").join("pdfium.dll"));
+        let enc = crate::embed::Embedder::load(ModelId::MultilingualE5Small, &emb).unwrap();
+        let embed = |t: &[String]| enc.embed(&t.iter().map(|x| format!("passage: {x}")).collect::<Vec<_>>(), crate::encoder::Pooling::Mean, 4);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut work = Vec::new();
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let p = e.path();
+            if !p.is_file() || !is_supported(&p) {
+                continue;
+            }
+            let t = Instant::now();
+            let ex = extract_chunks(&p, ChunkOptions::default()).unwrap();
+            println!("extract {:?}: {:?} → {} chunks", p.file_name().unwrap(), t.elapsed(), ex.chunks.len());
+            for k in 0..copies {
+                let to = tmp.path().join(format!("{k}_{}", p.file_name().unwrap().to_string_lossy()));
+                std::fs::copy(&p, &to).unwrap();
+                let bytes = std::fs::metadata(&to).unwrap().len() as i64;
+                work.push((to, 1, bytes));
+            }
+        }
+        println!("{} files, {:?}", work.len(), crate::encoder::Layout::auto());
+        let cancel = AtomicBool::new(false);
+        let quiet = |_: Option<&Path>, _: usize, _: usize, _: f32, _: &'static str, _: Option<String>| {};
+        let mut counts = Vec::new();
+        for mode in ["one file at a time", "pipeline"] {
+            let store = Mutex::new(SqliteStore::open(&tmp.path().join(format!("{}.db", counts.len()))).unwrap());
+            let t = Instant::now();
+            if mode == "pipeline" {
+                assert!(index_files(&store, &work, ChunkOptions::default(), &cancel, &embed, &quiet).unwrap());
+            } else {
+                for w in &work {
+                    index_files(&store, std::slice::from_ref(w), ChunkOptions::default(), &cancel, &embed, &quiet).unwrap();
+                }
+            }
+            let docs = store.lock().list_documents().unwrap();
+            let chunks: i64 = docs.iter().map(|d| d.chunk_count).sum();
+            println!("{mode}: {:?} ({chunks} chunks)", t.elapsed());
+            counts.push(chunks);
+        }
+        assert_eq!(counts[0], counts[1]);
+    }
+
+    #[test]
+    fn index_files_saves_every_file() {
+        use crate::store::SqliteStore;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut work = Vec::new();
+        for i in 0..7 {
+            let p = tmp.path().join(format!("{i}.txt"));
+            let body = if i == 3 { String::new() } else { format!("เอกสาร {i} ").repeat(40 * (i + 1)) };
+            std::fs::write(&p, body).unwrap();
+            work.push((p, 5, 1));
+        }
+        let store = Mutex::new(SqliteStore::open(&tmp.path().join("t.db")).unwrap());
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let embed = |t: &[String]| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(t.iter().map(|x| vec![x.len() as f32, 1.0]).collect())
+        };
+        let cancel = AtomicBool::new(false);
+        let quiet = |_: Option<&Path>, _: usize, _: usize, _: f32, _: &'static str, _: Option<String>| {};
+        let opts = ChunkOptions { size: 200, overlap: 20 };
+        assert!(index_files(&store, &work, opts, &cancel, &embed, &quiet).unwrap());
+        let docs = store.lock().list_documents().unwrap();
+        assert_eq!(docs.len(), 7);
+        for d in &docs {
+            if d.path.ends_with("3.txt") {
+                assert_eq!(d.status, "skipped");
+            } else {
+                assert_eq!(d.status, "ready", "{}", d.path);
+                assert_eq!(d.mtime, 5);
+                assert!(d.chunk_count > 0);
+            }
+        }
+        let total: i64 = docs.iter().map(|d| d.chunk_count).sum();
+        // small files share batches → fewer calls than one per file
+        assert!(calls.load(Ordering::Relaxed) <= (total as usize).div_ceil(EMBED_BATCH) + 6);
+
+        // an embedder failure leaves unfinished files queued for next time
+        let store = Mutex::new(SqliteStore::open(&tmp.path().join("f.db")).unwrap());
+        let fail = |_: &[String]| -> AppResult<Vec<Vec<f32>>> { Err(AppError::new("embedding", "boom")) };
+        assert!(index_files(&store, &work, opts, &cancel, &fail, &quiet).is_err());
+        assert!(store.lock().list_documents().unwrap().iter().all(|d| d.status != "ready"));
     }
 
     #[test]

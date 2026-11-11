@@ -1,5 +1,6 @@
 //! DocAsk — local RAG over company documents through the Gosoft Agent Gateway.
 
+pub mod background;
 pub mod chats;
 pub mod commands;
 pub mod config;
@@ -25,6 +26,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
+        .on_window_event(background::on_window_event)
         .setup(|app| {
             let handle = app.handle().clone();
             let state = AppState::new(&handle).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
@@ -32,6 +35,9 @@ pub fn run() {
             ingest::ocr::set_enabled(state.settings.lock().ocr_enabled);
             ingest::set_keep_images(state.settings.lock().keep_images);
             app.manage(state);
+            if let Err(e) = background::init(app.handle()) {
+                log::warn!("tray icon unavailable: {e}");
+            }
 
             // watch every service folder and catch up on changes made while closed
             let st = app.state::<AppState>();
