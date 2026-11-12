@@ -3,7 +3,7 @@
 
 use crate::chats::{ChatDb, Chat, Message, NewMessage, SourceRef};
 use crate::config::{self, GatewayConfig, GatewayInfo, ModelConfig, Settings};
-use crate::embed::{self, DownloadProgress, Embedder, EmbeddingStatus, ModelId};
+use crate::embed::{DownloadProgress, EmbeddingStatus};
 use crate::errors::{AppError, AppResult};
 use crate::gateway_test::{self, TestResult};
 use crate::ingest::watcher::Watchers;
@@ -36,7 +36,6 @@ pub struct AppState {
     pub services: Mutex<ServiceRegistry>,
     pub stores: Stores,
     pub chats: Mutex<ChatDb>,
-    pub embedder: Arc<Embedder>,
     pub reranker: Arc<crate::rerank::Reranker>,
     pub indexer: Arc<IndexManager>,
     pub watchers: Arc<Watchers>,
@@ -60,7 +59,6 @@ impl AppState {
             services: Mutex::new(ServiceRegistry::load()),
             stores: Stores::default(),
             chats: Mutex::new(chats),
-            embedder: Arc::new(Embedder::default()),
             reranker: Arc::new(crate::rerank::Reranker::default()),
             watchers: Watchers::new(app.clone(), indexer.clone()),
             indexer,
@@ -69,8 +67,8 @@ impl AppState {
         })
     }
 
-    fn embedding_model(&self) -> AppResult<ModelId> {
-        ModelId::parse(&self.settings.lock().embedding_model)
+    fn embedding_setting(&self) -> String {
+        self.settings.lock().embedding_model.clone()
     }
 }
 
@@ -107,6 +105,7 @@ pub fn save_settings(app: AppHandle, state: S<'_>, settings: Settings) -> AppRes
     let purge = s.auto_delete_days;
     crate::ingest::ocr::set_enabled(s.ocr_enabled);
     crate::ingest::set_keep_images(s.keep_images);
+    crate::ingest::set_load(&s.index_load);
     *state.settings.lock() = s.clone();
     let _ = state.chats.lock().purge_older_than(purge);
     if ocr_changed {
@@ -707,13 +706,11 @@ impl AskJob {
 /// Embed the question locally and search the service's index (or all services).
 async fn retrieve(app: &AppHandle, svc: &Service, all: bool, question: &str) -> AppResult<Vec<SourceRef>> {
     let state = app.state::<AppState>();
-    let model = state.embedding_model()?;
-    let threshold = state.settings.lock().threshold;
-    let embedder = state.embedder.clone();
-    let q = question.to_string();
-    let qv = tauri::async_runtime::spawn_blocking(move || embedder.embed_query(model, &q))
-        .await
-        .map_err(|e| AppError::new("embedding", format!("ทำ embedding ไม่สำเร็จ: {e}")))??;
+    let model = crate::embed::gateway_model(&state.embedding_setting())?;
+    // Gateway models spread cosine scores lower than the old local e5 (OpenAI: unrelated ≈ 0.1,
+    // related ≈ 0.3–0.5) — keep a cut-off tuned for e5 from hiding good passages; top-k limits
+    let threshold = state.settings.lock().threshold.min(0.15);
+    let qv = crate::embed::embed_query(&model, question).await?;
 
     let targets: Vec<Service> = if all { state.services.lock().list() } else { vec![svc.clone()] };
     let k = svc.top_k as usize;
@@ -826,44 +823,52 @@ pub fn open_source_file(path: String) -> AppResult<()> {
 // ------------------------------------------------------------------ embedding
 
 #[tauri::command]
-pub fn embedding_status(state: S<'_>) -> AppResult<EmbeddingStatus> {
-    Ok(Embedder::status(state.embedding_model()?))
+pub fn embedding_status(state: S<'_>) -> EmbeddingStatus {
+    crate::embed::status(&state.embedding_setting())
 }
 
+/// Embedding models offered by the Gateway.
 #[tauri::command]
-pub async fn download_embedding(app: AppHandle, model: String) -> AppResult<()> {
-    let id = ModelId::parse(&model)?;
-    let a = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let res = embed::download(id, |p: DownloadProgress| {
-            let _ = a.emit("embed-download", p);
-        })
-        .await;
-        match res {
-            Ok(_) => {
-                let st = a.state::<AppState>();
-                st.embedder.unload();
-                // documents waiting for a model can now be indexed
-                for s in st.services.lock().list() {
-                    st.indexer.start(a.clone(), s.id, false);
-                }
-            }
-            Err(e) => {
-                let _ = a.emit("embed-download", DownloadProgress { model: id.as_str().into(), file: String::new(), downloaded: 0, total: None, done: false, error: Some(e.message) });
-            }
-        }
-    });
-    Ok(())
+pub async fn gateway_embedding_models() -> AppResult<Vec<String>> {
+    crate::gateway_embed::list_models().await
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingTest {
+    pub dims: usize,
+    pub ms: u64,
+    /// cosine of two Thai sentences with the same meaning vs. an unrelated one
+    pub similar: f32,
+    pub unrelated: f32,
+}
+
+/// Try a Gateway embedding model with three short Thai sentences.
 #[tauri::command]
-pub fn use_embedding_folder(app: AppHandle, state: S<'_>, model: String, folder: String) -> AppResult<EmbeddingStatus> {
-    let id = ModelId::parse(&model)?;
-    let st = state.embedder.use_folder(id, Path::new(&folder))?;
-    for s in state.services.lock().list() {
-        state.indexer.start(app.clone(), s.id, false);
+pub async fn test_gateway_embedding(model: String) -> AppResult<EmbeddingTest> {
+    let texts = ["ลาพักร้อนได้กี่วันต่อปี", "สิทธิ์วันหยุดพักผ่อนประจำปีมีกี่วัน", "วิธีเปลี่ยนรหัสผ่านอีเมล"].map(String::from);
+    let t = Instant::now();
+    let v = crate::gateway_embed::embed(model.trim(), &texts).await?;
+    let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+    Ok(EmbeddingTest { dims: v[0].len(), ms: t.elapsed().as_millis() as u64, similar: dot(&v[0], &v[1]), unrelated: dot(&v[0], &v[2]) })
+}
+
+/// Switch embeddings to a Gateway model (after a test call) and re-index every service.
+#[tauri::command]
+pub async fn use_gateway_embedding(app: AppHandle, model: String) -> AppResult<EmbeddingStatus> {
+    let model = model.trim().to_string();
+    crate::gateway_embed::embed(&model, &["ทดสอบ".to_string()]).await?;
+    let state = app.state::<AppState>();
+    let s = {
+        let mut cur = state.settings.lock();
+        cur.embedding_model = format!("{}{model}", crate::gateway_embed::PREFIX);
+        cur.clone()
+    };
+    s.save()?;
+    for svc in state.services.lock().list() {
+        state.indexer.start(app.clone(), svc.id, false);
     }
-    Ok(st)
+    Ok(crate::embed::status(&state.embedding_setting()))
 }
 
 // ------------------------------------------------------------------ reranker
@@ -915,7 +920,6 @@ pub fn wipe_all_data(state: S<'_>) -> AppResult<()> {
     state.indexer.cancel_all();
     state.watchers.clear();
     state.stores.close_all();
-    state.embedder.unload();
     state.reranker.unload();
     for t in state.streams.lock().values() {
         t.cancel();

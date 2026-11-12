@@ -15,7 +15,7 @@ export interface StreamingState {
 export function MessageList({
   messages, streaming, onRetry, retryDisabled,
 }: {
-  messages: Message[]; streaming: StreamingState | null; onRetry: (question: string) => void; showServiceInSources: boolean; retryDisabled: boolean;
+  messages: Message[]; streaming: StreamingState | null; onRetry: (question: string) => void; retryDisabled: boolean;
 }) {
   const { settings } = useApp();
   const me = initials(settings.userName || "ผู้ใช้");

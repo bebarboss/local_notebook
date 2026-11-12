@@ -13,9 +13,3 @@ export function CitationChip({ n, source }: { n: number; source: Source | undefi
     </>
   );
 }
-
-export function sourceLabel(s: Source, showService: boolean): string {
-  return [String(s.n), showService ? s.serviceName.split(" · ")[0] : null, s.fileName, s.page != null ? `น.${s.page}` : null]
-    .filter(Boolean)
-    .join(" · ");
-}

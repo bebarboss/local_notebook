@@ -4,9 +4,11 @@ pub mod background;
 pub mod chats;
 pub mod commands;
 pub mod config;
+pub mod diag;
 pub mod encoder;
 pub mod embed;
 pub mod errors;
+pub mod gateway_embed;
 pub mod gateway_test;
 pub mod ingest;
 pub mod llm;
@@ -32,8 +34,11 @@ pub fn run() {
             let handle = app.handle().clone();
             let state = AppState::new(&handle).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             init_resources(app.handle());
+            embed::remove_old_local_models();
+            diag::log(format!("app start v{}", env!("CARGO_PKG_VERSION")));
             ingest::ocr::set_enabled(state.settings.lock().ocr_enabled);
             ingest::set_keep_images(state.settings.lock().keep_images);
+            ingest::set_load(&state.settings.lock().index_load);
             app.manage(state);
             if let Err(e) = background::init(app.handle()) {
                 log::warn!("tray icon unavailable: {e}");
@@ -93,8 +98,9 @@ pub fn run() {
             commands::stop_generation,
             commands::open_source_file,
             commands::embedding_status,
-            commands::download_embedding,
-            commands::use_embedding_folder,
+            commands::gateway_embedding_models,
+            commands::test_gateway_embedding,
+            commands::use_gateway_embedding,
             commands::wipe_all_data,
             commands::ocr_status,
             commands::rerank_status,

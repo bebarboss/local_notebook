@@ -50,6 +50,7 @@ pub fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
         return; // nothing to finish → close normally
     }
     api.prevent_close();
+    crate::diag::log("window closed while indexing -> keep going in the tray");
     let _ = window.hide();
     HIDDEN.store(true, Ordering::SeqCst);
     set_low_priority(true);
@@ -61,7 +62,11 @@ pub fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
 
 /// Called by the indexer when no job is left.
 pub fn on_indexing_idle(app: &AppHandle) {
+    if !HIDDEN.load(Ordering::SeqCst) {
+        set_low_priority(false);
+    }
     if HIDDEN.load(Ordering::SeqCst) {
+        crate::diag::log("indexing done while hidden -> exit");
         notify(app, "DocAsk ทำ index เสร็จแล้ว", "เอกสารพร้อมให้ถามแล้ว");
         // give the notification a moment to be handed to Windows
         let app = app.clone();
@@ -76,7 +81,8 @@ pub fn on_indexing_idle(app: &AppHandle) {
 
 fn show(app: &AppHandle) {
     HIDDEN.store(false, Ordering::SeqCst);
-    set_low_priority(false);
+    // stays low while indexing goes on
+    set_low_priority(app.state::<AppState>().indexer.any_running());
     if let Some(t) = app.tray_by_id(TRAY_ID) {
         let _ = t.set_visible(false);
     }
@@ -88,6 +94,7 @@ fn show(app: &AppHandle) {
 }
 
 fn quit(app: &AppHandle) {
+    crate::diag::log("tray: stop indexing and quit");
     app.state::<AppState>().indexer.cancel_all();
     // the index threads see the flag between batches; files not finished stay queued
     let app = app.clone();
@@ -109,9 +116,10 @@ fn notify(app: &AppHandle, title: &str, body: &str) {
     }
 }
 
-/// Below-normal priority: Windows gives the CPU to whatever the user is doing first.
+/// Below-normal priority while indexing: Windows gives the CPU to whatever the user is
+/// doing first.
 #[cfg(windows)]
-fn set_low_priority(low: bool) {
+pub fn set_low_priority(low: bool) {
     #[link(name = "kernel32")]
     extern "system" {
         fn GetCurrentProcess() -> isize;
@@ -125,4 +133,4 @@ fn set_low_priority(low: bool) {
 }
 
 #[cfg(not(windows))]
-fn set_low_priority(_low: bool) {}
+pub fn set_low_priority(_low: bool) {}

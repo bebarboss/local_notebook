@@ -190,7 +190,6 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
               <MessageList
                 messages={messages}
                 streaming={stream}
-                showServiceInSources={allServices || messages.some((m) => m.sources.some((s) => s.serviceId !== serviceId))}
                 retryDisabled={!!stream && !stream.error}
                 onRetry={(q) => send(q)}
               />

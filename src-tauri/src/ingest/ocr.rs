@@ -25,6 +25,10 @@ pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
 }
 
+pub fn enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
+}
+
 /// The shared engine, loaded on first use. None when OCR is off or the models are missing.
 pub fn engine() -> Option<&'static Ocr> {
     if !ENABLED.load(Ordering::Relaxed) {
@@ -90,7 +94,8 @@ impl Ocr {
     pub fn load(dir: &Path) -> AppResult<Self> {
         // measured: one line at a time on all threads beats lines in parallel
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8);
-        Self::load_with(dir, crate::encoder::Layout { intra: cores, workers: 1 })
+        let threads = super::load_level().ocr_threads(cores);
+        Self::load_with(dir, crate::encoder::Layout { intra: threads, workers: 1 })
     }
 
     /// Detection is one big image → all threads; recognition is many small line images →

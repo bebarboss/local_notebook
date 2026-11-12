@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { api } from "../lib/api";
-import type { ImageInfo, Message, Source } from "../lib/types";
+import type { ImageInfo, Source } from "../lib/types";
 import { th } from "../i18n/th";
 
 /** A picture kept from a document, with where it came from. */
@@ -96,12 +96,11 @@ export function Thumb({ img, onOpen, size = 96 }: { img: SourceImage; onOpen: ()
 }
 
 /** Full-size view; ← → move between pictures, Esc closes. */
-export function Lightbox({ items, index, onIndex, onClose, onSource }: {
+export function Lightbox({ items, index, onIndex, onClose }: {
   items: SourceImage[];
   index: number;
   onIndex: (i: number) => void;
   onClose: () => void;
-  onSource?: (s: Source) => void;
 }) {
   const img = items[index];
   const url = useImageUrl(img.serviceId, img.info.id);
@@ -122,7 +121,6 @@ export function Lightbox({ items, index, onIndex, onClose, onSource }: {
       <div className="lightbox-bar">
         <span className="ellipsis">{caption(img.source)}</span>
         {items.length > 1 && <span className="mono">{index + 1}/{items.length}</span>}
-        {onSource && <button className="link-btn" onClick={() => onSource(img.source)}>ดูข้อความ [{img.source.n}]</button>}
       </div>
     </div>,
     document.body,
@@ -138,29 +136,6 @@ export function SourceImageGrid({ source }: { source: Source }) {
     <div className="thumbs" aria-label="รูปจากเอกสาร">
       {items.map((img, i) => <Thumb key={img.key} img={img} onOpen={() => setOpen(i)} size={110} />)}
       {open != null && <Lightbox items={items} index={open} onIndex={setOpen} onClose={() => setOpen(null)} />}
-    </div>
-  );
-}
-
-/** Pictures from the sources the answer actually cites ([n] in the text). */
-export function AnswerImages({ msg, onSource }: { msg: Message; onSource: (s: Source) => void }) {
-  const cited = new Set([...msg.content.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
-  const sources = msg.sources.filter((s) => cited.has(s.n));
-  const items = useSourceImages(sources, 8);
-  const [open, setOpen] = useState<number | null>(null);
-  if (!items.length) return null;
-  return (
-    <div className="thumbs" aria-label="รูปจากเอกสารที่อ้างอิง">
-      {items.map((img, i) => <Thumb key={img.key} img={img} onOpen={() => setOpen(i)} />)}
-      {open != null && (
-        <Lightbox
-          items={items}
-          index={open}
-          onIndex={setOpen}
-          onClose={() => setOpen(null)}
-          onSource={(s) => { setOpen(null); onSource(s); }}
-        />
-      )}
     </div>
   );
 }

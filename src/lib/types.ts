@@ -157,7 +157,8 @@ export interface Settings {
   threshold: number;
   chunkSize: number;
   chunkOverlap: number;
-  embeddingModel: EmbeddingModelId;
+  /** "gateway:<model>" — the embedding model on the Gateway; "" until one is chosen */
+  embeddingModel: string;
   lastServiceId: string | null;
   /** latest.json URL for in-app updates; empty = updates off */
   updateUrl: string;
@@ -170,20 +171,28 @@ export interface Settings {
   rerank: boolean;
   /** fuse keyword (exact words) search with vector search */
   hybrid: boolean;
+  indexLoad: "light" | "normal" | "fast";
 }
 
-export type EmbeddingModelId = "multilingual-e5-small" | "multilingual-e5-base" | "bge-m3";
+
+export interface EmbeddingTest {
+  dims: number;
+  ms: number;
+  /** cosine of two Thai sentences with the same meaning, and of an unrelated pair */
+  similar: number;
+  unrelated: number;
+}
 
 export interface EmbeddingStatus {
-  model: EmbeddingModelId;
+  /** "gateway:<model>", or "" when none is chosen yet */
+  model: string;
+  /** a model is chosen and the API key is saved */
   ready: boolean;
-  path: string | null;
-  sizeBytes: number | null;
 }
 
 export interface DownloadProgress {
-  /** embedding model id, or the reranker model name */
-  model: EmbeddingModelId | "mmarco-mMiniLMv2-L12";
+  /** the reranker model name */
+  model: string;
   file: string;
   downloaded: number;
   total: number | null;

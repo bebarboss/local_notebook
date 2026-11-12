@@ -13,7 +13,7 @@ import type {
   ChatSources,
   DocItem,
   DownloadProgress,
-  EmbeddingModelId,
+  EmbeddingTest,
   EmbeddingStatus,
   GatewayInfo,
   GatewayStatus,
@@ -108,8 +108,9 @@ export interface Backend {
   openSource(path: string): Promise<void>;
   // embedding
   embeddingStatus(): Promise<EmbeddingStatus>;
-  downloadEmbedding(model: EmbeddingModelId): Promise<void>;
-  useEmbeddingFolder(model: EmbeddingModelId, folder: string): Promise<EmbeddingStatus>;
+  gatewayEmbeddingModels(): Promise<string[]>;
+  testGatewayEmbedding(model: string): Promise<EmbeddingTest>;
+  useGatewayEmbedding(model: string): Promise<EmbeddingStatus>;
   reindexAll(): Promise<void>;
   wipeAllData(): Promise<void>;
   // updates
@@ -195,8 +196,9 @@ function createTauriBackend(): Backend {
     stop: (requestId) => call("stop_generation", { requestId }),
     openSource: (path) => call("open_source_file", { path }),
     embeddingStatus: () => call("embedding_status"),
-    downloadEmbedding: (model) => call("download_embedding", { model }),
-    useEmbeddingFolder: (model, folder) => call("use_embedding_folder", { model, folder }),
+    gatewayEmbeddingModels: () => call("gateway_embedding_models"),
+    testGatewayEmbedding: (model) => call("test_gateway_embedding", { model }),
+    useGatewayEmbedding: (model) => call("use_gateway_embedding", { model }),
     reindexAll: () => call("reindex_all"),
     wipeAllData: () => call("wipe_all_data"),
     ocrStatus: () => call("ocr_status"),

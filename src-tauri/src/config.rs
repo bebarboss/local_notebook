@@ -64,6 +64,8 @@ pub struct Settings {
     pub rerank: bool,
     /// also search by exact words (trigram keyword index) and fuse with vector search
     pub hybrid: bool,
+    /// how hard indexing may work the CPU: "light" | "normal" | "fast"
+    pub index_load: String,
 }
 
 impl Default for Settings {
@@ -78,7 +80,8 @@ impl Default for Settings {
             threshold: 0.3,
             chunk_size: 1000,
             chunk_overlap: 150,
-            embedding_model: "multilingual-e5-small".into(),
+            // "gateway:<model>" — chosen in Settings › Embedding (from the Gateway's list)
+            embedding_model: String::new(),
             last_service_id: None,
             update_url: crate::updater::DEFAULT_UPDATE_URL.to_string(),
             auto_check_update: true,
@@ -86,6 +89,7 @@ impl Default for Settings {
             keep_images: true,
             rerank: true,
             hybrid: true,
+            index_load: "normal".into(),
         }
     }
 }
@@ -109,6 +113,9 @@ impl Settings {
         self.threshold = self.threshold.clamp(0.0, 1.0);
         self.chunk_size = self.chunk_size.clamp(300, 4000);
         self.chunk_overlap = self.chunk_overlap.min(self.chunk_size / 2);
+        if !matches!(self.index_load.as_str(), "light" | "normal" | "fast") {
+            self.index_load = "normal".into();
+        }
         if !matches!(self.auto_delete_days, 0 | 30 | 90) {
             self.auto_delete_days = 0;
         }

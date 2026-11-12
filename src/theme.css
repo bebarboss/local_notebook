@@ -259,7 +259,6 @@ code { font-family: var(--mono); font-size: 12.5px; background: var(--code); col
 .code-block .code-copy:hover, .code-block .code-copy:focus-visible { opacity: 1; }
 .ai-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .ai-meta .info { font-size: 12px; color: var(--muted); margin-left: 4px; }
-.ai-sources { display: flex; flex-wrap: wrap; gap: 6px; }
 .thumbs { display: flex; flex-wrap: wrap; gap: 8px; }
 .thumb { padding: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--sidebar); cursor: zoom-in; flex: none; }
 .thumb:hover { border-color: var(--accent); }

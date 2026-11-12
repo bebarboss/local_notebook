@@ -1,7 +1,7 @@
 # DocAsk
 
 แอปถามตอบจากเอกสารในเครื่อง (local RAG) สำหรับ Windows ใช้ LLM ผ่าน **Gosoft Agent Gateway**
-เอกสารและ index อยู่ในเครื่องทั้งหมด อ่านได้ทั้ง PDF, Word, PowerPoint, ข้อความ และรูปภาพ (มี OCR ภาษาไทยในตัว)
+ไฟล์เอกสารและ index อยู่ในเครื่อง · embedding ทำบน Gateway ของบริษัท · อ่านได้ทั้ง PDF, Word, PowerPoint, ข้อความ และรูปภาพ (มี OCR ภาษาไทยในตัว)
 
 ## ⬇️ ดาวน์โหลด
 
@@ -23,7 +23,7 @@
    2. Virtual Key — วาง key แล้วกดบันทึก (เก็บใน Windows Credential Manager)
    3. โมเดล — ใช้ 6 โมเดลตั้งต้น หรือ **นำเข้าจาก VS Code**
    4. ทดสอบ — กดทดสอบ โมเดลที่ผ่านจะพร้อมใช้
-3. **โมเดล Embedding** — ตั้งค่า › Embedding และ Index › **ดาวน์โหลด** `multilingual-e5-small` (~120 MB ครั้งเดียว)
+3. **โมเดล Embedding** — ตั้งค่า › Embedding และ Index › เลือกโมเดลจากรายการที่ดึงมาจาก Gateway (แนะนำ `bge-m3`) › **ใช้โมเดลนี้**
    แนะนำ: ตั้งค่า › การค้นหา › **จัดลำดับใหม่ (reranking)** › ดาวน์โหลด (~120 MB) ให้ค้นแม่นขึ้น
 4. **สร้าง Service** — เมนูซ้าย › จัดการ › เพิ่ม service › เลือกโฟลเดอร์เอกสาร แล้วรอ index เสร็จ
 5. **ถาม** — แชตใหม่ › เลือก service › พิมพ์คำถาม · กดเลข `[1]` `[2]` ในคำตอบเพื่อดูท่อนเอกสารที่อ้างถึง
@@ -51,25 +51,24 @@ flowchart LR
             UI["หน้าจอ<br/>React"]
             CORE["Rust backend"]
             IDX[("index ต่อ service<br/>SQLite: ท่อนข้อความ + vector")]
-            EMB["Embedding<br/>multilingual-e5 · ONNX/CPU"]
             OCR["OCR<br/>PaddleOCR · ONNX/CPU"]
         end
         KEY["🔑 Windows<br/>Credential Manager"]
     end
-    GW["Gosoft Agent Gateway<br/>(LLM)"]
+    GW["Gosoft Agent Gateway<br/>(LLM + embedding)"]
 
     F -->|อ่านไฟล์| CORE
     CORE <--> OCR
-    CORE <--> EMB
     CORE <--> IDX
     UI <-->|Tauri IPC| CORE
     KEY -->|อ่าน key| CORE
-    CORE -->|"คำถาม + ท่อนที่ค้นเจอ<br/>(ผ่าน VPN, HTTPS)"| GW
-    GW -->|คำตอบแบบ streaming| CORE
+    CORE -->|"ข้อความท่อน → vector (ตอน index)<br/>คำถาม + ท่อนที่ค้นเจอ (ตอนถาม)<br/>ผ่าน VPN, HTTPS"| GW
+    GW -->|vector · คำตอบแบบ streaming| CORE
 ```
 
-- **ไม่ส่งออกจากเครื่อง:** ไฟล์เอกสาร, index, vector, รูปที่ทำ OCR
-- **ส่งไปที่ Gateway ตอนถามเท่านั้น:** คำถาม, ท่อนเอกสารที่ค้นเจอ (ค่าเริ่มต้น 5 ท่อน) และประวัติแชต 6 รอบล่าสุด
+- **ไม่ส่งออกจากเครื่อง:** ไฟล์เอกสาร, รูป, index และ vector ที่เก็บไว้
+- **ส่งไป Gateway ตอนทำ index:** ข้อความของ**ทุกท่อน** (`POST /v1/embeddings`) เพื่อแปลงเป็น vector แล้วเก็บผลไว้ในเครื่อง
+- **ส่งไป Gateway ตอนถาม:** คำถาม (ทำ embedding), ท่อนเอกสารที่ค้นเจอ (ค่าเริ่มต้น 5 ท่อน) และประวัติแชต 6 รอบล่าสุด
 - **Virtual Key** อยู่ใน Credential Manager มีแค่ Rust ที่อ่านได้ หน้าจอเห็นแค่ 4 ตัวท้าย
 
 ### 1. การทำ index เอกสาร
@@ -86,7 +85,7 @@ flowchart TD
     E --> G["ตัดท่อน ~1000 ตัวอักษร<br/>ตัดก่อนหัวข้อเลข · overlap 150 · ไม่ตัดกลางสระ/วรรณยุกต์"]
     E --> P["เก็บรูปในเอกสาร<br/>JPEG ≤1280px · ผูกกับหน้า/ท่อน"]
     P --> I
-    G --> H["Embedding ทีละ 32 ท่อน (รวมหลายไฟล์ได้)<br/>ระหว่างนั้นแยกข้อความไฟล์ถัดไปไว้ก่อน"]
+    G --> H["Embedding บน Gateway ทีละ 32 ท่อน (รวมหลายไฟล์ได้)<br/>ระหว่างนั้นแยกข้อความไฟล์ถัดไปไว้ก่อน"]
     H --> I[("บันทึกลง index.db<br/>ของ service นั้น")]
 ```
 
@@ -94,15 +93,31 @@ flowchart TD
 แอปไม่ได้สแกนตลอดเวลา จะทำงานเฉพาะตอนที่มีไฟล์เปลี่ยน และทำ embedding เฉพาะไฟล์ใหม่หรือไฟล์ที่ถูกแก้
 ท่อนข้อความที่เหมือนเดิมจะใช้ vector เดิม (เช่นแก้ไฟล์บางส่วน หรือเปิด/ปิด OCR / รูป) — ทำ embedding ใหม่ทั้งหมดเฉพาะตอนเปลี่ยนโมเดล embedding
 
-ความเร็วโดยประมาณบน CPU 8 threads: embedding ~14–18 ท่อน/วินาที (เอกสาร 100 หน้า ≈ 300 ท่อน ≈ 20 วินาที) ·
-แยกข้อความ PDF ~15 ms ต่อหน้า · OCR ~25 ms ต่อบรรทัด (หน้าสแกน 40 บรรทัด ≈ 1.5 วินาที)
+ความเร็ว embedding ขึ้นกับ Gateway และเครือข่าย (เครื่องแทบไม่ต้องทำงาน) · ในเครื่อง: แยกข้อความ PDF ~15 ms ต่อหน้า ·
+OCR ~25 ms ต่อบรรทัด (หน้าสแกน 40 บรรทัด ≈ 1.5 วินาที)
 
-การแยกข้อความกับ embedding ทำแบบสายพาน: ขณะทำ embedding ไฟล์หนึ่ง แอปแยกข้อความไฟล์ถัดไปไว้ก่อน
-และไฟล์เล็กหลายไฟล์ใช้ชุด embedding ร่วมกัน (ทดสอบ 48 ไฟล์ปนกัน: 63 → 50 วินาที)
+การแยกข้อความกับ embedding ทำแบบสายพาน: ขณะรอ Gateway ทำ embedding ไฟล์หนึ่ง แอปแยกข้อความไฟล์ถัดไปไว้ก่อน
+และไฟล์เล็กหลายไฟล์ส่งไปในชุดเดียวกัน
 
 **ปิดหน้าต่างระหว่างทำ index** — แอปจะซ่อนไปอยู่ที่ถาดข้างนาฬิกาแล้วทำต่อด้วยลำดับความสำคัญ CPU ต่ำกว่าปกติ
 (โปรแกรมอื่นที่ใช้อยู่ไม่หน่วง) เมื่อเสร็จจะแจ้งเตือนแล้วปิดเอง · คลิกไอคอนเพื่อเปิดกลับ · คลิกขวา › "หยุดทำ index และออก"
 ไฟล์ที่ยังไม่เสร็จจะทำต่อตอนเปิดแอปครั้งถัดไป · ถ้าไม่มีงานค้าง ปุ่มปิดจะปิดแอปตามปกติ
+
+**ความแรงตอนทำ index** (ตั้งค่า › Embedding และ Index) — ส่วนที่ยังทำในเครื่องคืออ่านไฟล์และ OCR ·
+ระหว่างทำ index โปรแกรมลดลำดับความสำคัญ CPU เสมอ (โปรแกรมอื่นได้ก่อน) · **เบา** OCR 2 threads และพักเท่ากับเวลาที่อ่านแต่ละไฟล์ ·
+**ปกติ** (ค่าเริ่มต้น) ครึ่งเครื่อง · **เร็ว** เต็มที่ · มีผลกับ OCR หลังเปิดแอปใหม่
+
+**Embedding บน Gateway** (v0.8 ขึ้นไป ไม่มีการทำ embedding ในเครื่องแล้ว) — Gateway เป็น LiteLLM ซึ่งมี `/v1/embeddings` แบบเดียวกับ OpenAI ·
+เปิดหน้าตั้งค่าแล้วแอปดึงรายชื่อเองจาก `/public/model_hub` (โมเดลที่ `mode: embedding`) หรือ `/v1/models` ด้วย key ·
+เลือกโมเดลในรายการแล้วแอปทดสอบให้ทันทีด้วยประโยคไทย 3 ประโยค แสดงจำนวนมิติ เวลา และคะแนนความเหมือน
+(ประโยคความหมายเดียวกันควรได้สูงกว่าคนละเรื่องชัดเจน) · ปุ่ม "ใช้โมเดลนี้" กดได้เมื่อทดสอบผ่าน ·
+ส่งทีละ 32 ท่อน ถ้าเจอ 429 / 5xx รอแล้วลองใหม่สูงสุด 4 ครั้ง · ต้องต่อ VPN ทั้งตอน index และตอนถาม ·
+เปลี่ยนโมเดลต้องทำ embedding ใหม่ทั้งหมด · threshold ใช้ไม่เกิน 0.15 (คะแนน cosine ของโมเดลบน Gateway มักต่ำกว่า e5 เดิม) ·
+ถ้ามี `bge-m3` แนะนำตัวนี้ (ภาษาไทยดี) · อัปเดตจากเวอร์ชันก่อน 0.8: index เดิมถูกล้างแล้วทำ embedding ใหม่ด้วยโมเดลที่เลือก
+และโฟลเดอร์โมเดล e5 / bge-m3 ที่เคยดาวน์โหลดไว้ใน `models\` ถูกลบให้อัตโนมัติ
+
+**บันทึกการทำ index** — `%APPDATA%\DocAsk\index.log` บอกว่าแต่ละรอบทำ index เพราะอะไร (ไฟล์ใหม่ / ถูกแก้ / ค้างจากรอบก่อน /
+ตั้งค่าเปลี่ยน) เก็บแค่ชื่อไฟล์ ไม่มีเนื้อหาเอกสารหรือ key
 
 **การแยกข้อความตามชนิดไฟล์**
 
@@ -154,9 +169,9 @@ sequenceDiagram
 
     U->>UI: พิมพ์คำถาม
     UI->>R: ask(service, คำถาม)
-    R->>R: embedding คำถาม (query: …)
+    R->>GW: embedding คำถาม (/v1/embeddings)
     par ค้นตามความหมาย
-        R->>DB: เทียบ vector กับทุกท่อน (cosine ≥ 0.3)
+        R->>DB: เทียบ vector กับทุกท่อน (cosine ≥ 0.15)
     and ค้นคำตรงตัว (hybrid)
         R->>DB: ดัชนีคำ FTS5 (trigram)
     end
@@ -217,7 +232,8 @@ sequenceDiagram
   gateway.json             Gateway URL (ไม่มี key)
   models.json              รายการโมเดล LLM
   services.json            รายการ service
-  models\<embedding>\      โมเดล embedding ที่ดาวน์โหลด
+  models\mmarco-…\         โมเดล reranker ที่ดาวน์โหลด (ถ้าเปิดใช้)
+  index.log                บันทึกว่าแต่ละรอบทำ index เพราะอะไร
   services\<id>\index.db   index ของแต่ละ service
   chats.db                 ประวัติแชต
 ```
@@ -246,30 +262,10 @@ flowchart LR
 | 403 | ไม่มีสิทธิ์ใช้โมเดลนี้ — ตรวจสิทธิ์กับ Admin |
 | 404 | Gateway URL หรือชื่อโมเดลไม่ถูกต้อง |
 | 429 | เกินโควตา — รอสักครู่หรือติดต่อ Admin |
-| ดาวน์โหลดโมเดล embedding ไม่ได้ | เครือข่ายบล็อก huggingface.co — ดาวน์โหลดจากเครื่องอื่น แล้วใช้ "เลือกโฟลเดอร์" (ดูด้านล่าง) |
+| ไม่มีโมเดล embedding ให้เลือก | key นี้ยังไม่ได้สิทธิ์โมเดล embedding บน Gateway — ติดต่อแอดมิน Gateway |
+| ทำ index / ค้นเอกสารไม่ได้ ("Gateway embedding: …") | ต่อ VPN · ตรวจ key · โมเดล embedding ที่เลือกยังเปิดอยู่ไหม |
 | PDF ภาษาไทยอ่านออกมาเพี้ยน | กด `[n]` ดูข้อความที่อ่านได้ · ลองพิมพ์เป็น PDF ใหม่ หรือแปลงเป็นรูปให้ OCR อ่าน |
 | PDF สแกน / รูป ถูกข้าม | ตรวจว่าเปิด OCR อยู่ · รูปที่ไม่มีข้อความจะแสดง "ไม่พบข้อความในรูปภาพ" |
-
-<details>
-<summary><b>ใช้โมเดล embedding แบบ offline</b></summary>
-
-| โมเดล | ขนาด | หมายเหตุ |
-|---|---|---|
-| `multilingual-e5-small` (int8) | ~120 MB | ค่าเริ่มต้น เร็ว |
-| `multilingual-e5-base` (int8) | ~280 MB | แม่นขึ้น |
-| `bge-m3` (int8) | ~570 MB | แม่นที่สุด ใช้ RAM มาก |
-
-ดาวน์โหลดไฟล์จาก `https://huggingface.co/Xenova/<model>` วางเป็นโครงสร้างนี้ แล้วกด "เลือกโฟลเดอร์" ในหน้าตั้งค่า
-
-```
-multilingual-e5-small\
-  onnx\model_quantized.onnx
-  tokenizer.json
-  config.json
-  special_tokens_map.json
-  tokenizer_config.json
-```
-</details>
 
 ---
 
@@ -318,7 +314,9 @@ src-tauri/src/
   llm.rs, gateway_test.rs  Chat Completions + SSE streaming, ทดสอบโมเดล
   errors.rs, redact.rs     ข้อความ error, ตัด sk-... ออกจากทุกข้อความ
   ingest/                  pdf / docx / pptx / text / image, ocr, chunker ภาษาไทย, watcher, indexer
-  embed.rs                 fastembed (ONNX, CPU)
+  embed.rs, gateway_embed.rs  embedding ผ่าน Gateway (/v1/embeddings), ตัวช่วยดาวน์โหลดจาก Hugging Face
+  encoder.rs, rerank.rs    reranker (cross-encoder, ONNX/CPU)
+  background.rs, diag.rs   ทำ index ต่อในถาดระบบ, index.log
   store.rs, search.rs      SQLite ต่อ service + vector search
   services.rs, chats.rs    service registry, ประวัติแชต
   updater.rs               ตรวจ/ติดตั้งอัปเดต

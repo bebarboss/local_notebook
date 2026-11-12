@@ -32,14 +32,11 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, app.settings.setupDone]);
 
-  // first run: the embedding model is not bundled — ask the user to download or pick a folder
+  // no embedding model chosen on the Gateway yet → documents cannot be indexed
   useEffect(() => {
     if (!ready || page.name === "setup") return;
-    const check = () => api.embeddingStatus().then((s) => setNeedEmbedding(!s.ready)).catch(() => {});
-    check();
-    const off = api.on("embed-download", (p) => { if (p.done) check(); });
-    return () => { off.then((f) => f()); };
-  }, [ready, page.name]);
+    api.embeddingStatus().then((s) => setNeedEmbedding(!s.model)).catch(() => {});
+  }, [ready, page.name, app.settings.embeddingModel]);
 
   if (loadError) {
     return (
@@ -84,7 +81,7 @@ export default function App() {
       )}
       {needEmbedding && !(page.name === "settings" && page.section === "embedding") && (
         <div className="banner warn" role="status">
-          <span>ยังไม่มีโมเดล embedding ในเครื่อง — ต้องดาวน์โหลดจาก Hugging Face หรือเลือกโฟลเดอร์โมเดลก่อน จึงจะ index และค้นเอกสารได้</span>
+          <span>ยังไม่ได้เลือกโมเดล embedding บน Gateway — ต้องเลือกก่อน จึงจะ index และค้นเอกสารได้</span>
           <button className="btn" onClick={() => app.go({ name: "settings", section: "embedding" })}>ตั้งค่า Embedding</button>
         </div>
       )}

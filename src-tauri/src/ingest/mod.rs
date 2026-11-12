@@ -10,7 +10,6 @@ pub mod text;
 pub mod watcher;
 
 use crate::commands::AppState;
-use crate::embed::{Embedder, ModelId};
 use crate::errors::{AppError, AppResult};
 use crate::store::{NewChunk, NewImage, VectorStore};
 use chunker::{chunk, normalize, section_title, ChunkOptions};
@@ -40,6 +39,54 @@ pub struct PageImage {
 }
 
 static KEEP_IMAGES: AtomicBool = AtomicBool::new(true);
+
+/// How hard indexing may work the CPU (Settings › index_load).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Load {
+    /// OCR on 2 threads + a pause as long as each file took to read
+    Light,
+    /// OCR on half the cores
+    Normal,
+    /// OCR on every core
+    Fast,
+}
+
+static LOAD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+
+pub fn set_load(s: &str) {
+    let v = match s {
+        "light" => 0,
+        "fast" => 2,
+        _ => 1,
+    };
+    LOAD.store(v, Ordering::Relaxed);
+}
+
+pub fn load_level() -> Load {
+    match LOAD.load(Ordering::Relaxed) {
+        0 => Load::Light,
+        2 => Load::Fast,
+        _ => Load::Normal,
+    }
+}
+
+impl Load {
+    /// Threads for OCR (fixed when the OCR models are loaded).
+    pub fn ocr_threads(self, cores: usize) -> usize {
+        match self {
+            Load::Light => 2.min(cores),
+            Load::Normal => cores.div_ceil(2).max(1),
+            Load::Fast => cores,
+        }
+    }
+
+    /// Light: rest as long as the work took (max 3 s), so the fan stays quiet.
+    pub fn rest_after(self, worked: std::time::Duration) {
+        if self == Load::Light {
+            std::thread::sleep(worked.min(std::time::Duration::from_secs(3)));
+        }
+    }
+}
 
 /// Keep pictures from documents so answers can show them.
 pub fn set_keep_images(on: bool) {
@@ -306,6 +353,7 @@ impl IndexManager {
             }
             jobs.insert(service_id.clone(), Job { cancel: Arc::new(AtomicBool::new(false)), rerun: false, full });
         }
+        crate::background::set_low_priority(true);
         let me = self.clone();
         std::thread::Builder::new()
             .name(format!("index-{service_id}"))
@@ -372,7 +420,8 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
     let state = app.state::<AppState>();
     let svc = state.services.lock().get(service_id)?;
     let settings = state.settings.lock().clone();
-    let model = ModelId::parse(&settings.embedding_model)?;
+    let model = crate::embed::gateway_model(&settings.embedding_model)?;
+    let src_id = format!("{}{model}", crate::gateway_embed::PREFIX);
     let opts = ChunkOptions { size: settings.chunk_size, overlap: settings.chunk_overlap };
     let store = state.stores.get(service_id)?;
     let progress = |doc: Option<&Path>, done: usize, total: usize, dp: f32, phase: &'static str, msg: Option<String>| {
@@ -390,23 +439,35 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
     let signature = format!(
         // chunk2: heading-aware chunks with section titles (v0.6)
         "{}|{}|{}|ocr{}|img{}|chunk2",
-        model.as_str(),
+        src_id,
         opts.size,
         opts.overlap,
-        u8::from(ocr::engine().is_some()),
+        // the setting + bundled models, not whether loading worked this time — a flaky load
+        // must not re-chunk everything
+        u8::from(ocr::enabled() && ocr::available()),
         u8::from(keep_images())
     );
     {
         let mut s = store.lock();
         let old = s.meta("signature")?;
         let old_model = old.as_deref().and_then(|o| o.split('|').next());
-        if old_model != Some(model.as_str()) {
+        let decision = if old_model != Some(src_id.as_str()) {
             // other model → old vectors are useless
             s.clear()?;
+            "clear (embedding model changed)"
         } else if full || old.as_deref() != Some(signature.as_str()) {
             // same model: re-extract every file, but keep vectors of unchanged text
             s.requeue_all()?;
-        }
+            if full { "requeue all (full re-index asked)" } else { "requeue all (signature changed)" }
+        } else {
+            "incremental"
+        };
+        crate::diag::log(format!(
+            "[{}] v{} job start · signature {:?} -> {signature} · {decision}",
+            svc.code,
+            env!("CARGO_PKG_VERSION"),
+            old.as_deref().unwrap_or("-"),
+        ));
         s.set_meta("signature", &signature)?;
     }
 
@@ -423,6 +484,7 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
 
     // find new / modified files
     let mut work: Vec<(PathBuf, i64, i64)> = Vec::new();
+    let mut reasons: Vec<String> = Vec::new();
     for p in &files {
         let Ok(meta) = std::fs::metadata(p) else { continue };
         let (mtime, bytes) = (mtime_of(&meta), meta.len() as i64);
@@ -432,6 +494,13 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
         if unchanged {
             continue;
         }
+        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        reasons.push(match &prev {
+            None => format!("{name}: new"),
+            Some(d) if d.mtime == 0 => format!("{name}: unfinished ({})", d.status),
+            Some(d) if !matches!(d.status.as_str(), "ready" | "skipped") => format!("{name}: status {}", d.status),
+            Some(d) => format!("{name}: mtime {}->{mtime} bytes {}->{bytes}", d.mtime, d.bytes),
+        });
         // mtime changed but content identical → just record the new mtime
         if let Some(d) = &prev {
             if d.status == "ready" && !d.hash.is_empty() && file_hash(p).ok().as_deref() == Some(d.hash.as_str()) {
@@ -446,18 +515,28 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
     }
 
     let total = work.len();
+    crate::diag::log(format!("[{}] {} files, {} to index", svc.code, files.len(), total));
+    for r in reasons.iter().take(20) {
+        crate::diag::log(format!("[{}]   {r}", svc.code));
+    }
+    if reasons.len() > 20 {
+        crate::diag::log(format!("[{}]   … {} more", svc.code, reasons.len() - 20));
+    }
     if total == 0 {
         progress(None, 0, 0, 1.0, "done", None);
         state.services.lock().touch(service_id);
         return Ok(());
     }
 
-    if !Embedder::status(model).ready {
-        return Err(AppError::new("no_embedding_model", "ยังไม่มีโมเดล embedding — เอกสารรอคิวไว้ ไปที่ ตั้งค่า › Embedding และ Index"));
+    if crate::secrets::get_key().ok().flatten().is_none() {
+        return Err(AppError::new("no_api_key", "ยังไม่ได้ใส่ API key ของ Gateway — เอกสารรอคิวไว้"));
     }
 
     let store_ref: &Mutex<crate::store::SqliteStore> = &store;
-    let finished = index_files(store_ref, &work, opts, cancel, &|texts| state.embedder.embed_passages(model, texts), &progress)?;
+    let t = std::time::Instant::now();
+    let finished = index_files(store_ref, &work, opts, cancel, &|texts| crate::embed::embed_passages(&model, texts), &progress)
+        .inspect_err(|e| crate::diag::log(format!("[{}] error: {}", svc.code, e.message)))?;
+    crate::diag::log(format!("[{}] {} in {:.0?}", svc.code, if finished { "finished" } else { "cancelled" }, t.elapsed()));
     if finished {
         state.services.lock().touch(service_id);
     }
@@ -562,7 +641,9 @@ fn index_files(
                     break;
                 }
                 *ext.lock() = Some(path.clone());
+                let t = std::time::Instant::now();
                 let r = prepare(store, path, *mtime, *bytes, opts);
+                load_level().rest_after(t.elapsed());
                 let failed = r.is_err();
                 // receiver gone → the embedder stopped (error / cancel)
                 if tx.send(r).is_err() || failed {
@@ -730,75 +811,6 @@ mod tests {
         }
     }
 
-    /// Search quality on a real SQL manual: does the right entry come first?
-    /// `cargo test --release --lib bench_manual -- --ignored --nocapture` with DOCASK_TEST_RES,
-    /// DOCASK_TEST_FILE (SQL_Query_Manual.pdf), DOCASK_TEST_EMBED, optional DOCASK_TEST_RERANK.
-    #[test]
-    #[ignore]
-    fn bench_manual() {
-        use crate::encoder::{Encoder, Layout, Pooling};
-        use crate::store::SqliteStore;
-        let res = PathBuf::from(std::env::var("DOCASK_TEST_RES").expect("DOCASK_TEST_RES"));
-        let file = PathBuf::from(std::env::var("DOCASK_TEST_FILE").expect("DOCASK_TEST_FILE"));
-        pdf::init(res.join("pdfium").join("pdfium.dll"));
-        let ex = chunk_pages(extractor_for(&file).unwrap().extract(&file).unwrap(), ChunkOptions::default());
-        let emb_dir = PathBuf::from(std::env::var("DOCASK_TEST_EMBED").expect("DOCASK_TEST_EMBED"));
-        let emb = Encoder::load(&emb_dir.join("onnx").join("model_quantized.onnx"), &emb_dir, 512, false, Layout::auto()).unwrap();
-        let texts: Vec<String> = ex.chunks.iter().map(|(_, t)| t.clone()).collect();
-        let pv = emb.embed(&texts.iter().map(|t| format!("passage: {t}")).collect::<Vec<_>>(), Pooling::Mean, 4).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let mut st = SqliteStore::open(&dir.path().join("index.db")).unwrap();
-        let d = st.upsert_document("C:\\m.pdf", "h", 1, 1, "indexing", None).unwrap();
-        let chunks: Vec<NewChunk> = ex.chunks.iter().zip(&pv).enumerate()
-            .map(|(i, ((page, t), e))| NewChunk { page: *page, ord: i as i64, text: t.clone(), embedding: e.clone() }).collect();
-        st.replace_chunks(d, &chunks, &[]).unwrap();
-        let rr = std::env::var("DOCASK_TEST_RERANK").ok().map(|r| PathBuf::from(r).join("mm")).and_then(|dir| {
-            Encoder::load(&dir.join("onnx").join("model_quantized.onnx"), &dir, 512, true, Layout { intra: Layout::auto().intra * Layout::auto().workers, workers: 1 }).ok()
-        });
-        // (question, text that only the right entry contains)
-        let qs = [
-            ("ดูผู้อนุมัติการลาของพนักงานใช้ตารางไหน", "PS_GP_ABS_SS_STA"),
-            ("ขอ SQL ดูการยกเลิกลา", "PS_FS_ABS_CANCEL"),
-            ("ตรวจสอบเวลาเข้างาน clock time ของพนักงานในวันหนึ่ง", "PS_FS_RAW_PUNCH\nWHERE"),
-            ("ดู OT ของพนักงานวันที่กำหนดดูตารางอะไรบ้าง", "PS_XPS_TL_OT_VW"),
-            ("PS_TL_PAYABLE_TIME OT10 สถานะ SP", "OT10"),
-            ("ดูสิทธิ์ role ของ user", "PSROLEUSER"),
-            ("ข้อมูล consent ศาสนาตาม PDPA", "PS_GS_PDPA_REG_CON"),
-            ("ดูรูปโปรไฟล์ปัจจุบันของพนักงาน", "PS_EMPL_PHOTO"),
-            ("ปรับยอดเงินสดขาดเกินเป็น 0", "PS_FS_CASHIER_DAT"),
-            ("ผล payroll แถบ accumulators", "PS_GP_RSLT_ACUM_VW"),
-            ("หาชื่อคอลัมน์ของตาราง", "DBA_TAB_COLUMNS"),
-            ("ประวัติการอบรมของพนักงาน", "PS_TRAINING"),
-            ("กะการทำงาน shift table", "PS_SCH_SHIFT_TBL"),
-            ("ค่าความยากลำบาก hardship WHARD", "PS_JPM_JP_ITEMS"),
-            ("Retro trigger ของพนักงาน", "PS_GP_RTO_TRGR"),
-            ("รายชื่อพนักงาน ณ วันที่กำหนดตามบริษัทและ paygroup", "GP_PAYGROUP = '263FS'"),
-        ];
-        println!("{} chunks", texts.len());
-        for mode in ["vector", "hybrid", "hybrid+rerank"] {
-            if mode.ends_with("rerank") && rr.is_none() {
-                continue;
-            }
-            let mut ranks = Vec::new();
-            for (q, needle) in qs {
-                let qv = emb.embed(&[format!("query: {q}")], Pooling::Mean, 1).unwrap().pop().unwrap();
-                let want = if mode.ends_with("rerank") { 15 } else { 5 };
-                let mut hits = if mode == "vector" { st.search(&qv, want, 0.3).unwrap() } else { st.hybrid_search(&qv, q, want, 0.3).unwrap() };
-                if let Some(rr) = rr.as_ref().filter(|_| mode.ends_with("rerank")) {
-                    let s = rr.score_pairs(q, &hits.iter().map(|h| h.text.clone()).collect::<Vec<_>>(), 4).unwrap();
-                    let mut idx: Vec<usize> = (0..hits.len()).collect();
-                    idx.sort_by(|a, b| s[*b].total_cmp(&s[*a]));
-                    hits = idx.into_iter().map(|i| hits[i].clone()).collect();
-                }
-                hits.truncate(5);
-                ranks.push(hits.iter().position(|h| h.text.contains(needle)).map(|p| p + 1).unwrap_or(99));
-            }
-            let top1 = ranks.iter().filter(|&&r| r == 1).count();
-            let top5 = ranks.iter().filter(|&&r| r <= 5).count();
-            println!("{mode:<14} top-1 {top1}/{n}  in top-5 {top5}/{n}  ranks {ranks:?}", n = ranks.len());
-        }
-    }
-
     /// Real models + pdfium: `cargo test real_documents -- --ignored --nocapture`
     /// with DOCASK_TEST_RES=<src-tauri/resources> and DOCASK_TEST_DIR=<folder with mixed.pdf, scanned.pdf, screen.png>.
     #[test]
@@ -844,111 +856,6 @@ mod tests {
                 assert_eq!(ex.images[0].page, Some(1), "pptx picture must stay on slide 1");
             }
         }
-    }
-
-    /// Where does indexing time go? `cargo test --release bench_index -- --ignored --nocapture`
-    /// with DOCASK_TEST_RES, DOCASK_TEST_DIR and DOCASK_TEST_EMBED (multilingual-e5-small folder).
-    #[test]
-    #[ignore]
-    fn bench_index() {
-        use std::time::Instant;
-        let res = PathBuf::from(std::env::var("DOCASK_TEST_RES").expect("DOCASK_TEST_RES"));
-        let dir = PathBuf::from(std::env::var("DOCASK_TEST_DIR").expect("DOCASK_TEST_DIR"));
-        let emb = PathBuf::from(std::env::var("DOCASK_TEST_EMBED").expect("DOCASK_TEST_EMBED"));
-        ocr::init(res.join("ocr"));
-        pdf::init(res.join("pdfium").join("pdfium.dll"));
-        let t = Instant::now();
-        ocr::engine().expect("ocr");
-        println!("OCR model load: {:?}", t.elapsed());
-        let t = Instant::now();
-        let te = crate::embed::Embedder::load(ModelId::MultilingualE5Small, &emb).unwrap();
-        println!("embedding model load: {:?}", t.elapsed());
-
-        let mut all_chunks = Vec::new();
-        for name in ["mixed.pdf", "scanned.pdf", "screen.png", "sample.docx", "sample.pptx"] {
-            let p = dir.join(name);
-            if !p.exists() {
-                continue;
-            }
-            let t = Instant::now();
-            let ex = extract_chunks(&p, ChunkOptions::default()).unwrap();
-            println!("extract {name}: {:?} → {} chunks, {} pictures", t.elapsed(), ex.chunks.len(), ex.images.len());
-            all_chunks.extend(ex.chunks.into_iter().map(|(_, c)| c));
-        }
-
-        // a typical text-heavy document: 100 chunks of ~1000 Thai characters
-        let base: String = all_chunks.join(" ");
-        let mut thai = Vec::new();
-        let chars: Vec<char> = base.chars().collect();
-        for i in 0..100 {
-            let start = (i * 997) % chars.len().max(1);
-            let s: String = chars.iter().cycle().skip(start).take(1000).collect();
-            thai.push(format!("passage: {s}"));
-        }
-        let tok = te.token_count(&thai[0]);
-        println!("tokens in one 1000-char Thai chunk: {tok} (model max 512)");
-        for round in 0..2 {
-            let t = Instant::now();
-            te.embed(&thai, crate::encoder::Pooling::Mean, 4).unwrap();
-            let e = t.elapsed();
-            println!("embed 100 chunks (round {round}, {:?}): {e:?} ({:.1} chunks/s)", crate::encoder::Layout::auto(), 100.0 / e.as_secs_f64());
-        }
-    }
-
-    /// Pipeline vs one file at a time: `cargo test --release --lib bench_pipeline -- --ignored --nocapture`
-    /// with DOCASK_TEST_RES, DOCASK_TEST_DIR (every file in it is copied DOCASK_TEST_COPIES times,
-    /// default 10) and DOCASK_TEST_EMBED.
-    #[test]
-    #[ignore]
-    fn bench_pipeline() {
-        use crate::store::SqliteStore;
-        use std::time::Instant;
-        let res = PathBuf::from(std::env::var("DOCASK_TEST_RES").expect("DOCASK_TEST_RES"));
-        let dir = PathBuf::from(std::env::var("DOCASK_TEST_DIR").expect("DOCASK_TEST_DIR"));
-        let emb = PathBuf::from(std::env::var("DOCASK_TEST_EMBED").expect("DOCASK_TEST_EMBED"));
-        let copies: usize = std::env::var("DOCASK_TEST_COPIES").ok().and_then(|c| c.parse().ok()).unwrap_or(10);
-        ocr::init(res.join("ocr"));
-        pdf::init(res.join("pdfium").join("pdfium.dll"));
-        let enc = crate::embed::Embedder::load(ModelId::MultilingualE5Small, &emb).unwrap();
-        let embed = |t: &[String]| enc.embed(&t.iter().map(|x| format!("passage: {x}")).collect::<Vec<_>>(), crate::encoder::Pooling::Mean, 4);
-
-        let tmp = tempfile::tempdir().unwrap();
-        let mut work = Vec::new();
-        for e in std::fs::read_dir(&dir).unwrap().flatten() {
-            let p = e.path();
-            if !p.is_file() || !is_supported(&p) {
-                continue;
-            }
-            let t = Instant::now();
-            let ex = extract_chunks(&p, ChunkOptions::default()).unwrap();
-            println!("extract {:?}: {:?} → {} chunks", p.file_name().unwrap(), t.elapsed(), ex.chunks.len());
-            for k in 0..copies {
-                let to = tmp.path().join(format!("{k}_{}", p.file_name().unwrap().to_string_lossy()));
-                std::fs::copy(&p, &to).unwrap();
-                let bytes = std::fs::metadata(&to).unwrap().len() as i64;
-                work.push((to, 1, bytes));
-            }
-        }
-        println!("{} files, {:?}", work.len(), crate::encoder::Layout::auto());
-        let cancel = AtomicBool::new(false);
-        let quiet = |_: Option<&Path>, _: usize, _: usize, _: f32, _: &'static str, _: Option<String>| {};
-        let mut counts = Vec::new();
-        for mode in ["one file at a time", "pipeline"] {
-            let store = Mutex::new(SqliteStore::open(&tmp.path().join(format!("{}.db", counts.len()))).unwrap());
-            let t = Instant::now();
-            if mode == "pipeline" {
-                assert!(index_files(&store, &work, ChunkOptions::default(), &cancel, &embed, &quiet).unwrap());
-            } else {
-                for w in &work {
-                    index_files(&store, std::slice::from_ref(w), ChunkOptions::default(), &cancel, &embed, &quiet).unwrap();
-                }
-            }
-            let docs = store.lock().list_documents().unwrap();
-            let chunks: i64 = docs.iter().map(|d| d.chunk_count).sum();
-            println!("{mode}: {:?} ({chunks} chunks)", t.elapsed());
-            counts.push(chunks);
-        }
-        assert_eq!(counts[0], counts[1]);
     }
 
     #[test]
