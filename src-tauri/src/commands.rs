@@ -815,7 +815,7 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, question: &str) -> 
     let state = app.state::<AppState>();
     let src = state.embedding_source()?;
     let mut threshold = state.settings.lock().threshold;
-    if matches!(src, Source::Gateway(_)) {
+    if src.is_remote() {
         // other models spread cosine scores lower than e5 (OpenAI: unrelated ≈ 0.1, related
         // ≈ 0.3–0.5) — keep the cut-off from hiding good passages; top-k still limits
         threshold = threshold.min(0.15);
@@ -1097,6 +1097,87 @@ pub async fn use_gateway_embedding(app: AppHandle, model: String) -> AppResult<E
     Ok(Embedder::status_of(&state.embedding_source()?))
 }
 
+// ------------------------------------------------- own embedding server (home Mac mini)
+
+#[tauri::command]
+pub fn embed_server_info() -> crate::embed_server::ServerInfo {
+    crate::embed_server::info()
+}
+
+/// Save the URL and (when given) a new token. The token goes straight to the credential store.
+#[tauri::command]
+pub fn set_embed_server(url: String, token: Option<String>) -> AppResult<crate::embed_server::ServerInfo> {
+    let base = crate::embed_server::validate_url(&url)?;
+    if let Some(t) = token.filter(|t| !t.trim().is_empty()) {
+        secrets::set_server_token(&t)?;
+    }
+    crate::embed_server::ServerConfig { url: base }.save()?;
+    Ok(crate::embed_server::info())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerTest {
+    pub model: String,
+    pub device: String,
+    #[serde(flatten)]
+    pub test: EmbeddingTest,
+}
+
+/// `/health` for the model name, then the same three Thai sentences as the Gateway test.
+#[tauri::command]
+pub async fn test_embed_server() -> AppResult<ServerTest> {
+    let info = crate::embed_server::info();
+    if info.url.is_empty() {
+        return Err(AppError::new("no_server", "ใส่ URL ของเซิร์ฟเวอร์ก่อน"));
+    }
+    let h = crate::embed_server::health(&info.url).await?;
+    let texts = ["ลาพักร้อนได้กี่วันต่อปี", "สิทธิ์วันหยุดพักผ่อนประจำปีมีกี่วัน", "วิธีเปลี่ยนรหัสผ่านอีเมล"].map(String::from);
+    let t = Instant::now();
+    let q = crate::embed_server::embed_query(&h.model, &texts[0]).await?;
+    let p = crate::embed_server::embed_passages(&h.model, &texts[1..]).await?;
+    let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+    if q.len() != h.dim {
+        return Err(AppError::new("server", format!("เซิร์ฟเวอร์บอกว่า {} มิติ แต่ส่งมา {} มิติ", h.dim, q.len())));
+    }
+    Ok(ServerTest {
+        model: h.model,
+        device: h.device,
+        test: EmbeddingTest { dims: q.len(), ms: t.elapsed().as_millis() as u64, similar: dot(&q, &p[0]), unrelated: dot(&q, &p[1]) },
+    })
+}
+
+/// Switch embeddings to the server's model (after a test call) and re-index every service.
+#[tauri::command]
+pub async fn use_embed_server(app: AppHandle, model: String) -> AppResult<EmbeddingStatus> {
+    let model = model.trim().to_string();
+    crate::embed_server::embed_query(&model, "ทดสอบ").await?;
+    let state = app.state::<AppState>();
+    let s = {
+        let mut cur = state.settings.lock();
+        cur.embedding_model = format!("{}{model}", crate::embed_server::PREFIX);
+        cur.clone()
+    };
+    s.save()?;
+    state.embedder.unload();
+    crate::diag::log(format!("embeddings: server model {model}"));
+    for svc in state.services.lock().list() {
+        state.indexer.start(app.clone(), svc.id, false);
+    }
+    Ok(Embedder::status_of(&state.embedding_source()?))
+}
+
+/// Remove the URL and token (not while the server is the embedding source).
+#[tauri::command]
+pub fn forget_embed_server(state: S<'_>) -> AppResult<crate::embed_server::ServerInfo> {
+    if matches!(state.embedding_source()?, Source::Server(_)) {
+        return Err(AppError::new("in_use", "กำลังใช้เซิร์ฟเวอร์นี้ทำ embedding — เปลี่ยนไปใช้โมเดลในเครื่องก่อน"));
+    }
+    secrets::delete_server_token()?;
+    crate::embed_server::ServerConfig::default().save()?;
+    Ok(crate::embed_server::info())
+}
+
 #[tauri::command]
 pub async fn download_embedding(app: AppHandle, model: String) -> AppResult<()> {
     let id = ModelId::parse(&model)?;
@@ -1190,6 +1271,7 @@ pub fn wipe_all_data(state: S<'_>) -> AppResult<()> {
     state.chats.lock().delete_all()?;
     state.services.lock().clear();
     secrets::delete_key()?;
+    secrets::delete_server_token()?;
     let dir = config::data_dir();
     std::thread::sleep(std::time::Duration::from_millis(300));
     for sub in ["services", "models"] {

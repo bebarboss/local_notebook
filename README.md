@@ -70,7 +70,7 @@ flowchart LR
 
 - **ไม่ส่งออกจากเครื่อง:** ไฟล์เอกสาร, index, vector, รูปที่ทำ OCR
 - **ส่งไปที่ Gateway ตอนถามเท่านั้น:** คำถาม, ท่อนเอกสารที่ค้นเจอ (ค่าเริ่มต้น 5 ท่อน) และประวัติแชต 6 รอบล่าสุด
-- **ยกเว้นเมื่อเลือกใช้โมเดล embedding บน Gateway เอง** (ปิดไว้เป็นค่าเริ่มต้น): ข้อความทุกท่อนถูกส่งไป `POST /v1/embeddings` ตอนทำ index
+- **ยกเว้นเมื่อเลือกใช้เซิร์ฟเวอร์ embedding ของตัวเอง** (ปิดไว้เป็นค่าเริ่มต้น): ข้อความทุกท่อนถูกส่งไปเครื่องนั้นผ่าน Tailscale หรือ https · token อยู่ใน Credential Manager
 - **Virtual Key** อยู่ใน Credential Manager มีแค่ Rust ที่อ่านได้ หน้าจอเห็นแค่ 4 ตัวท้าย
 
 ### 1. การทำ index เอกสาร
@@ -116,13 +116,12 @@ flowchart TD
 | ปกติ (ค่าเริ่มต้น) — ครึ่งเครื่อง | ~43% | 15 วินาที |
 | เร็ว — เต็มที่ | ~60% | 20 วินาที (เครื่อง 8 threads แย่งกันเอง) |
 
-**Embedding บน Gateway (ทางเลือก)** — Gateway เป็น LiteLLM ซึ่งมี `/v1/embeddings` แบบเดียวกับ OpenAI
-แต่ตอนนี้ key ของเรายังไม่มีโมเดล embedding (มีแค่โมเดลแชตและ agent) จึงใช้โมเดลในเครื่องเป็นค่าเริ่มต้น ·
-เมื่อแอดมินเปิดให้: ตั้งค่า › Embedding และ Index › "หรือใช้โมเดล embedding บน Gateway" — แอปดึงรายชื่อเองจาก
-`/public/model_hub` (`mode: embedding`) หรือ `/v1/models` และพิมพ์ชื่อเองได้ · แอปทดสอบให้ด้วยประโยคไทย 3 ประโยค
-(จำนวนมิติ เวลา คะแนนความเหมือน) แล้วจึงกด "ใช้โมเดลนี้" ได้ · **ข้อความทุกท่อนของเอกสารจะถูกส่งไป Gateway** ตอนทำ index
-และคำถามตอนค้นหา · ส่งทีละ 32 ท่อน เจอ 429 / 5xx รอแล้วลองใหม่สูงสุด 4 ครั้ง · threshold ใช้ไม่เกิน 0.15 ในโหมดนี้ ·
-สลับระหว่างในเครื่องกับ Gateway ต้องทำ embedding ใหม่ทั้งหมด
+**เซิร์ฟเวอร์ embedding ของตัวเอง (ทางเลือก)** — ใช้ Docker ใน [`server/embed`](server/embed/README.md) รัน bge-m3 แบบ fp32
+บนเครื่องอื่น เช่น Mac mini ที่บ้าน แล้วต่อผ่าน Tailscale (`tailscale serve`) · ตั้งค่า › Embedding และ Index ›
+"หรือใช้เซิร์ฟเวอร์ embedding ของตัวเอง": ใส่ URL และ token → "บันทึกและทดสอบ" → "ใช้เซิร์ฟเวอร์นี้"
+- API เป็นแบบเดียวกับ OpenAI และแอปส่ง `input_type` (`query` / `passage`) เพิ่มไปด้วย เซิร์ฟเวอร์จะเติม prefix ให้ถ้าโมเดลต้องใช้
+- `http://` ใช้ได้เฉพาะ localhost และที่อยู่ Tailscale (`100.64.0.0/10`, `*.ts.net`) ที่อื่นต้องเป็น https
+- ถ้าเครื่องนั้นปิดอยู่: ตอนทำ index ลองใหม่สูงสุด 4 ครั้ง ส่วนคำถามลองแค่ครั้งเดียว แล้วแจ้งว่าต้องตรวจอะไร · แอปไม่สลับกลับไปใช้โมเดลในเครื่องเอง เพราะ vector ของต่างโมเดลใช้ปนกันไม่ได้
 
 **บันทึกการทำ index** — `%APPDATA%\DocAsk\index.log` บอกว่าแต่ละรอบทำ index เพราะอะไร (ไฟล์ใหม่ / ถูกแก้ / ค้างจากรอบก่อน /
 ตั้งค่าเปลี่ยน) เก็บแค่ชื่อไฟล์ ไม่มีเนื้อหาเอกสารหรือ key
@@ -377,6 +376,7 @@ src-tauri/src/
   ingest/                  pdf / docx / pptx / text / image, ocr, chunker ภาษาไทย, watcher, indexer
   embed.rs, encoder.rs     embedding ในเครื่อง (ONNX, CPU), ตัวช่วยดาวน์โหลด Hugging Face
   gateway_embed.rs         embedding ผ่าน Gateway (/v1/embeddings) — ทางเลือก
+  embed_server.rs          embedding ผ่านเซิร์ฟเวอร์ของตัวเอง (server/embed) — ทางเลือก
   rerank.rs                reranker (cross-encoder)
   background.rs, diag.rs   ทำ index ต่อในถาดระบบ, index.log
   share.rs                 ส่งออก/นำเข้า service เป็น .zip (index + เอกสาร)

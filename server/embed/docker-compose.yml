@@ -1,0 +1,19 @@
+services:
+  embed:
+    build: .
+    image: docask-embed:local
+    container_name: docask-embed
+    restart: unless-stopped
+    env_file: .env
+    # only this Mac can reach the port; other machines come in through `tailscale serve`
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - hf-cache:/models
+    mem_limit: 5g
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  hf-cache:

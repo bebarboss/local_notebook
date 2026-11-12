@@ -179,7 +179,7 @@ export interface Settings {
   chunkSize: number;
   chunkOverlap: number;
   /** a local model id, or "gateway:<model>" for an embedding model on the Gateway */
-  embeddingModel: EmbeddingModelId | `gateway:${string}`;
+  embeddingModel: EmbeddingModelId | `gateway:${string}` | `server:${string}`;
   lastServiceId: string | null;
   /** latest.json URL for in-app updates; empty = updates off */
   updateUrl: string;
@@ -221,10 +221,23 @@ export interface EmbeddingTest {
   unrelated: number;
 }
 
+/** DocAsk's own embedding server (server/embed) — the token itself never reaches the UI */
+export interface EmbedServerInfo {
+  url: string;
+  hasToken: boolean;
+  tokenLast4: string | null;
+}
+
+export interface EmbedServerTest extends EmbeddingTest {
+  /** model id the server serves, e.g. "bge-m3" */
+  model: string;
+  device: string;
+}
+
 export type EmbeddingModelId = "multilingual-e5-small" | "multilingual-e5-base" | "bge-m3";
 
 export interface EmbeddingStatus {
-  /** local model id, or "gateway:<model>" */
+  /** local model id, "gateway:<model>" or "server:<model>" */
   model: string;
   ready: boolean;
   path: string | null;

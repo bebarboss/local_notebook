@@ -114,6 +114,7 @@ export function createMockBackend(): Backend {
   };
   let models: ModelConfig[] = defaultModels(gateway.url).map((m) => (m.id === "gothink3" ? { ...m, hidden: true } : m));
   let status: GatewayStatus = { state: "ok", message: null, checkedAt: now() };
+  let embedServer = { url: "", hasToken: false, tokenLast4: null as string | null };
   let embedding: EmbeddingStatus = { model: "multilingual-e5-small", ready: true, path: "%APPDATA%\\DocAsk\\models\\multilingual-e5-small", sizeBytes: 118e6 };
   const streams = new Map<string, { stopped: boolean }>();
   let updateAvailable = false;
@@ -401,6 +402,33 @@ export function createMockBackend(): Backend {
       settings = { ...settings, embeddingModel: `gateway:${model}` };
       embedding = { model: `gateway:${model}`, ready: true, path: null, sizeBytes: null };
       return clone(embedding);
+    },
+    embedServerInfo: async () => clone(embedServer),
+    setEmbedServer: async (url, token) => {
+      await wait(200);
+      const u = url.trim().replace(/\/+$/, "").replace(/\/v1$/, "");
+      if (!/^https:\/\/\S+$/.test(u) && !/^http:\/\/(localhost|127\.|100\.|[^/]*\.ts\.net)/.test(u)) {
+        throw { code: "invalid_url", message: "http:// ใช้ได้เฉพาะ localhost หรือที่อยู่ Tailscale (100.x.x.x, *.ts.net) — ที่อื่นต้องเป็น https://" };
+      }
+      if (token && token.trim().length < 16) throw { code: "key_format", message: "Token ต้องยาวอย่างน้อย 16 ตัวและไม่มีช่องว่าง" };
+      embedServer = { url: u, hasToken: embedServer.hasToken || !!token, tokenLast4: token ? token.trim().slice(-4) : embedServer.tokenLast4 };
+      return clone(embedServer);
+    },
+    testEmbedServer: async () => {
+      await wait(700);
+      if (!embedServer.hasToken) throw { code: "no_key", message: "ยังไม่ได้ใส่ token ของเซิร์ฟเวอร์ embedding" };
+      return { model: "bge-m3", device: "cpu", dims: 1024, ms: 380, similar: 0.86, unrelated: 0.34 };
+    },
+    useEmbedServer: async (model) => {
+      await wait(500);
+      settings = { ...settings, embeddingModel: `server:${model}` };
+      embedding = { model: `server:${model}`, ready: true, path: embedServer.url, sizeBytes: null };
+      return clone(embedding);
+    },
+    forgetEmbedServer: async () => {
+      if (settings.embeddingModel.startsWith("server:")) throw { code: "in_use", message: "กำลังใช้เซิร์ฟเวอร์นี้ทำ embedding — เปลี่ยนไปใช้โมเดลในเครื่องก่อน" };
+      embedServer = { url: "", hasToken: false, tokenLast4: null };
+      return clone(embedServer);
     },
     reindexAll: async () => {},
     wipeAllData: async () => { try { localStorage.removeItem("docask-mock-settings"); } catch { /* ignore */ } location.reload(); },

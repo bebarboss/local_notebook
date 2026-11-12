@@ -9,6 +9,7 @@ pub mod encoder;
 pub mod embed;
 pub mod errors;
 pub mod gateway_embed;
+pub mod embed_server;
 pub mod gateway_test;
 pub mod ingest;
 pub mod knowledge;
@@ -124,6 +125,11 @@ pub fn run() {
             commands::gateway_embedding_models,
             commands::test_gateway_embedding,
             commands::use_gateway_embedding,
+            commands::embed_server_info,
+            commands::set_embed_server,
+            commands::test_embed_server,
+            commands::use_embed_server,
+            commands::forget_embed_server,
             commands::wipe_all_data,
             commands::ocr_status,
             commands::rerank_status,

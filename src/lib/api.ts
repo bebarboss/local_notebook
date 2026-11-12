@@ -18,6 +18,8 @@ import type {
   DownloadProgress,
   EmbeddingModelId,
   EmbeddingTest,
+  EmbedServerInfo,
+  EmbedServerTest,
   ExportResult,
   ShareProgress,
   EmbeddingStatus,
@@ -133,6 +135,12 @@ export interface Backend {
   gatewayEmbeddingModels(): Promise<string[]>;
   testGatewayEmbedding(model: string): Promise<EmbeddingTest>;
   useGatewayEmbedding(model: string): Promise<EmbeddingStatus>;
+  embedServerInfo(): Promise<EmbedServerInfo>;
+  /** token: null keeps the saved one */
+  setEmbedServer(url: string, token: string | null): Promise<EmbedServerInfo>;
+  testEmbedServer(): Promise<EmbedServerTest>;
+  useEmbedServer(model: string): Promise<EmbeddingStatus>;
+  forgetEmbedServer(): Promise<EmbedServerInfo>;
   reindexAll(): Promise<void>;
   wipeAllData(): Promise<void>;
   // updates
@@ -232,6 +240,11 @@ function createTauriBackend(): Backend {
     gatewayEmbeddingModels: () => call("gateway_embedding_models"),
     testGatewayEmbedding: (model) => call("test_gateway_embedding", { model }),
     useGatewayEmbedding: (model) => call("use_gateway_embedding", { model }),
+    embedServerInfo: () => call("embed_server_info"),
+    setEmbedServer: (url, token) => call("set_embed_server", { url, token }),
+    testEmbedServer: () => call("test_embed_server"),
+    useEmbedServer: (model) => call("use_embed_server", { model }),
+    forgetEmbedServer: () => call("forget_embed_server"),
     reindexAll: () => call("reindex_all"),
     wipeAllData: () => call("wipe_all_data"),
     ocrStatus: () => call("ocr_status"),

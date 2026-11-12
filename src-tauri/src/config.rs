@@ -123,7 +123,8 @@ impl Settings {
         self.chunk_size = self.chunk_size.clamp(300, 4000);
         self.chunk_overlap = self.chunk_overlap.min(self.chunk_size / 2);
         // v0.8.0 had no local models and could save an empty choice
-        if self.embedding_model.trim().is_empty() || self.embedding_model.trim() == crate::gateway_embed::PREFIX {
+        let m = self.embedding_model.trim();
+        if m.is_empty() || m == crate::gateway_embed::PREFIX || m == crate::embed_server::PREFIX {
             self.embedding_model = Self::default().embedding_model;
         }
         if !matches!(self.font.as_str(), "looped" | "sarabun" | "plex" | "system") {

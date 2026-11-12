@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft, FolderOpen, Download } from "lucide-react";
 import { api } from "../lib/api";
-import type { UpdateInfo, AppInfo, DownloadProgress, EmbeddingModelId, EmbeddingStatus, EmbeddingTest, GatewayInfo, ModelConfig, RerankStatus, ThemeMode, FontChoice, TextSize } from "../lib/types";
+import type { UpdateInfo, AppInfo, DownloadProgress, EmbeddingModelId, EmbeddingStatus, EmbedServerInfo, EmbedServerTest, GatewayInfo, ModelConfig, RerankStatus, ThemeMode, FontChoice, TextSize } from "../lib/types";
 import { th } from "../i18n/th";
 import { formatBytes, useApp, type SettingsSection } from "../state";
 import { ApiKeyField, keyFormatError, ModelList, SecurityNotes, TestTable, useModelTest } from "../components/GatewayForms";
@@ -322,8 +322,8 @@ const EMBED_MODELS: { id: EmbeddingModelId; label: string; size: string }[] = [
 function EmbeddingSection() {
   const app = useApp();
   const [st, setSt] = useState<EmbeddingStatus | null>(null);
-  const onGateway = app.settings.embeddingModel.startsWith("gateway:");
-  const [model, setModel] = useState<EmbeddingModelId>(onGateway ? "multilingual-e5-small" : (app.settings.embeddingModel as EmbeddingModelId));
+  const remote = /^(gateway|server):/.test(app.settings.embeddingModel);
+  const [model, setModel] = useState<EmbeddingModelId>(remote ? "multilingual-e5-small" : (app.settings.embeddingModel as EmbeddingModelId));
   const [dl, setDl] = useState<DownloadProgress | null>(null);
   const [confirmReindex, setConfirmReindex] = useState(false);
   const load = () => api.embeddingStatus().then(setSt);
@@ -345,7 +345,7 @@ function EmbeddingSection() {
         <div className="list-row">
           <div className="l">
             <span className="t">โมเดลที่ใช้อยู่</span>
-            <span className="d">{st ? <>{st.model} · {st.ready ? <span className="ok-text">พร้อมใช้งาน</span> : <span style={{ color: "var(--warn-text)" }}>{st.model.startsWith("gateway:") ? "ยังไม่มี API key" : "ยังไม่มีไฟล์โมเดล — กดดาวน์โหลด"}</span>}{st.sizeBytes ? ` · ${formatBytes(st.sizeBytes)}` : ""}</> : "…"}</span>
+            <span className="d">{st ? <>{st.model} · {st.ready ? <span className="ok-text">พร้อมใช้งาน</span> : <span style={{ color: "var(--warn-text)" }}>{st.model.startsWith("gateway:") ? "ยังไม่มี API key" : st.model.startsWith("server:") ? "ยังไม่ได้ตั้ง URL / token ของเซิร์ฟเวอร์" : "ยังไม่มีไฟล์โมเดล — กดดาวน์โหลด"}</span>}{st.sizeBytes ? ` · ${formatBytes(st.sizeBytes)}` : ""}</> : "…"}</span>
             {st?.path && <span className="d mono" style={{ wordBreak: "break-all" }}>{st.path}</span>}
           </div>
         </div>
@@ -384,7 +384,7 @@ function EmbeddingSection() {
             try { await app.updateSettings({ embeddingModel: model }); setSt(await api.useEmbeddingFolder(model, f)); app.toast("ใช้โมเดลจากโฟลเดอร์แล้ว"); } catch (e) { app.toast((e as { message: string }).message); }
           }}><FolderOpen size={16} strokeWidth={1.8} aria-hidden="true" />เลือกโฟลเดอร์</button>
         </div>
-        <GatewayEmbeddingRow onChanged={setSt} />
+        <EmbedServerRow onChanged={setSt} />
         <IndexLoadRow />
         <OcrRow />
         <KeepImagesRow />
@@ -629,87 +629,88 @@ function HybridRow() {
   );
 }
 
-function GatewayEmbeddingRow({ onChanged }: { onChanged: (s: EmbeddingStatus) => void }) {
+function EmbedServerRow({ onChanged }: { onChanged: (s: EmbeddingStatus) => void }) {
   const app = useApp();
-  const current = app.settings.embeddingModel.startsWith("gateway:") ? app.settings.embeddingModel.slice(8) : "";
-  const [name, setName] = useState(current);
-  const [models, setModels] = useState<string[] | null>(null);
-  const [listError, setListError] = useState<string | null>(null);
-  const [test, setTest] = useState<{ model: string; result?: EmbeddingTest; error?: string } | null>(null);
+  const current = app.settings.embeddingModel.startsWith("server:") ? app.settings.embeddingModel.slice(7) : "";
+  const [info, setInfo] = useState<EmbedServerInfo | null>(null);
+  const [url, setUrl] = useState("");
+  const [token, setToken] = useState("");
+  const [test, setTest] = useState<{ result?: EmbedServerTest; error?: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
-  const typed = name.trim();
-
-  // the list comes from the Gateway by itself when this page opens
   useEffect(() => {
-    let alive = true;
-    api.gatewayEmbeddingModels()
-      .then((m) => { if (!alive) return; setModels(m); if (!current && m.length) setName(m.includes("bge-m3") ? "bge-m3" : m[0]); })
-      .catch((e) => alive && setListError((e as { message: string }).message));
-    return () => { alive = false; };
-  }, [current]);
+    api.embedServerInfo().then((i) => { setInfo(i); setUrl(i.url); }).catch(() => {});
+  }, []);
 
-  // a picked / typed model is tried once typing stops
-  useEffect(() => {
-    if (!typed) { setTest(null); return; }
-    let alive = true;
-    const t = setTimeout(() => {
-      setTest({ model: typed });
-      api.testGatewayEmbedding(typed)
-        .then((r) => alive && setTest({ model: typed, result: r }))
-        .catch((e) => alive && setTest({ model: typed, error: (e as { message: string }).message }));
-    }, 700);
-    return () => { alive = false; clearTimeout(t); };
-  }, [typed]);
+  const saveAndTest = async () => {
+    setBusy(true);
+    setTest(null);
+    try {
+      const i = await api.setEmbedServer(url, token.trim() || null);
+      setInfo(i);
+      setUrl(i.url);
+      setToken(""); // the token now lives in Windows Credential Manager only
+      setTest({ result: await api.testEmbedServer() });
+    } catch (e) {
+      setTest({ error: (e as { message: string }).message });
+    } finally {
+      setBusy(false);
+    }
+  };
 
-  const r = test?.model === typed ? test.result : undefined;
+  const r = test?.result;
+  const dirty = !!info && (url.trim() !== info.url || !!token.trim());
   return (
     <div className="list-row" style={{ alignItems: "flex-start" }}>
       <div className="l" style={{ gap: 6 }}>
-        <span className="t" id="gw-embed-label">หรือใช้โมเดล embedding บน Gateway</span>
+        <span className="t">หรือใช้เซิร์ฟเวอร์ embedding ของตัวเอง</span>
         <span className="d">
-          เครื่องไม่ต้องคำนวณ embedding · แต่ข้อความทุกท่อนของเอกสารถูกส่งไป Gateway ตอนทำ index (และคำถามตอนค้นหา) ·
-          ใช้ API key เดียวกับแชต · ต้องต่อ VPN · เปลี่ยนแล้วต้อง index ใหม่ทั้งหมด
+          เช่น Docker บน Mac mini ที่บ้าน (โฟลเดอร์ server/embed ใน repo) · ข้อความทุกท่อนของเอกสารถูกส่งไปเครื่องนั้นตอนทำ index (และคำถามตอนค้นหา) ·
+          ต่อผ่าน Tailscale · token เก็บใน Windows Credential Manager · ถ้าเครื่องนั้นปิด จะค้นเอกสารไม่ได้
         </span>
-        {models === null && !listError && <span className="d">กำลังดูรายชื่อโมเดลบน Gateway…</span>}
-        {listError && <span className="d" style={{ color: "var(--warn-text)" }}>ดึงรายชื่อไม่ได้: {listError}</span>}
-        {models?.length === 0 && (
-          <span className="d" style={{ color: "var(--warn-text)" }}>
-            key นี้ยังไม่มีโมเดล embedding บน Gateway — ใช้โมเดลในเครื่องไปก่อน · ถ้าแอดมินเปิดให้แล้ว พิมพ์ชื่อโมเดลด้านล่างได้
-          </span>
-        )}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-          <input className="input" list="gw-embed-models" aria-labelledby="gw-embed-label" placeholder="ชื่อโมเดล เช่น bge-m3"
-            value={name} onChange={(e) => setName(e.target.value)} style={{ width: 260 }} />
-          <datalist id="gw-embed-models">{(models ?? []).map((m) => <option key={m} value={m} />)}</datalist>
-          <button className="btn btn-primary" disabled={busy || !r || typed === current} onClick={() => setConfirm(true)}>
-            {busy ? "กำลังเปลี่ยน…" : "ใช้โมเดลนี้"}
+          <label className="sr-only" htmlFor="es-url">URL ของเซิร์ฟเวอร์ embedding</label>
+          <input id="es-url" className="input mono" placeholder="https://mac-mini.xxxx.ts.net" value={url} onChange={(e) => setUrl(e.target.value)} style={{ width: 300 }} spellCheck={false} autoComplete="off" />
+          <label className="sr-only" htmlFor="es-token">Token</label>
+          <input id="es-token" className="input mono" type="password" autoComplete="off" spellCheck={false} style={{ width: 230 }}
+            placeholder={info?.hasToken ? `มีแล้ว ····${info.tokenLast4 ?? ""}` : "token จาก .env ของเซิร์ฟเวอร์"}
+            title={info?.hasToken ? "ใส่ token ใหม่เพื่อเปลี่ยน · เว้นว่างไว้ = ใช้ token เดิม" : undefined}
+            value={token} onChange={(e) => setToken(e.target.value)} />
+          <button className="btn" disabled={busy || !url.trim() || (!info?.hasToken && !token.trim())} onClick={saveAndTest}>
+            {busy ? "กำลังทดสอบ…" : dirty ? "บันทึกและทดสอบ" : "ทดสอบ"}
           </button>
+          {r && (
+            <button className="btn btn-primary" disabled={busy || r.model === current} onClick={() => setConfirm(true)}>ใช้เซิร์ฟเวอร์นี้</button>
+          )}
         </div>
-        {test?.model === typed && !test.result && !test.error && <span className="d">กำลังทดสอบ {typed}…</span>}
-        {test?.model === typed && test.error && <span className="d" style={{ color: "var(--warn-text)" }}>ใช้ไม่ได้: {test.error}</span>}
+        {test?.error && <span className="d" style={{ color: "var(--warn-text)" }} role="alert">ใช้ไม่ได้: {test.error}</span>}
         {r && (
           <span className="d">
-            <span className="ok-text">ใช้ได้</span> · {r.dims} มิติ · {r.ms} ms ·
+            <span className="ok-text">ใช้ได้</span> · <span className="mono">{r.model}</span> · {r.dims} มิติ · {r.device} · {r.ms} ms ·
             ประโยคความหมายเดียวกัน {r.similar.toFixed(2)} / คนละเรื่อง {r.unrelated.toFixed(2)}
             {r.similar - r.unrelated < 0.1 && <span style={{ color: "var(--warn-text)" }}> · แยกความหมายภาษาไทยได้ไม่ดี</span>}
           </span>
         )}
-        {current && <span className="d">กำลังใช้ <span className="mono">{current}</span> บน Gateway · จะกลับไปใช้โมเดลในเครื่อง กดดาวน์โหลดหรือเลือกโฟลเดอร์ด้านบน</span>}
+        {current && <span className="d">กำลังใช้ <span className="mono">{current}</span> บนเซิร์ฟเวอร์ · จะกลับไปใช้โมเดลในเครื่อง กดดาวน์โหลดหรือเลือกโฟลเดอร์ด้านบน</span>}
+        {!current && info?.url && (
+          <button className="btn btn-ghost" style={{ alignSelf: "flex-start" }} onClick={async () => {
+            try { const i = await api.forgetEmbedServer(); setInfo(i); setUrl(""); setTest(null); app.toast("ลบ URL และ token ของเซิร์ฟเวอร์แล้ว"); } catch (e) { app.toast((e as { message: string }).message); }
+          }}>ลบ URL และ token</button>
+        )}
       </div>
-      {confirm && (
-        <ConfirmDialog title={`ใช้ ${typed} บน Gateway?`}
-          body="ข้อความทุกท่อนของทุก service จะถูกส่งไป Gateway เพื่อทำ embedding ใหม่ทั้งหมด (vector เดิมใช้ต่อไม่ได้) · ถ้าเน็ตหรือ Gateway ล่ม จะค้นเอกสารไม่ได้"
+      {confirm && r && (
+        <ConfirmDialog title={`ใช้ ${r.model} บนเซิร์ฟเวอร์?`}
+          body="ข้อความทุกท่อนของทุก service จะถูกส่งไปเซิร์ฟเวอร์เพื่อทำ embedding ใหม่ทั้งหมด (vector เดิมใช้ต่อไม่ได้) · ถ้าเครื่องที่บ้านปิดหรือ Tailscale หลุด จะค้นเอกสารไม่ได้"
           confirmLabel="เปลี่ยนและ index ใหม่"
           onCancel={() => setConfirm(false)}
           onConfirm={async () => {
             setConfirm(false);
             setBusy(true);
             try {
-              const st = await api.useGatewayEmbedding(typed);
-              await app.updateSettings({ embeddingModel: `gateway:${typed}` });
+              const st = await api.useEmbedServer(r.model);
+              await app.updateSettings({ embeddingModel: `server:${r.model}` });
               onChanged(st);
-              app.toast(`เปลี่ยนเป็น ${typed} แล้ว — เริ่ม index ใหม่ทุก service`);
+              app.toast(`เปลี่ยนเป็น ${r.model} บนเซิร์ฟเวอร์แล้ว — เริ่ม index ใหม่ทุก service`);
             } catch (e) {
               app.toast((e as { message: string }).message);
             } finally {

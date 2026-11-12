@@ -563,6 +563,7 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
         return Err(match src {
             Source::Local(_) => AppError::new("no_embedding_model", "ยังไม่มีโมเดล embedding — เอกสารรอคิวไว้ ไปที่ ตั้งค่า › Embedding และ Index"),
             Source::Gateway(_) => AppError::new("no_api_key", "ยังไม่ได้ใส่ API key ของ Gateway — เอกสารรอคิวไว้"),
+            Source::Server(_) => AppError::new("no_server", "ยังไม่ได้ตั้งเซิร์ฟเวอร์ embedding (URL + token) — เอกสารรอคิวไว้"),
         });
     }
 

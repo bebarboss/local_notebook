@@ -53,16 +53,24 @@ impl ModelId {
     }
 }
 
-/// Where vectors come from: a local ONNX model (default), or an embedding model on the
-/// Gateway (`settings.embedding_model` = "gateway:<model>").
+/// Where vectors come from: a local ONNX model (default), an embedding model on the
+/// Gateway (`settings.embedding_model` = "gateway:<model>"), or on the user's own embedding
+/// server ("server:<model>", see `embed_server.rs`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     Local(ModelId),
     Gateway(String),
+    Server(String),
 }
 
 impl Source {
     pub fn parse(s: &str) -> AppResult<Self> {
+        if let Some(m) = s.strip_prefix(crate::embed_server::PREFIX) {
+            return match m.trim() {
+                "" => Err(AppError::new("invalid", "ยังไม่ได้เลือกโมเดลบนเซิร์ฟเวอร์ embedding")),
+                m => Ok(Source::Server(m.to_string())),
+            };
+        }
         match s.strip_prefix(crate::gateway_embed::PREFIX) {
             Some(m) if !m.trim().is_empty() => Ok(Source::Gateway(m.trim().to_string())),
             Some(_) => Err(AppError::new("invalid", "ยังไม่ได้เลือกโมเดล embedding บน Gateway")),
@@ -75,7 +83,13 @@ impl Source {
         match self {
             Source::Local(m) => m.as_str().to_string(),
             Source::Gateway(m) => format!("{}{m}", crate::gateway_embed::PREFIX),
+            Source::Server(m) => format!("{}{m}", crate::embed_server::PREFIX),
         }
+    }
+
+    /// Vectors are made somewhere else (chunk text leaves the machine).
+    pub fn is_remote(&self) -> bool {
+        !matches!(self, Source::Local(_))
     }
 }
 
@@ -185,6 +199,12 @@ impl Embedder {
                 path: None,
                 size_bytes: None,
             },
+            Source::Server(_) => EmbeddingStatus {
+                model: src.id(),
+                ready: crate::embed_server::configured(),
+                path: Some(crate::embed_server::ServerConfig::load().url),
+                size_bytes: None,
+            },
         }
     }
 
@@ -198,6 +218,7 @@ impl Embedder {
                 r
             }
             Source::Gateway(m) => tauri::async_runtime::block_on(crate::gateway_embed::embed(m, texts)),
+            Source::Server(m) => tauri::async_runtime::block_on(crate::embed_server::embed_passages(m, texts)),
         }
     }
 
@@ -208,6 +229,7 @@ impl Embedder {
                 .await
                 .map_err(|e| AppError::new("embedding", format!("ทำ embedding ไม่สำเร็จ: {e}")))?,
             Source::Gateway(m) => Ok(crate::gateway_embed::embed(&m, &[q]).await?.pop().unwrap_or_default()),
+            Source::Server(m) => crate::embed_server::embed_query(&m, &q).await,
         }
     }
 

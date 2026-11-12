@@ -54,3 +54,49 @@ pub fn key_status() -> (bool, Option<String>) {
         _ => (false, None),
     }
 }
+
+// ------------------------------------------------- embedding server token (home server)
+
+const SERVER_SERVICE: &str = "DocAsk/Embedding server";
+const SERVER_USER: &str = "token";
+
+fn server_entry() -> AppResult<keyring::Entry> {
+    Ok(keyring::Entry::new(SERVER_SERVICE, SERVER_USER)?)
+}
+
+pub fn validate_server_token(token: &str) -> AppResult<()> {
+    let t = token.trim();
+    if t.len() < 16 || t.chars().any(char::is_whitespace) {
+        return Err(AppError::new("key_format", "Token ต้องยาวอย่างน้อย 16 ตัวและไม่มีช่องว่าง"));
+    }
+    Ok(())
+}
+
+pub fn set_server_token(token: &str) -> AppResult<()> {
+    validate_server_token(token)?;
+    server_entry()?.set_password(token.trim())?;
+    Ok(())
+}
+
+pub fn get_server_token() -> AppResult<Option<String>> {
+    match server_entry()?.get_password() {
+        Ok(k) => Ok(Some(k)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn delete_server_token() -> AppResult<()> {
+    match server_entry()?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// (has_token, last 4 chars) — the only information the UI receives.
+pub fn server_token_status() -> (bool, Option<String>) {
+    match get_server_token() {
+        Ok(Some(k)) => (true, Some(last4(&k))),
+        _ => (false, None),
+    }
+}

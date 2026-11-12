@@ -11,3 +11,5 @@ models/
 tsconfig.tsbuildinfo
 release/
 src-tauri/resources/
+!server/embed/.env.example
+__pycache__/

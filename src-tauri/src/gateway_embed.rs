@@ -22,6 +22,19 @@ struct Body<'a> {
     model: &'a str,
     input: &'a [String],
     encoding_format: &'static str,
+    /// only for DocAsk's own embedding server ("query" | "passage"); never sent to the Gateway
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_type: Option<&'a str>,
+}
+
+/// One OpenAI-style `/v1/embeddings` endpoint: where, with which key, and how patient.
+pub(crate) struct Endpoint<'a> {
+    pub url: &'a str,
+    pub key: &'a str,
+    pub input_type: Option<&'a str>,
+    pub retries: u32,
+    /// error message prefix, e.g. "Gateway embedding"
+    pub label: &'a str,
 }
 
 fn base() -> String {
@@ -34,20 +47,22 @@ pub async fn embed(model: &str, texts: &[String]) -> AppResult<Vec<Vec<f32>>> {
     let url = format!("{}/v1/embeddings", base());
     let mut out = Vec::with_capacity(texts.len());
     for part in texts.chunks(MAX_INPUTS) {
-        out.extend(embed_part(&url, &key, model, part).await?);
+        let ep = Endpoint { url: &url, key: &key, input_type: None, retries: RETRIES, label: "Gateway embedding" };
+        out.extend(post(&ep, model, part).await?);
     }
     Ok(out)
 }
 
-async fn embed_part(url: &str, key: &str, model: &str, texts: &[String]) -> AppResult<Vec<Vec<f32>>> {
-    let body = Body { model, input: texts, encoding_format: "float" };
+pub(crate) async fn post(ep: &Endpoint<'_>, model: &str, texts: &[String]) -> AppResult<Vec<Vec<f32>>> {
+    let (url, key) = (ep.url, ep.key);
+    let body = Body { model, input: texts, encoding_format: "float", input_type: ep.input_type };
     let mut attempt = 0;
     loop {
         let sent = CLIENT.post(url).bearer_auth(key).timeout(Duration::from_secs(120)).json(&body).send().await;
         let retry_in = Duration::from_secs(2u64.pow(attempt + 1));
         let resp = match sent {
             Ok(r) => r,
-            Err(e) if attempt < RETRIES && (e.is_timeout() || e.is_connect()) => {
+            Err(e) if attempt < ep.retries && (e.is_timeout() || e.is_connect()) => {
                 attempt += 1;
                 tokio::time::sleep(retry_in).await;
                 continue;
@@ -56,7 +71,7 @@ async fn embed_part(url: &str, key: &str, model: &str, texts: &[String]) -> AppR
         };
         let status = resp.status();
         if status.as_u16() == 429 || status.is_server_error() {
-            if attempt < RETRIES {
+            if attempt < ep.retries {
                 attempt += 1;
                 tokio::time::sleep(retry_in).await;
                 continue;
@@ -65,7 +80,7 @@ async fn embed_part(url: &str, key: &str, model: &str, texts: &[String]) -> AppR
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             let mut e = AppError::from_status(status.as_u16(), &text);
-            e.message = redact_secret(&format!("Gateway embedding: {}", e.message), Some(key));
+            e.message = redact_secret(&format!("{}: {}", ep.label, e.message), Some(key));
             return Err(e);
         }
         let v: serde_json::Value = resp.json().await.map_err(AppError::from)?;
@@ -74,7 +89,7 @@ async fn embed_part(url: &str, key: &str, model: &str, texts: &[String]) -> AppR
 }
 
 /// `{"data":[{"index":0,"embedding":[...]}, ...]}` → vectors in input order, normalised.
-fn parse(v: &serde_json::Value, n: usize) -> AppResult<Vec<Vec<f32>>> {
+pub(crate) fn parse(v: &serde_json::Value, n: usize) -> AppResult<Vec<Vec<f32>>> {
     let bad = || AppError::new("embedding", "Gateway ตอบกลับ embedding ในรูปแบบที่ไม่รู้จัก");
     let data = v.get("data").and_then(|d| d.as_array()).ok_or_else(bad)?;
     let mut out: Vec<Option<Vec<f32>>> = vec![None; n];
@@ -94,7 +109,7 @@ fn parse(v: &serde_json::Value, n: usize) -> AppResult<Vec<Vec<f32>>> {
     out.into_iter().map(|e| e.ok_or_else(bad)).collect()
 }
 
-fn normalize(mut v: Vec<f32>) -> Vec<f32> {
+pub(crate) fn normalize(mut v: Vec<f32>) -> Vec<f32> {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
         v.iter_mut().for_each(|x| *x /= norm);
@@ -145,7 +160,7 @@ fn looks_like_embedding(name: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -160,8 +175,8 @@ mod tests {
         assert!(parse(&serde_json::json!({"data":[]}), 1).is_err());
     }
 
-    /// A one-shot-per-connection HTTP server that answers each request with the next reply.
-    fn fake_gateway(replies: Vec<(u16, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    /// A one-shot-per-connection HTTP server (also used by `embed_server` tests) that answers each request with the next reply.
+    pub(crate) fn fake_gateway(replies: Vec<(u16, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
         use std::io::{Read, Write};
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1/embeddings", l.local_addr().unwrap());
@@ -200,20 +215,21 @@ mod tests {
         let (url, server) = fake_gateway(vec![(429, r#"{"error":{"message":"rate limit"}}"#.into()), (200, ok.into())]);
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let texts = vec!["ลาพักร้อน".to_string(), "รหัสผ่าน".to_string()];
-        let v = rt.block_on(embed_part(&url, "sk-test-key", "bge-m3", &texts)).unwrap();
+        let v = rt.block_on(post(&Endpoint { url: &url, key: "sk-test-key", input_type: None, retries: RETRIES, label: "t" }, "bge-m3", &texts)).unwrap();
         assert_eq!(v, vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
         let seen = server.join().unwrap();
         assert_eq!(seen.len(), 2, "429 must be retried");
         assert!(seen[1].starts_with("POST /v1/embeddings"));
         assert!(seen[1].contains("authorization: Bearer sk-test-key") || seen[1].contains("Authorization: Bearer sk-test-key"));
         assert!(seen[1].contains(r#""model":"bge-m3""#) && seen[1].contains("ลาพักร้อน"));
+        assert!(!seen[1].contains("input_type"), "the Gateway never gets the extra field");
     }
 
     #[test]
     fn gateway_errors_never_show_the_key() {
         let (url, server) = fake_gateway(vec![(400, r#"{"error":{"message":"model not found for key sk-test-key"}}"#.into())]);
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let e = rt.block_on(embed_part(&url, "sk-test-key", "nope", &["x".to_string()])).unwrap_err();
+        let e = rt.block_on(post(&Endpoint { url: &url, key: "sk-test-key", input_type: None, retries: RETRIES, label: "t" }, "nope", &["x".to_string()])).unwrap_err();
         assert!(!e.message.contains("sk-test-key"), "{}", e.message);
         server.join().unwrap();
     }
