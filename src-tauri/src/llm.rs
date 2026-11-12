@@ -84,6 +84,13 @@ pub async fn complete(req: &Request<'_>) -> AppResult<String> {
     Ok(v.pointer("/choices/0/message/content").and_then(|c| c.as_str()).unwrap_or_default().to_string())
 }
 
+/// Non-streaming call with its own time limit (long jobs such as writing notes).
+pub async fn complete_within(req: &Request<'_>, limit: Duration) -> AppResult<String> {
+    let resp = send(req, false, Some(limit)).await?;
+    let v: serde_json::Value = resp.json().await.map_err(AppError::from)?;
+    Ok(v.pointer("/choices/0/message/content").and_then(|c| c.as_str()).unwrap_or_default().to_string())
+}
+
 pub enum StreamEnd {
     Finished(String),
     Cancelled(String),

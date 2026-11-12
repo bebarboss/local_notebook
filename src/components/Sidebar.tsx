@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { MoreHorizontal, Plus, Search, Settings as SettingsIcon, Pencil, Trash2 } from "lucide-react";
+import { MoreHorizontal, Plus, Search, Settings as SettingsIcon, Pencil, Trash2, BookMarked } from "lucide-react";
 import { api } from "../lib/api";
 import type { Chat } from "../lib/types";
 import { th } from "../i18n/th";
 import { initials, useApp } from "../state";
 import { StatusPill } from "./StatusPill";
+import { KnowledgeDialog } from "./KnowledgeDialog";
 import { ConfirmDialog, Logo, Modal, Skeleton, usePopover } from "./ui";
 
 export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () => void }) {
@@ -14,6 +15,7 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
   const [chats, setChats] = useState<Chat[] | null>(null);
   const [query, setQuery] = useState("");
   const [renaming, setRenaming] = useState<Chat | null>(null);
+  const [noting, setNoting] = useState<Chat | null>(null);
   const [deleting, setDeleting] = useState<Chat | null>(null);
 
   useEffect(() => {
@@ -77,7 +79,7 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
           {chats === null && <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "4px 10px" }}><Skeleton /><Skeleton w="80%" /><Skeleton w="60%" /></div>}
           {chats?.length === 0 && <span style={{ fontSize: 12, color: "var(--muted)", padding: "4px 10px" }}>{query ? "ไม่พบแชตที่ค้นหา" : th.noChats}</span>}
           {chats?.map((c) => (
-            <ChatRow key={c.id} chat={c} open={c.id === openChat} onOpen={nav(() => go({ name: "chat", chatId: c.id }))} onRename={() => setRenaming(c)} onDelete={() => setDeleting(c)} />
+            <ChatRow key={c.id} chat={c} open={c.id === openChat} onOpen={nav(() => go({ name: "chat", chatId: c.id }))} onRename={() => setRenaming(c)} onDelete={() => setDeleting(c)} onKnowledge={() => setNoting(c)} />
           ))}
         </>
       )}
@@ -94,6 +96,7 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
       </div>
 
       {renaming && <RenameDialog chat={renaming} onClose={() => setRenaming(null)} />}
+      {noting && <KnowledgeDialog chatId={noting.id} serviceId={noting.serviceId} upto={null} onClose={() => setNoting(null)} />}
       {deleting && (
         <ConfirmDialog
           title="ลบแชตนี้?"
@@ -113,10 +116,10 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
   );
 }
 
-function ChatRow({ chat, open, onOpen, onRename, onDelete }: { chat: Chat; open: boolean; onOpen: () => void; onRename: () => void; onDelete: () => void }) {
+function ChatRow({ chat, open, onOpen, onRename, onDelete, onKnowledge }: { chat: Chat; open: boolean; onOpen: () => void; onRename: () => void; onDelete: () => void; onKnowledge: () => void }) {
   const pop = usePopover();
   return (
-    <div className="chat-row" ref={pop.ref}>
+    <div className="chat-row" ref={pop.ref} onContextMenu={(e) => { e.preventDefault(); pop.setOpen(true); }}>
       <button className={`nav-item${open ? " open" : ""}`} onClick={onOpen} aria-current={open ? "page" : undefined}>
         <span className="ellipsis">{chat.title}</span>
       </button>
@@ -126,6 +129,7 @@ function ChatRow({ chat, open, onOpen, onRename, onDelete }: { chat: Chat; open:
       {pop.open && (
         <div className="popover" role="menu" style={{ right: 0, top: 36 }}>
           <button role="menuitem" className="menu-item" onClick={() => { pop.setOpen(false); onRename(); }}><Pencil size={14} strokeWidth={1.8} aria-hidden="true" />{th.rename}</button>
+          <button role="menuitem" className="menu-item" onClick={() => { pop.setOpen(false); onKnowledge(); }}><BookMarked size={14} strokeWidth={1.8} aria-hidden="true" />บันทึกเป็นความรู้…</button>
           <button role="menuitem" className="menu-item danger" onClick={() => { pop.setOpen(false); onDelete(); }}><Trash2 size={14} strokeWidth={1.8} aria-hidden="true" />{th.delete}</button>
         </div>
       )}

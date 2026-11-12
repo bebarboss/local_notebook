@@ -1,4 +1,8 @@
-//! Keep indexing after the window is closed.
+//! Keep indexing after the window is closed, and wait in the tray after Windows sign-in.
+//!
+//! Started by Windows with [`AUTOSTART_ARG`] (Settings › "เปิดพร้อม Windows") and "start
+//! hidden" on, DocAsk stays in the tray: it indexes what changed while it was off and keeps
+//! watching the folders, and the window opens from the tray icon or the desktop icon.
 //!
 //! Closing the window while documents are being indexed hides it instead: the app keeps
 //! working from the notification area at lower CPU priority, says so once, and quits by
@@ -13,12 +17,16 @@ use tauri::{AppHandle, Manager, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
 
 const TRAY_ID: &str = "docask";
+/// Command-line flag of the sign-in launch (registered with the Run key).
+pub const AUTOSTART_ARG: &str = "--autostart";
 static HIDDEN: AtomicBool = AtomicBool::new(false);
+/// Hidden because of sign-in: stays when indexing ends (closing while indexing quits then).
+static RESIDENT: AtomicBool = AtomicBool::new(false);
 
 /// Create the (hidden) tray icon. Called once from `setup`.
 pub fn init(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "เปิด DocAsk", true, None::<&str>)?;
-    let stop = MenuItem::with_id(app, "quit", "หยุดทำ index และออก", true, None::<&str>)?;
+    let stop = MenuItem::with_id(app, "quit", "ออกจาก DocAsk", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &stop])?;
     let mut tray = TrayIconBuilder::with_id(TRAY_ID)
         .tooltip("DocAsk — กำลังทำ index เบื้องหลัง")
@@ -42,6 +50,19 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Sign-in launch: no window, just the tray icon.
+pub fn start_in_tray(app: &AppHandle) {
+    crate::diag::log("started by Windows sign-in -> wait in the tray");
+    HIDDEN.store(true, Ordering::SeqCst);
+    RESIDENT.store(true, Ordering::SeqCst);
+    // the folder catch-up right after sign-in should not slow the PC down
+    set_low_priority(true);
+    if let Some(t) = app.tray_by_id(TRAY_ID) {
+        let _ = t.set_tooltip(Some("DocAsk — คลิกเพื่อเปิด"));
+        let _ = t.set_visible(true);
+    }
+}
+
 /// Window events: hide instead of close while indexing.
 pub fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
     let WindowEvent::CloseRequested { api, .. } = event else { return };
@@ -53,6 +74,9 @@ pub fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
     crate::diag::log("window closed while indexing -> keep going in the tray");
     let _ = window.hide();
     HIDDEN.store(true, Ordering::SeqCst);
+    if let Some(t) = app.tray_by_id(TRAY_ID) {
+        let _ = t.set_tooltip(Some("DocAsk — กำลังทำ index เบื้องหลัง"));
+    }
     set_low_priority(true);
     if let Some(t) = app.tray_by_id(TRAY_ID) {
         let _ = t.set_visible(true);
@@ -65,22 +89,23 @@ pub fn on_indexing_idle(app: &AppHandle) {
     if !HIDDEN.load(Ordering::SeqCst) {
         set_low_priority(false);
     }
-    if HIDDEN.load(Ordering::SeqCst) {
+    if HIDDEN.load(Ordering::SeqCst) && !RESIDENT.load(Ordering::SeqCst) {
         crate::diag::log("indexing done while hidden -> exit");
         notify(app, "DocAsk ทำ index เสร็จแล้ว", "เอกสารพร้อมให้ถามแล้ว");
         // give the notification a moment to be handed to Windows
         let app = app.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(800));
-            if HIDDEN.load(Ordering::SeqCst) {
+            if HIDDEN.load(Ordering::SeqCst) && !RESIDENT.load(Ordering::SeqCst) {
                 app.exit(0);
             }
         });
     }
 }
 
-fn show(app: &AppHandle) {
+pub fn show(app: &AppHandle) {
     HIDDEN.store(false, Ordering::SeqCst);
+    RESIDENT.store(false, Ordering::SeqCst);
     // stays low while indexing goes on
     set_low_priority(app.state::<AppState>().indexer.any_running());
     if let Some(t) = app.tray_by_id(TRAY_ID) {

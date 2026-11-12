@@ -1,7 +1,7 @@
-import { useState } from "react";
-import { Download, FolderInput, FolderPlus, RefreshCw, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { BookMarked, Download, FolderInput, FolderOpen, FolderPlus, RefreshCw, Trash2 } from "lucide-react";
 import { api, type NewService } from "../lib/api";
-import type { Effort, Service } from "../lib/types";
+import type { Effort, KnowledgeInfo, Service } from "../lib/types";
 import { th } from "../i18n/th";
 import { formatBytes, useApp, visibleModels } from "../state";
 import { ConfirmDialog, Modal, Switch } from "./ui";
@@ -22,6 +22,11 @@ export function ServiceEditor({ service, onClose }: { service: Service | null; o
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteChats, setDeleteChats] = useState(false);
+  const [knowledgeDir, setKnowledgeDir] = useState(service?.knowledgeDir ?? "");
+  const [kinfo, setKinfo] = useState<KnowledgeInfo | null>(null);
+  useEffect(() => {
+    if (service) api.knowledgeInfo(service.id).then(setKinfo).catch(() => {});
+  }, [service]);
   const set = <K extends keyof NewService>(k: K, v: NewService[K]) => setForm((f) => ({ ...f, [k]: v }));
 
   const codeOk = /^[A-Za-z0-9ก-๙]{2,3}$/.test(form.code.trim());
@@ -33,7 +38,7 @@ export function ServiceEditor({ service, onClose }: { service: Service | null; o
     setError(null);
     try {
       const payload = { ...form, name: form.name.trim(), code: form.code.trim().toUpperCase() };
-      const saved = service ? await api.updateService({ ...service, ...payload }) : await api.createService(payload);
+      const saved = service ? await api.updateService({ ...service, ...payload, knowledgeDir }) : await api.createService(payload);
       await app.refreshServices();
       onClose(saved);
     } catch (e) {
@@ -105,6 +110,29 @@ export function ServiceEditor({ service, onClose }: { service: Service | null; o
             <FolderPlus size={16} strokeWidth={1.8} aria-hidden="true" /> เพิ่มโฟลเดอร์
           </button>
         </div>
+
+        {service && (
+          <div className="field">
+            <span className="field-label">โฟลเดอร์ความรู้</span>
+            <span className="field-hint">
+              ที่เก็บบันทึกจาก "บันทึกเป็นความรู้" (คลิกขวาที่คำตอบ) · คำตอบครั้งหน้าจะใช้บันทึกที่ตรงเรื่องก่อน · แก้หรือลบไฟล์ในโฟลเดอร์ได้เลย
+              {kinfo ? ` · มี ${kinfo.notes} บันทึก` : ""}
+            </span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <span className="input mono" style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 8, wordBreak: "break-all" }}>
+                <BookMarked size={14} strokeWidth={1.8} aria-hidden="true" style={{ flex: "none" }} />
+                {knowledgeDir || kinfo?.dir || "ค่าเริ่มต้น (Documents\\DocAsk ความรู้)"}
+              </span>
+              <button type="button" className="icon-btn" aria-label="เปิดโฟลเดอร์ความรู้" title="เปิดโฟลเดอร์" onClick={() => api.openKnowledgeFolder(service.id).catch((e) => setError((e as { message: string }).message))}>
+                <FolderOpen size={16} strokeWidth={1.8} />
+              </button>
+              <button type="button" className="icon-btn" aria-label="เปลี่ยนโฟลเดอร์ความรู้" title="เปลี่ยนที่เก็บ เช่น โฟลเดอร์แชร์ของทีม (บันทึกเดิมไม่ถูกย้าย)"
+                onClick={async () => { const f = await api.pickFolder(); if (f) setKnowledgeDir(f); }}>
+                <FolderInput size={16} strokeWidth={1.8} />
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="form-grid">
           <div className="field">

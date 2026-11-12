@@ -70,6 +70,8 @@ pub struct Settings {
     pub font: String,
     /// text size: "s" | "m" | "l" | "xl"
     pub text_size: String,
+    /// when Windows starts DocAsk at sign-in, stay in the tray instead of opening the window
+    pub start_hidden: bool,
 }
 
 impl Default for Settings {
@@ -96,6 +98,7 @@ impl Default for Settings {
             index_load: "normal".into(),
             font: "looped".into(),
             text_size: "m".into(),
+            start_hidden: true,
         }
     }
 }

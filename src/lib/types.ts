@@ -19,8 +19,25 @@ export interface Service {
   effort: Effort;
   topK: number;
   systemPrompt: string;
+  /** where "บันทึกเป็นความรู้" writes notes ("" = default, chosen on the first save) */
+  knowledgeDir: string;
   createdAt: number;
   updatedAt: number;
+}
+
+/** a note drafted from a chat, not saved yet */
+export interface KnowledgeDraft {
+  title: string;
+  markdown: string;
+}
+
+export interface NewNote extends KnowledgeDraft {
+  status: "fixed" | "unverified";
+}
+
+export interface KnowledgeInfo {
+  dir: string;
+  notes: number;
 }
 
 export interface ServiceStats {
@@ -52,6 +69,8 @@ export interface DocItem {
 
 export interface Source {
   n: number;
+  /** a knowledge note saved from an earlier chat */
+  knowledge?: boolean;
   serviceId: string;
   serviceName: string;
   docPath: string;
@@ -176,6 +195,7 @@ export interface Settings {
   indexLoad: "light" | "normal" | "fast";
   font: FontChoice;
   textSize: TextSize;
+  startHidden: boolean;
 }
 
 

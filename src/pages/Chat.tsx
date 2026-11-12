@@ -7,6 +7,7 @@ import { useApp, visibleModels } from "../state";
 import { Composer } from "../components/Composer";
 import { DocPanel } from "../components/DocPanel";
 import { MessageList, type StreamingState } from "../components/MessageList";
+import { KnowledgeDialog } from "../components/KnowledgeDialog";
 import { ErrorState, Skeleton } from "../components/ui";
 
 interface Stream extends StreamingState { requestId: string | null; chatId: string | null }
@@ -23,6 +24,7 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
   const [model, setModel] = useState(initial?.model ?? "");
   const [effort, setEffort] = useState<Effort>(initial?.effort ?? "medium");
   const [allServices, setAllServices] = useState(initial?.allServices ?? false);
+  const [knowledgeUpto, setKnowledgeUpto] = useState<number | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const started = useRef(false);
   const streamRef = useRef<Stream | null>(null);
@@ -192,6 +194,7 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
                 streaming={stream}
                 retryDisabled={!!stream && !stream.error}
                 onRetry={(q) => send(q)}
+                onSaveKnowledge={chat && !(stream && !stream.error) ? (id) => setKnowledgeUpto(id) : undefined}
               />
             )}
             {stream?.error && (
@@ -222,6 +225,9 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
         />
       </main>
       {service && showDocs && <DocPanel service={service} onClose={() => setShowDocs(false)} />}
+      {knowledgeUpto != null && chat && (
+        <KnowledgeDialog chatId={chat.id} serviceId={chat.serviceId} upto={knowledgeUpto} onClose={() => setKnowledgeUpto(null)} />
+      )}
     </>
   );
 }

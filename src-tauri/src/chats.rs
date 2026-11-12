@@ -34,6 +34,9 @@ pub struct SourceRef {
     /// found by keyword (exact words) search
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keyword: bool,
+    /// a knowledge note saved from an earlier chat (`*.knowledge.md`)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub knowledge: bool,
     pub text: String,
 }
 

@@ -70,6 +70,9 @@ pub fn is_heading(line: &str) -> bool {
     if line.chars().count() > 120 {
         return false;
     }
+    if md_heading(line).is_some() {
+        return true;
+    }
     let num_end = line.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(line.len());
     let num = &line[..num_end];
     if num.is_empty() || num.ends_with('.') || num.starts_with('.') || num.contains("..") {
@@ -86,6 +89,10 @@ pub fn is_heading(line: &str) -> bool {
 /// end in a page number (table-of-contents lines do).
 pub fn section_title(line: &str) -> Option<&str> {
     let line = line.trim();
+    // Markdown: only the top level ("# เรื่อง") names a section
+    if line.starts_with('#') {
+        return md_heading(line).filter(|(level, _)| *level == 1).map(|(_, t)| t);
+    }
     if !is_heading(line) || line.split(' ').next().is_some_and(|n| n.contains('.')) {
         return None;
     }
@@ -96,10 +103,66 @@ pub fn section_title(line: &str) -> Option<&str> {
     Some(line)
 }
 
+/// A Markdown ATX heading "## ชื่อ" → (level, title). Not "#hashtag", not "#" alone.
+pub fn md_heading(line: &str) -> Option<(usize, &str)> {
+    let line = line.trim();
+    let level = line.chars().take_while(|c| *c == '#').count();
+    if !(1..=6).contains(&level) || line.chars().count() > 120 {
+        return None;
+    }
+    let rest = &line[level..];
+    let title = rest.strip_prefix(' ')?.trim().trim_end_matches('#').trim();
+    (!title.is_empty()).then_some((level, title))
+}
+
+/// The last section title in `text`, skipping lines inside ``` code blocks.
+pub fn last_section(text: &str) -> Option<&str> {
+    let mut inside = false;
+    let mut found = None;
+    for l in text.lines() {
+        if is_fence(l) {
+            inside = !inside;
+        } else if !inside {
+            if let Some(t) = section_title(l) {
+                found = Some(t);
+            }
+        }
+    }
+    found
+}
+
+/// A line that opens or closes a Markdown code block.
+pub fn is_fence(line: &str) -> bool {
+    let l = line.trim_start();
+    l.starts_with("```") || l.starts_with("~~~")
+}
+
+/// For each grapheme: is it inside a ``` code block? (A "# comment" there is not a heading.)
+fn fence_mask(g: &[&str]) -> Vec<bool> {
+    let mut mask = vec![false; g.len()];
+    let mut inside = false;
+    let mut i = 0;
+    while i < g.len() {
+        let end = (i..g.len()).find(|&j| g[j] == "\n").unwrap_or(g.len());
+        let line: String = g[i..end].concat();
+        let fence = is_fence(&line);
+        let line_inside = inside || fence;
+        for m in &mut mask[i..end] {
+            *m = line_inside;
+        }
+        if fence {
+            inside = !inside;
+        }
+        i = end + 1;
+    }
+    mask
+}
+
 pub fn chunk(text: &str, opts: ChunkOptions) -> Vec<String> {
     let size = opts.size.max(50);
     let overlap = opts.overlap.min(size / 2);
     let g: Vec<&str> = text.graphemes(true).collect();
+    let fenced = if text.contains("```") || text.contains("~~~") { fence_mask(&g) } else { Vec::new() };
     let n = g.len();
     let mut out = Vec::new();
     if n == 0 {
@@ -108,7 +171,7 @@ pub fn chunk(text: &str, opts: ChunkOptions) -> Vec<String> {
     let mut start = 0usize;
     loop {
         let hard_end = (start + size).min(n);
-        let (end, at_heading) = if hard_end >= n { (n, false) } else { best_break(&g, start, hard_end, size) };
+        let (end, at_heading) = if hard_end >= n { (n, false) } else { best_break(&g, &fenced, start, hard_end, size) };
         let piece = g[start..end].concat();
         let piece = piece.trim();
         if !piece.is_empty() {
@@ -147,9 +210,10 @@ fn is_space(g: &str) -> bool {
 /// else in (start + size/2, hard_end] at a paragraph, newline, sentence end or space.
 /// Falls back to the hard limit (still a grapheme boundary).
 /// `.1` = a clean cut (before a heading or at a blank line): the next chunk needs no overlap.
-fn best_break(g: &[&str], start: usize, hard_end: usize, size: usize) -> (usize, bool) {
+fn best_break(g: &[&str], fenced: &[bool], start: usize, hard_end: usize, size: usize) -> (usize, bool) {
     let line_at = |i: usize| -> String { g[i..].iter().take_while(|x| **x != "\n").take(130).copied().collect() };
-    if let Some(i) = (start + size / 5 + 1..hard_end).rev().find(|&i| g[i - 1] == "\n" && is_heading(&line_at(i))) {
+    let in_code = |i: usize| fenced.get(i).copied().unwrap_or(false);
+    if let Some(i) = (start + size / 5 + 1..hard_end).rev().find(|&i| g[i - 1] == "\n" && !in_code(i) && is_heading(&line_at(i))) {
         return (i, true);
     }
     let min = start + size / 2;
@@ -289,5 +353,34 @@ mod tests {
     #[test]
     fn normalize_collapses() {
         assert_eq!(normalize("a  \t b\r\n\r\n\r\n\r\nc\u{FEFF}"), "a b\n\nc");
+    }
+
+    #[test]
+    fn markdown_headings() {
+        assert_eq!(md_heading("## ปัญหา / อาการ"), Some((2, "ปัญหา / อาการ")));
+        assert_eq!(md_heading("# OT ไม่ขึ้น #"), Some((1, "OT ไม่ขึ้น")));
+        for h in ["#hashtag", "#", "####### seven", "# "] {
+            assert_eq!(md_heading(h), None, "{h}");
+        }
+        assert_eq!(section_title("# OT ไม่ขึ้น"), Some("OT ไม่ขึ้น"));
+        assert_eq!(section_title("## การตรวจสอบ"), None, "only the top level names a section");
+        assert_eq!(last_section("# A\n```bash\n# not a title\n```\ntext"), Some("A"));
+    }
+
+    #[test]
+    fn markdown_notes_cut_at_headings_not_inside_code() {
+        let sql = "```sql\nSELECT EMPLID, PUNCH_DTTM\n  FROM SYSADM.PS_TL_RPTD_TIME\n# comment inside code\n WHERE EMPLID = '{EMPLID}';\n```";
+        let mut text = String::from("# OT ไม่ขึ้นใน Payable Time\n\n> บันทึกความรู้");
+        for h in ["ปัญหา / อาการ", "สาเหตุ", "การตรวจสอบ", "วิธีแก้ไข"] {
+            text.push_str(&format!("\n\n## {h}\nพนักงานลงเวลา OT แต่ยอดไม่ขึ้นในระบบ ตรวจตามขั้นตอนนี้\n{sql}"));
+        }
+        let chunks = chunk(&normalize(&text), ChunkOptions { size: 260, overlap: 60 });
+        assert!(chunks.len() >= 3, "{chunks:#?}");
+        for c in &chunks[1..] {
+            assert!(c.starts_with("## "), "chunk should start at a heading: {c}");
+        }
+        for c in &chunks {
+            assert_eq!(c.matches("```").count() % 2, 0, "code block cut: {c}");
+        }
     }
 }

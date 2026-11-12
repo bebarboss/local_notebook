@@ -33,10 +33,10 @@ export function createMockBackend(): Backend {
 
   const t0 = now();
   const services: Service[] = [
-    { id: "hr", name: "HR · นโยบายบุคคล", code: "HR", color: "#1F4FD1", files: [], excluded: [], folders: ["D:\\Docs\\HR"], model: "godev1", effort: "medium", topK: 5, systemPrompt: "", createdAt: t0 - 9e8, updatedAt: t0 - 6e5 },
-    { id: "pos", name: "POS · ระบบหน้าร้าน", code: "POS", color: "#B45309", files: [], excluded: [], folders: ["D:\\Docs\\POS"], model: "gothink1", effort: "high", topK: 8, systemPrompt: "", createdAt: t0 - 8e8, updatedAt: t0 - 7.2e6 },
-    { id: "pr", name: "จัดซื้อและสัญญา", code: "PR", color: "#0F766E", files: [], excluded: [], folders: ["D:\\Docs\\Procurement"], model: "godev2", effort: "medium", topK: 5, systemPrompt: "", createdAt: t0 - 7e8, updatedAt: t0 - 3e7 },
-    { id: "mt", name: "ประชุมทีม", code: "MT", color: "#7C3AED", files: [], excluded: [], folders: ["D:\\Docs\\Meetings"], model: "godev1", effort: "low", topK: 5, systemPrompt: "", createdAt: t0 - 6e8, updatedAt: t0 - 8.6e7 },
+    { id: "hr", name: "HR · นโยบายบุคคล", code: "HR", color: "#1F4FD1", files: [], excluded: [], folders: ["D:\\Docs\\HR"], model: "godev1", effort: "medium", topK: 5, systemPrompt: "", knowledgeDir: "", createdAt: t0 - 9e8, updatedAt: t0 - 6e5 },
+    { id: "pos", name: "POS · ระบบหน้าร้าน", code: "POS", color: "#B45309", files: [], excluded: [], folders: ["D:\\Docs\\POS"], model: "gothink1", effort: "high", topK: 8, systemPrompt: "", knowledgeDir: "", createdAt: t0 - 8e8, updatedAt: t0 - 7.2e6 },
+    { id: "pr", name: "จัดซื้อและสัญญา", code: "PR", color: "#0F766E", files: [], excluded: [], folders: ["D:\\Docs\\Procurement"], model: "godev2", effort: "medium", topK: 5, systemPrompt: "", knowledgeDir: "", createdAt: t0 - 7e8, updatedAt: t0 - 3e7 },
+    { id: "mt", name: "ประชุมทีม", code: "MT", color: "#7C3AED", files: [], excluded: [], folders: ["D:\\Docs\\Meetings"], model: "godev1", effort: "low", topK: 5, systemPrompt: "", knowledgeDir: "", createdAt: t0 - 6e8, updatedAt: t0 - 8.6e7 },
   ];
 
   const doc = (id: number, name: string, chunks: number, mb: number, extra: Partial<DocItem> = {}): DocItem => ({
@@ -81,6 +81,7 @@ export function createMockBackend(): Backend {
   const hrSources: Source[] = [
     { n: 1, serviceId: "hr", serviceName: "HR · นโยบายบุคคล", docPath: "D:\\Docs\\HR\\นโยบายการลา_2569.pdf", fileName: "นโยบายการลา_2569.pdf", page: 4, ord: 12, score: 0.86, text: "ข้อ 7 การลาพักผ่อนประจำปี\nพนักงานที่ปฏิบัติงานติดต่อกันครบ 1 ปี มีสิทธิ์ลาพักผ่อนประจำปีได้ 10 วันทำการ การลาต้องยื่นผ่านระบบล่วงหน้าอย่างน้อย 3 วันทำการ และได้รับอนุมัติจากผู้บังคับบัญชาก่อนวันลา" },
     { n: 2, serviceId: "hr", serviceName: "HR · นโยบายบุคคล", docPath: "D:\\Docs\\HR\\นโยบายการลา_2569.pdf", fileName: "นโยบายการลา_2569.pdf", page: 5, ord: 13, score: 0.79, text: "ข้อ 7.2 เมื่อพนักงานมีอายุงานครบ 3 ปี ให้ได้รับสิทธิ์ลาพักผ่อนเพิ่มขึ้นปีละ 1 วันทำการ รวมแล้วไม่เกิน 15 วันทำการต่อปี" },
+    { n: 3, knowledge: true, serviceId: "hr", serviceName: "HR · นโยบายบุคคล", docPath: "C:\\Users\\me\\Documents\\DocAsk ความรู้\\HR\\2026-11-02_ใบลาค้างไม่มีผู้อนุมัติ.knowledge.md", fileName: "2026-11-02_ใบลาค้างไม่มีผู้อนุมัติ.knowledge.md", page: null, ord: 0, score: 0.74, text: "# ใบลาค้างไม่มีผู้อนุมัติ\n\n> บันทึกความรู้ · 2026-11-02 · สถานะ: แก้ได้แล้ว\n\n## วิธีแก้ไข\n1. ตรวจว่าหัวหน้าในระบบตรงกับผังองค์กร\n2. ถ้าหัวหน้าลาออก ให้ HR เปลี่ยนผู้อนุมัติก่อน แล้วพนักงานส่งใบลาใหม่" },
   ];
 
   const messages: Record<string, Message[]> = {
@@ -88,7 +89,7 @@ export function createMockBackend(): Backend {
       { id: 1, chatId: "c1", role: "user", content: "พนักงานลาพักร้อนได้กี่วันต่อปี และต้องแจ้งล่วงหน้ากี่วัน", model: null, reasoningEffort: null, sources: [], elapsedMs: null, error: null, createdAt: t0 - 3.6e6 },
       {
         id: 2, chatId: "c1", role: "assistant",
-        content: "ตามนโยบายการลา พนักงานที่ทำงานครบ 1 ปีมีสิทธิ์ลาพักร้อน **10 วันทำการต่อปี** [1] และเพิ่มขึ้นปีละ 1 วันเมื่ออายุงานครบ 3 ปี สูงสุด 15 วัน [2]\n\nการลาต้องยื่นผ่านระบบ **ล่วงหน้าอย่างน้อย 3 วันทำการ** และได้รับอนุมัติจากหัวหน้างานก่อนวันลา [1]",
+        content: "ตามนโยบายการลา พนักงานที่ทำงานครบ 1 ปีมีสิทธิ์ลาพักร้อน **10 วันทำการต่อปี** [1] และเพิ่มขึ้นปีละ 1 วันเมื่ออายุงานครบ 3 ปี สูงสุด 15 วัน [2]\n\nการลาต้องยื่นผ่านระบบ **ล่วงหน้าอย่างน้อย 3 วันทำการ** และได้รับอนุมัติจากหัวหน้างานก่อนวันลา [1] ถ้าใบลาค้างเพราะไม่มีผู้อนุมัติ เคยแก้โดยให้ HR เปลี่ยนผู้อนุมัติก่อน [3]",
         model: "godev1", reasoningEffort: "medium", sources: hrSources, elapsedMs: 2400, error: null, createdAt: t0 - 3.59e6,
       },
     ],
@@ -97,7 +98,7 @@ export function createMockBackend(): Backend {
   let settings: Settings = {
     theme: "system", userName: "navaritrod", setupDone: false, historyTurns: 6, autoDeleteDays: 0,
     topK: 5, threshold: 0.3, chunkSize: 1000, chunkOverlap: 150, embeddingModel: "multilingual-e5-small", lastServiceId: "hr",
-    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true, rerank: true, hybrid: true, indexLoad: "normal", font: "looped", textSize: "m",
+    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true, rerank: true, hybrid: true, indexLoad: "normal", font: "looped", textSize: "m", startHidden: true,
   };
   try {
     const saved = localStorage.getItem("docask-mock-settings");
@@ -169,10 +170,14 @@ export function createMockBackend(): Backend {
     try { localStorage.setItem("docask-mock-settings", JSON.stringify(settings)); } catch { /* ignore */ }
   };
 
+  let autostart = false;
+  const notes: Record<string, number> = {};
   const backend: Backend = {
     mock: true,
     appInfo: async () => ({ version: "0.1.0", dataDir: "%APPDATA%\\DocAsk", mock: true }),
     getSettings: async () => (await wait(150), clone(settings)),
+    getAutostart: async () => autostart,
+    setAutostart: async (on) => (autostart = on),
     saveSettings: async (s) => { settings = clone(s); persist(); return clone(settings); },
     getGateway: async () => clone(gateway),
     setGatewayUrl: async (url) => { gateway = { ...gateway, url: url.trim().replace(/\/+$/, "") }; return clone(gateway); },
@@ -220,7 +225,7 @@ export function createMockBackend(): Backend {
     listServices: async () => (await wait(200), clone(services)),
     serviceStats: async () => services.map(stats),
     createService: async (n: NewService) => {
-      const s: Service = { ...n, files: [], excluded: [], id: uid("svc"), createdAt: now(), updatedAt: now() };
+      const s: Service = { ...n, files: [], excluded: [], knowledgeDir: "", id: uid("svc"), createdAt: now(), updatedAt: now() };
       services.push(s);
       docs[s.id] = [];
       emit("services-changed", null);
@@ -358,6 +363,20 @@ export function createMockBackend(): Backend {
     },
     stop: async (rid) => { const s = streams.get(rid); if (s) s.stopped = true; },
     openSource: async () => {},
+    knowledgeInfo: async (sid) => ({ dir: services.find((x) => x.id === sid)?.knowledgeDir || "C:\\Users\\me\\Documents\\DocAsk ความรู้\\" + (services.find((x) => x.id === sid)?.name ?? ""), notes: notes[sid] ?? 0 }),
+    draftKnowledge: async () => {
+      await wait(1200);
+      return [
+        { title: "OT ไม่ขึ้นใน Payable Time", markdown: "## ปัญหา / อาการ\nพนักงานลง OT แล้วแต่ยอดไม่ขึ้นในรายงาน\n\n## สาเหตุ\nยังไม่ได้รัน Time Administration\n\n## การตรวจสอบ\n1. ดูเวลาที่ลงไว้\n\n```sql\nSELECT * FROM SYSADM.PS_TL_RPTD_TIME WHERE EMPLID = '{EMPLID}';\n```\n\n## วิธีแก้ไข\n1. รัน Time Administration ของช่วงวันนั้น\n\n## เอกสารอ้างอิง\n- SQL_Query_Manual.pdf หน้า 21" },
+        { title: "ลาไม่ขึ้นให้หัวหน้าอนุมัติ", markdown: "## ปัญหา / อาการ\nใบลาค้าง ไม่มีผู้อนุมัติ\n\n## สาเหตุ\nไม่ระบุ\n\n## การตรวจสอบ\n1. ดูผู้อนุมัติของพนักงาน\n\n## วิธีแก้ไข\nไม่ระบุ\n\n## เอกสารอ้างอิง\n- SQL_Query_Manual.pdf หน้า 30" },
+      ];
+    },
+    saveKnowledge: async (sid, _cid, date, list) => {
+      await wait(300);
+      notes[sid] = (notes[sid] ?? 0) + list.length;
+      return list.map((n) => `C:\\Users\\me\\Documents\\DocAsk ความรู้\\${date}_${n.title}.knowledge.md`);
+    },
+    openKnowledgeFolder: async () => {},
     embeddingStatus: async () => clone(embedding),
     downloadEmbedding: async (model) => {
       embedding = { ...embedding, model, ready: false };

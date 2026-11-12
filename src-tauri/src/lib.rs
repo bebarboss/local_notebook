@@ -11,6 +11,7 @@ pub mod errors;
 pub mod gateway_embed;
 pub mod gateway_test;
 pub mod ingest;
+pub mod knowledge;
 pub mod llm;
 pub mod redact;
 pub mod rerank;
@@ -27,6 +28,9 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // a second launch (desktop icon while DocAsk sits in the tray) brings this one forward
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| background::show(app)))
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec![background::AUTOSTART_ARG])))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
@@ -42,6 +46,15 @@ pub fn run() {
             app.manage(state);
             if let Err(e) = background::init(app.handle()) {
                 log::warn!("tray icon unavailable: {e}");
+            }
+            // the window is created hidden: show it, unless Windows started us at sign-in and
+            // the user wants DocAsk to wait in the tray
+            let autostarted = std::env::args().any(|a| a == background::AUTOSTART_ARG);
+            let start_hidden = app.state::<AppState>().settings.lock().start_hidden;
+            if autostarted && start_hidden {
+                background::start_in_tray(app.handle());
+            } else if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
             }
 
             // watch every service folder and catch up on changes made while closed
@@ -63,6 +76,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
             commands::get_settings,
+            commands::get_autostart,
+            commands::knowledge_info,
+            commands::draft_knowledge,
+            commands::save_knowledge,
+            commands::open_knowledge_folder,
+            commands::set_autostart,
             commands::save_settings,
             commands::get_gateway,
             commands::set_gateway_url,

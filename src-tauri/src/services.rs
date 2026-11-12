@@ -25,6 +25,10 @@ pub struct Service {
     pub top_k: u32,
     #[serde(default)]
     pub system_prompt: String,
+    /// where "บันทึกเป็นความรู้" writes notes ("" = not chosen yet → the default on first save);
+    /// always one of `folders`, so the notes are indexed like any document
+    #[serde(default)]
+    pub knowledge_dir: String,
     #[serde(default)]
     pub created_at: i64,
     #[serde(default)]
@@ -69,6 +73,25 @@ pub fn in_dir(path: &str, dir: &str) -> bool {
         d.push('\\');
     }
     p.starts_with(&d)
+}
+
+/// Add `dir` to `folders` unless a folder already contains it. true = added.
+fn cover(folders: &mut Vec<String>, dir: &str) -> bool {
+    if dir.is_empty() || folders.iter().any(|f| f.eq_ignore_ascii_case(dir) || in_dir(dir, f)) {
+        return false;
+    }
+    folders.push(dir.to_string());
+    true
+}
+
+pub fn default_knowledge_dir(service_name: &str) -> PathBuf {
+    let base = dirs::document_dir().unwrap_or_else(crate::config::data_dir);
+    let name: String = service_name
+        .chars()
+        .map(|c| if c.is_control() || r#"\/:*?"<>|"#.contains(c) { '_' } else { c })
+        .collect();
+    let name = name.trim().trim_matches('.').trim();
+    base.join("DocAsk ความรู้").join(if name.is_empty() { "service" } else { name })
 }
 
 pub fn now_ms() -> i64 {
@@ -127,6 +150,7 @@ impl ServiceRegistry {
             effort,
             top_k: n.top_k.clamp(1, 30),
             system_prompt: n.system_prompt.trim().to_string(),
+            knowledge_dir: String::new(),
             created_at: now,
             updated_at: now,
         };
@@ -149,10 +173,26 @@ impl ServiceRegistry {
         cur.model = s.model;
         cur.top_k = s.top_k.clamp(1, 30);
         cur.system_prompt = s.system_prompt.trim().to_string();
+        cur.knowledge_dir = s.knowledge_dir.trim().to_string();
+        cover(&mut cur.folders, &cur.knowledge_dir);
         cur.updated_at = now_ms();
         let out = cur.clone();
         self.save()?;
         Ok(out)
+    }
+
+    /// The notes folder of a service, chosen now if it was not: Documents\DocAsk ความรู้\<name>.
+    /// Makes sure it is one of the service's folders. Returns (service, folders changed).
+    pub fn ensure_knowledge_dir(&mut self, id: &str) -> AppResult<(Service, bool)> {
+        let cur = self.items.iter_mut().find(|x| x.id == id).ok_or_else(|| AppError::new("not_found", "ไม่พบ service นี้"))?;
+        if cur.knowledge_dir.is_empty() {
+            cur.knowledge_dir = default_knowledge_dir(&cur.name).to_string_lossy().into_owned();
+        }
+        let changed = cover(&mut cur.folders, &cur.knowledge_dir);
+        cur.updated_at = now_ms();
+        let out = cur.clone();
+        self.save()?;
+        Ok((out, changed))
     }
 
     pub fn add_files(&mut self, id: &str, files: &[String]) -> AppResult<Service> {

@@ -3,6 +3,9 @@
 // The frontend never sees the API key — only hasKey + last 4 chars.
 
 import type {
+  KnowledgeDraft,
+  KnowledgeInfo,
+  NewNote,
   AppError,
   AppInfo,
   AskRequest,
@@ -70,6 +73,9 @@ export interface Backend {
   appInfo(): Promise<AppInfo>;
   // settings
   getSettings(): Promise<Settings>;
+  /** started by Windows at sign-in (Run key, this user) */
+  getAutostart(): Promise<boolean>;
+  setAutostart(enabled: boolean): Promise<boolean>;
   saveSettings(s: Settings): Promise<Settings>;
   // gateway + key
   getGateway(): Promise<GatewayInfo>;
@@ -114,6 +120,12 @@ export interface Backend {
   ask(req: AskRequest): Promise<AskStarted>;
   stop(requestId: string): Promise<void>;
   openSource(path: string): Promise<void>;
+  // knowledge notes
+  knowledgeInfo(serviceId: string): Promise<KnowledgeInfo>;
+  /** model writes notes from the chat (up to message `upto`); nothing saved yet */
+  draftKnowledge(chatId: string, upto: number | null): Promise<KnowledgeDraft[]>;
+  saveKnowledge(serviceId: string, chatId: string | null, date: string, notes: NewNote[]): Promise<string[]>;
+  openKnowledgeFolder(serviceId: string): Promise<void>;
   // embedding
   embeddingStatus(): Promise<EmbeddingStatus>;
   downloadEmbedding(model: EmbeddingModelId): Promise<void>;
@@ -170,6 +182,8 @@ function createTauriBackend(): Backend {
     mock: false,
     appInfo: () => call("app_info"),
     getSettings: () => call("get_settings"),
+    getAutostart: () => call("get_autostart"),
+    setAutostart: (enabled) => call("set_autostart", { enabled }),
     saveSettings: (settings) => call("save_settings", { settings }),
     getGateway: () => call("get_gateway"),
     setGatewayUrl: (url) => call("set_gateway_url", { url }),
@@ -208,6 +222,10 @@ function createTauriBackend(): Backend {
     ask: (req) => call("ask", { req }),
     stop: (requestId) => call("stop_generation", { requestId }),
     openSource: (path) => call("open_source_file", { path }),
+    knowledgeInfo: (serviceId) => call("knowledge_info", { serviceId }),
+    draftKnowledge: (chatId, upto) => call("draft_knowledge", { chatId, upto }),
+    saveKnowledge: (serviceId, chatId, date, notes) => call("save_knowledge", { serviceId, chatId, date, notes }),
+    openKnowledgeFolder: (serviceId) => call("open_knowledge_folder", { serviceId }),
     embeddingStatus: () => call("embedding_status"),
     downloadEmbedding: (model) => call("download_embedding", { model }),
     useEmbeddingFolder: (model, folder) => call("use_embedding_folder", { model, folder }),

@@ -18,6 +18,7 @@ const SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: "search", label: "การค้นหา" },
   { id: "history", label: "ประวัติแชต" },
   { id: "theme", label: "ธีม" },
+  { id: "startup", label: "เปิดโปรแกรม" },
   { id: "trouble", label: "วิธีแก้ปัญหา" },
   { id: "about", label: "เกี่ยวกับ" },
 ];
@@ -46,6 +47,7 @@ export default function SettingsPage({ section = "gateway" }: { section?: Settin
             {cur === "search" && <SearchSection />}
             {cur === "history" && <HistorySection />}
             {cur === "theme" && <section><h2>ธีม</h2><div className="list-card"><ThemeRow /><FontRow /><TextSizeRow /></div></section>}
+            {cur === "startup" && <section><h2>เปิดโปรแกรม</h2><div className="list-card"><StartupRows /></div></section>}
             {cur === "trouble" && <section><h2>ตรวจสอบและแก้ปัญหา</h2><TroubleshootTable /></section>}
             {cur === "about" && <AboutSection />}
           </div>
@@ -65,6 +67,48 @@ function ThemeRow() {
         {opts.map((o) => <button key={o.v} role="radio" aria-checked={settings.theme === o.v} onClick={() => updateSettings({ theme: o.v })}>{o.label}</button>)}
       </div>
     </div>
+  );
+}
+
+function StartupRows() {
+  const { settings, updateSettings, toast } = useApp();
+  const [on, setOn] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    api.getAutostart().then(setOn).catch(() => setOn(false));
+  }, []);
+  return (
+    <>
+      <div className="list-row">
+        <div className="l">
+          <span className="t">เปิดพร้อม Windows</span>
+          <span className="d">เปิด DocAsk เองเมื่อเข้าสู่ระบบ Windows · ทำ index ไฟล์ที่เปลี่ยนระหว่างปิดเครื่องให้เสร็จก่อนจะใช้ · ตั้งเฉพาะผู้ใช้นี้ ไม่ต้องสิทธิ์ admin</span>
+          {error && <span className="d" style={{ color: "var(--err-text)" }}>{error}</span>}
+        </div>
+        <Switch
+          checked={!!on}
+          disabled={on == null}
+          label="เปิดพร้อม Windows"
+          onChange={async (v) => {
+            setError(null);
+            try {
+              const r = await api.setAutostart(v);
+              setOn(r);
+              toast(r ? "DocAsk จะเปิดเองเมื่อเข้าสู่ระบบ Windows" : "ปิดการเปิดพร้อม Windows แล้ว");
+            } catch (e) {
+              setError((e as { message: string }).message);
+            }
+          }}
+        />
+      </div>
+      <div className="list-row">
+        <div className="l">
+          <span className="t">ซ่อนไว้ที่ถาดตอนเปิดพร้อม Windows</span>
+          <span className="d">ไม่เด้งหน้าต่างขึ้นมา รออยู่ที่ไอคอนข้างนาฬิกา (คลิกเพื่อเปิด หรือเปิดจากไอคอนบนเดสก์ท็อป) · ปิดตัวเลือกนี้ถ้าอยากให้หน้าต่างเปิดขึ้นเลย</span>
+        </div>
+        <Switch checked={settings.startHidden} disabled={!on} label="ซ่อนไว้ที่ถาดตอนเปิดพร้อม Windows" onChange={(v) => updateSettings({ startHidden: v })} />
+      </div>
+    </>
   );
 }
 

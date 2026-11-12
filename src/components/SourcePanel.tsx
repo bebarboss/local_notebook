@@ -9,9 +9,14 @@ import { SourceImageGrid } from "./SourceImages";
 export function SourcePanel({ source, onClose }: { source: Source; onClose: () => void }) {
   const { toast } = useApp();
   return (
-    <Modal title={`แหล่งอ้างอิง [${source.n}]`} onClose={onClose} width={620}>
+    <Modal title={source.knowledge ? `บันทึกความรู้ [${source.n}]` : `แหล่งอ้างอิง [${source.n}]`} onClose={onClose} width={620}>
+      {source.knowledge && (
+        <p className="muted" style={{ fontSize: 13, lineHeight: 1.7, margin: 0 }}>
+          บันทึกจากแชตก่อนหน้า ไม่ใช่เอกสารต้นฉบับ — แก้หรือลบได้ที่ไฟล์นี้ (ลบไฟล์ = เลิกใช้บันทึกนี้)
+        </p>
+      )}
       <div className="kv">
-        <div><span className="k">ไฟล์</span><span style={{ wordBreak: "break-all" }}>{source.fileName}</span></div>
+        <div><span className="k">{source.knowledge ? "บันทึก" : "ไฟล์"}</span><span style={{ wordBreak: "break-all" }}>{source.fileName}</span></div>
         <div><span className="k">Service</span><span>{source.serviceName}</span></div>
         <div><span className="k">ตำแหน่ง · ท่อนที่</span><span>{source.page != null ? th.pageOf(source.fileName, source.page) : "—"} · {source.ord + 1}</span></div>
         <div>

@@ -9,7 +9,7 @@ export type Page =
   | { name: "settings"; section?: SettingsSection }
   | { name: "setup" };
 
-export type SettingsSection = "gateway" | "models" | "embedding" | "search" | "history" | "theme" | "trouble" | "about";
+export type SettingsSection = "gateway" | "models" | "embedding" | "search" | "history" | "theme" | "startup" | "trouble" | "about";
 
 interface Ctx {
   ready: boolean;
@@ -57,6 +57,7 @@ export const DEFAULT_SETTINGS: Settings = {
   indexLoad: "normal",
   font: "looped",
   textSize: "m",
+  startHidden: true,
 };
 
 export function AppProvider({ children }: { children: ReactNode }) {

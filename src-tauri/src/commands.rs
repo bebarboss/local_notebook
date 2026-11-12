@@ -91,6 +91,23 @@ pub fn app_info(app: AppHandle) -> AppInfo {
     AppInfo { version: app.package_info().version.to_string(), data_dir: config::data_dir().to_string_lossy().into_owned(), mock: false }
 }
 
+/// Is DocAsk started by Windows at sign-in? (Run key in the registry, current user only.)
+#[tauri::command]
+pub fn get_autostart(app: AppHandle) -> bool {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+#[tauri::command]
+pub fn set_autostart(app: AppHandle, enabled: bool) -> AppResult<bool> {
+    use tauri_plugin_autostart::ManagerExt;
+    let al = app.autolaunch();
+    let r = if enabled { al.enable() } else { al.disable() };
+    r.map_err(|e| AppError::new("autostart", format!("ตั้งค่าเปิดพร้อม Windows ไม่ได้: {e}")))?;
+    crate::diag::log(format!("autostart {}", if enabled { "on" } else { "off" }));
+    Ok(al.is_enabled().unwrap_or(enabled))
+}
+
 #[tauri::command]
 pub fn get_settings(state: S<'_>) -> Settings {
     state.settings.lock().clone()
@@ -539,6 +556,9 @@ pub fn move_service_folder(app: AppHandle, state: S<'_>, service_id: String, fro
         return Err(AppError::new("not_found", "ไม่พบโฟลเดอร์นี้ใน service"));
     };
     *slot = to.clone();
+    if svc.knowledge_dir.eq_ignore_ascii_case(&from) {
+        svc.knowledge_dir = to.clone();
+    }
     let to_dir = PathBuf::from(&to);
     state.indexer.cancel(&service_id);
     let moved = state.stores.get(&service_id)?.lock().rewrite_paths(|p| {
@@ -839,6 +859,21 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, question: &str) -> 
             Err(e) => log::warn!("rerank task failed: {e}"),
         }
     }
+    // a knowledge note that matches well goes first (at most 2), documents fill the rest
+    let note: Vec<bool> = hits.iter().map(|(_, h)| crate::ingest::is_knowledge(&h.doc_path)).collect();
+    if note.iter().any(|n| *n) {
+        let strong: Vec<bool> = hits
+            .iter()
+            .zip(&rr)
+            .map(|((_, h), r)| match r {
+                Some(r) => *r >= 0.3,
+                None => h.score >= threshold + 0.05 || (h.keyword && h.score >= threshold),
+            })
+            .collect();
+        let order = crate::knowledge::prefer_notes(&note, &strong);
+        let mut slots: Vec<Option<_>> = hits.into_iter().zip(rr).map(Some).collect();
+        (hits, rr) = order.iter().map(|&i| slots[i].take().expect("each index once")).unzip();
+    }
     hits.truncate(k);
     rr.truncate(k);
     Ok(hits
@@ -850,6 +885,7 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, question: &str) -> 
             service_id: s.id,
             service_name: s.name,
             file_name: Path::new(&h.doc_path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            knowledge: crate::ingest::is_knowledge(&h.doc_path),
             doc_path: h.doc_path,
             page: h.page,
             ord: h.ord,
@@ -871,7 +907,9 @@ pub fn build_prompt(svc: &Service, sources: &[SourceRef], history: &[(String, St
          - ใช้ **ตัวหนา** กับคำสำคัญได้ ตอบกระชับ\n\
          - ถ้าคำตอบมีคำสั่ง SQL หรือโค้ดจากเอกสาร ให้คัดลอกตรงตัวจากเอกสารในบล็อก ```sql (หรือภาษานั้น) แล้วอ้าง [n] ใต้บล็อก \
          ห้ามแต่งชื่อตาราง ฟิลด์ หรือเงื่อนไขที่ไม่มีในเอกสาร ถ้าต้องปรับค่า (เช่น {EMPLID} หรือวันที่) ให้บอกว่าต้องแทนค่าอะไร\n\
-         - ถ้าเป็นคำสั่งที่แก้ข้อมูล (UPDATE, DELETE, INSERT, MERGE) ให้เตือนว่าเปลี่ยนข้อมูลจริง ให้ SELECT ตรวจเงื่อนไขก่อน และตรวจผลก่อน COMMIT",
+         - ถ้าเป็นคำสั่งที่แก้ข้อมูล (UPDATE, DELETE, INSERT, MERGE) ให้เตือนว่าเปลี่ยนข้อมูลจริง ให้ SELECT ตรวจเงื่อนไขก่อน และตรวจผลก่อน COMMIT\n\
+         - ท่อนที่ขึ้นต้นว่า \"บันทึกความรู้\" คือวิธีที่เคยใช้แก้ปัญหานี้ได้ในแชตก่อน ใช้เป็นแนวทางได้ (อ้าง [n] เหมือนท่อนอื่น) \
+         แต่ถ้าขัดกับเอกสาร ให้ยึดเอกสาร และบอกว่าบันทึกขัดกับเอกสารตรงไหน",
     );
     if !svc.system_prompt.trim().is_empty() {
         system.push_str("\n\nคำแนะนำเพิ่มเติมของ service นี้:\n");
@@ -890,7 +928,12 @@ pub fn build_prompt(svc: &Service, sources: &[SourceRef], history: &[(String, St
         let unit = if crate::ingest::is_spreadsheet(&s.file_name) { "แถว" } else { "หน้า" };
         let page = s.page.map(|p| format!(" · {unit} {p}")).unwrap_or_default();
         let from = if all { format!(" · service {}", s.service_name) } else { String::new() };
-        user.push_str(&format!("\n[{}] {}{}{}\n{}\n", s.n, s.file_name, page, from, s.text));
+        if s.knowledge {
+            let title = crate::knowledge::title_of(&s.file_name);
+            user.push_str(&format!("\n[{}] บันทึกความรู้: {title}{from}\n{}\n", s.n, s.text));
+        } else {
+            user.push_str(&format!("\n[{}] {}{}{}\n{}\n", s.n, s.file_name, page, from, s.text));
+        }
     }
     msgs.push(ChatMessage::new("user", user));
     msgs
@@ -909,6 +952,97 @@ pub fn open_source_file(path: String) -> AppResult<()> {
     #[cfg(all(unix, not(target_os = "macos")))]
     let r = std::process::Command::new("xdg-open").arg(&p).spawn();
     r.map(|_| ()).map_err(|e| AppError::new("open", format!("เปิดไฟล์ไม่ได้: {e}")))
+}
+
+// ------------------------------------------------------------------ knowledge
+
+/// Where notes of this service go and how many there are.
+#[tauri::command]
+pub fn knowledge_info(state: S<'_>, service_id: String) -> AppResult<crate::knowledge::KnowledgeInfo> {
+    let svc = state.services.lock().get(&service_id)?;
+    let dir = if svc.knowledge_dir.is_empty() { crate::services::default_knowledge_dir(&svc.name) } else { PathBuf::from(&svc.knowledge_dir) };
+    Ok(crate::knowledge::KnowledgeInfo { notes: crate::knowledge::count_notes(&dir), dir: dir.to_string_lossy().into_owned() })
+}
+
+/// Ask the model to write notes (one per problem) from a chat, up to message `upto`.
+/// Nothing is saved: the user checks and edits the drafts first.
+#[tauri::command]
+pub async fn draft_knowledge(app: AppHandle, chat_id: String, upto: Option<i64>) -> AppResult<Vec<crate::knowledge::Draft>> {
+    let state = app.state::<AppState>();
+    let key = secrets::require_key()?;
+    let (chat, messages) = {
+        let db = state.chats.lock();
+        (db.get_chat(&chat_id)?, db.messages(&chat_id)?)
+    };
+    let transcript = crate::knowledge::transcript(&messages, upto);
+    if !messages.iter().any(|m| m.role == "assistant" && m.error.is_none() && !m.content.trim().is_empty()) {
+        return Err(AppError::new("invalid", "แชตนี้ยังไม่มีคำตอบให้สรุป"));
+    }
+    // the model of the last answer, else the service's, else any enabled one
+    let svc = state.services.lock().get(&chat.service_id)?;
+    let last_model = messages.iter().rev().find_map(|m| m.model.clone());
+    let model = {
+        let models = state.models.lock();
+        let pick = |id: &str| models.iter().find(|m| m.enabled && m.id == id).cloned();
+        last_model.as_deref().and_then(pick).or_else(|| pick(&svc.model)).or_else(|| models.iter().find(|m| m.enabled).cloned())
+    }
+    .ok_or_else(|| AppError::new("no_model", "ไม่มีโมเดลที่เปิดใช้ — ตรวจในหมวดโมเดล"))?;
+    let messages = crate::knowledge::draft_prompt(&transcript);
+    let req = llm::Request { url: &model.url, key: &key, model: &model.id, effort: None, max_tokens: model.max_output_tokens, messages: &messages };
+    let reply = llm::complete_within(&req, std::time::Duration::from_secs(240)).await?;
+    let drafts = crate::knowledge::parse_drafts(&reply, &chat.title);
+    crate::diag::log(format!("[{}] knowledge draft: {} note(s) from {} chars", svc.code, drafts.len(), transcript.chars().count()));
+    if drafts.is_empty() {
+        return Err(AppError::new("empty", "โมเดลไม่ได้ส่งบันทึกกลับมา — ลองอีกครั้ง"));
+    }
+    Ok(drafts)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewNote {
+    pub title: String,
+    pub markdown: String,
+    /// "fixed" | "unverified"
+    pub status: String,
+}
+
+/// Write the checked notes into the service's knowledge folder and index them.
+#[tauri::command]
+pub fn save_knowledge(app: AppHandle, state: S<'_>, service_id: String, chat_id: Option<String>, date: String, notes: Vec<NewNote>) -> AppResult<Vec<String>> {
+    if notes.is_empty() {
+        return Err(AppError::new("invalid", "ยังไม่ได้เลือกบันทึก"));
+    }
+    let chat_title = match &chat_id {
+        Some(id) => state.chats.lock().get_chat(id).map(|c| c.title).unwrap_or_default(),
+        None => String::new(),
+    };
+    let (svc, folders_changed) = state.services.lock().ensure_knowledge_dir(&service_id)?;
+    let dir = PathBuf::from(&svc.knowledge_dir);
+    let mut saved = Vec::new();
+    for n in &notes {
+        let p = crate::knowledge::write_note(&dir, &n.title, &n.status, &date, &chat_title, &n.markdown)?;
+        saved.push(p.to_string_lossy().into_owned());
+    }
+    crate::diag::log(format!("[{}] knowledge: saved {} note(s)", svc.code, saved.len()));
+    if folders_changed {
+        state.watchers.watch(&svc);
+    }
+    state.indexer.start(app, svc.id.clone(), false);
+    Ok(saved)
+}
+
+/// Open the knowledge folder in Explorer (created if needed).
+#[tauri::command]
+pub fn open_knowledge_folder(state: S<'_>, service_id: String) -> AppResult<()> {
+    let svc = state.services.lock().get(&service_id)?;
+    let dir = if svc.knowledge_dir.is_empty() { crate::services::default_knowledge_dir(&svc.name) } else { PathBuf::from(&svc.knowledge_dir) };
+    std::fs::create_dir_all(&dir).map_err(|e| AppError::new("io", format!("สร้างโฟลเดอร์ไม่ได้: {e}")))?;
+    #[cfg(windows)]
+    let r = std::process::Command::new("explorer").arg(&dir).spawn();
+    #[cfg(not(windows))]
+    let r = std::process::Command::new("xdg-open").arg(&dir).spawn();
+    r.map(|_| ()).map_err(|e| AppError::new("open", format!("เปิดโฟลเดอร์ไม่ได้: {e}")))
 }
 
 // ------------------------------------------------------------------ embedding
@@ -1081,14 +1215,21 @@ mod tests {
     fn prompt_has_numbered_sources_and_no_old_chunks() {
         let svc = Service {
             id: "hr".into(), name: "HR".into(), code: "HR".into(), color: "#1F4FD1".into(), folders: vec![], files: vec![], excluded: vec![],
-            model: "godev1".into(), effort: "medium".into(), top_k: 5, system_prompt: "ตอบสั้น".into(), created_at: 0, updated_at: 0,
+            model: "godev1".into(), effort: "medium".into(), top_k: 5, system_prompt: "ตอบสั้น".into(), knowledge_dir: String::new(), created_at: 0, updated_at: 0,
         };
-        let src = vec![SourceRef { n: 1, service_id: "hr".into(), service_name: "HR".into(), doc_path: "a.pdf".into(), file_name: "a.pdf".into(), page: Some(4), ord: 0, score: 0.9, rerank_score: None, keyword: false, text: "ลา 10 วัน".into() }];
+        let src = vec![SourceRef { n: 1, service_id: "hr".into(), service_name: "HR".into(), doc_path: "a.pdf".into(), file_name: "a.pdf".into(), page: Some(4), ord: 0, score: 0.9, rerank_score: None, keyword: false, knowledge: false, text: "ลา 10 วัน".into() }];
         let hist = vec![("q0".to_string(), "a0".to_string())];
         let m = build_prompt(&svc, &src, &hist, "ลาได้กี่วัน", false);
         assert_eq!(m.len(), 4);
         assert!(m[0].content.contains("ตอบสั้น"));
         assert_eq!(m[1].content, "q0");
         assert!(m[3].content.contains("[1] a.pdf · หน้า 4"));
+
+        let mut note = src[0].clone();
+        note.file_name = "2026-11-12_OT-ไม่ขึ้น.knowledge.md".into();
+        note.knowledge = true;
+        let m = build_prompt(&svc, &[note], &[], "OT ไม่ขึ้น", false);
+        assert!(m[1].content.contains("[1] บันทึกความรู้: OT ไม่ขึ้น\n"), "{}", m[1].content);
+        assert!(m[0].content.contains("ให้ยึดเอกสาร"));
     }
 }

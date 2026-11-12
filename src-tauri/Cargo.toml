@@ -1,6 +1,6 @@
 [package]
 name = "docask"
-version = "0.10.0"
+version = "0.11.0"
 description = "DocAsk — ถามตอบจากเอกสารในเครื่อง (RAG) ผ่าน Gosoft Agent Gateway"
 edition = "2021"
 rust-version = "1.77"
@@ -55,6 +55,8 @@ regex = "1"
 once_cell = "1"
 log = "0.4"
 parking_lot = "0.12"
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
 
 [dev-dependencies]
 tempfile = "3"

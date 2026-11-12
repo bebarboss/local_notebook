@@ -263,7 +263,7 @@ mod tests {
     fn svc(folders: Vec<String>) -> Service {
         Service {
             id: "s1".into(), name: "HR นโยบาย".into(), code: "HR".into(), color: "#2F6FEB".into(), folders, files: vec![], excluded: vec![],
-            model: "godev1".into(), effort: "medium".into(), top_k: 5, system_prompt: String::new(), created_at: 0, updated_at: 0,
+            model: "godev1".into(), effort: "medium".into(), top_k: 5, system_prompt: String::new(), knowledge_dir: String::new(), created_at: 0, updated_at: 0,
         }
     }
 

@@ -204,6 +204,14 @@ pub fn is_spreadsheet(file_name: &str) -> bool {
         .is_some_and(|e| sheet::EXTENSIONS.contains(&e.to_string_lossy().to_lowercase().as_str()))
 }
 
+/// Knowledge notes saved from chats ("บันทึกเป็นความรู้") end in `.knowledge.md`, wherever
+/// they are (own folder, a shared folder, an imported .zip).
+pub const KNOWLEDGE_EXT: &str = ".knowledge.md";
+
+pub fn is_knowledge(path: &str) -> bool {
+    path.to_lowercase().ends_with(KNOWLEDGE_EXT)
+}
+
 pub fn is_supported(path: &Path) -> bool {
     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     // skip Office lock files and hidden files
@@ -316,7 +324,7 @@ pub fn chunk_pages(pages: Vec<Page>, opts: ChunkOptions) -> Extracted {
                 .find(|l| !l.trim().chars().all(|c| c.is_ascii_digit()))
                 .and_then(section_title)
                 .is_some();
-            let next_section = clean.lines().filter_map(section_title).last().map(str::to_string);
+            let next_section = chunker::last_section(&clean).map(str::to_string);
             if let (Some(s), false) = (&section, starts_with_section) {
                 clean = format!("{s} ›\n{clean}");
             }
@@ -458,6 +466,8 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
     // a different embedding model (or chunk settings) invalidates every vector
     let signature = format!(
         // chunk2: heading-aware chunks with section titles (v0.6)
+        // (v0.11 also cuts at Markdown "#" headings; not bumped: re-reading every PDF for
+        // that is not worth it — .md files pick it up when they change)
         "{}|{}|{}|ocr{}|img{}|chunk2",
         src_id,
         opts.size,

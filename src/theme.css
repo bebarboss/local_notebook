@@ -376,6 +376,8 @@ code { font-family: var(--mono); font-size: 12.5px; background: var(--code); col
 .switch input:checked + span { background: var(--accent); }
 .switch input:checked + span::after { transform: translateX(16px); }
 .switch input:focus-visible + span { outline: 3px solid var(--ring); }
+.switch input:disabled { cursor: not-allowed; }
+.switch input:disabled + span { opacity: .5; }
 
 .kv { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
 .kv > div { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 11px 14px; font-size: 13px; flex-wrap: wrap; }
@@ -477,3 +479,9 @@ code { font-family: var(--mono); font-size: 12.5px; background: var(--code); col
 }
 .only-narrow { display: none !important; }
 .side-foot .status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+
+/* knowledge notes */
+.note-card { display: flex; flex-direction: column; gap: 10px; padding: 14px; border: 1px solid var(--border); border-radius: 12px; }
+.note-card[data-off] { opacity: .55; }
+.cite.note { background: var(--ok-bg); color: var(--ok-text); display: inline-flex; align-items: center; gap: 3px; }
+.ctx-menu { position: fixed; }
