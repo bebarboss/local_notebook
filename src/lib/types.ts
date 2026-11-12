@@ -226,6 +226,10 @@ export interface EmbedServerInfo {
   url: string;
   hasToken: boolean;
   tokenLast4: string | null;
+  /** the URL (and maybe the token) came with the program */
+  builtin: boolean;
+  /** the token is built in and fixed — only the URL can change */
+  tokenLocked: boolean;
 }
 
 export interface EmbedServerTest extends EmbeddingTest {

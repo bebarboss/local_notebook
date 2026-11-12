@@ -74,6 +74,16 @@ pub struct Settings {
     pub start_hidden: bool,
 }
 
+/// The server that came with this build, else bge-m3 on this PC.
+fn default_embedding() -> String {
+    // the built-in server once this PC has its token, else bge-m3 here
+    if crate::embed_server::configured() {
+        format!("{}bge-m3", crate::embed_server::PREFIX)
+    } else {
+        crate::embed::ModelId::BgeM3.as_str().to_string()
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -87,7 +97,7 @@ impl Default for Settings {
             chunk_size: 1000,
             chunk_overlap: 150,
             // "bge-m3" on this PC, or "server:<model>" / "gateway:<model>" (Settings › Embedding)
-            embedding_model: crate::embed::ModelId::BgeM3.as_str().into(),
+            embedding_model: default_embedding(),
             last_service_id: None,
             update_url: crate::updater::DEFAULT_UPDATE_URL.to_string(),
             auto_check_update: true,
@@ -123,12 +133,14 @@ impl Settings {
         self.chunk_size = self.chunk_size.clamp(300, 4000);
         self.chunk_overlap = self.chunk_overlap.min(self.chunk_size / 2);
         // v0.8.0 had no local models and could save an empty choice
-        // bge-m3 is the only local model since v0.12.0 (e5 indexes are redone once it is there)
+        // bge-m3 is the only local model since v0.12.0 (e5 indexes are redone once it is there);
+        // a build with a server uses it until bge-m3 has been downloaded on purpose
         let m = self.embedding_model.trim();
         let remote = (m.starts_with(crate::gateway_embed::PREFIX) && m != crate::gateway_embed::PREFIX)
             || (m.starts_with(crate::embed_server::PREFIX) && m != crate::embed_server::PREFIX);
-        if !remote {
-            self.embedding_model = Self::default().embedding_model;
+        let local_ready = m == "bge-m3" && crate::embed::Embedder::status(crate::embed::ModelId::BgeM3).ready;
+        if !remote && !local_ready {
+            self.embedding_model = default_embedding();
         }
         if !matches!(self.font.as_str(), "looped" | "sarabun" | "plex" | "system") {
             self.font = "looped".into();

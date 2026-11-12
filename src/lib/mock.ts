@@ -115,7 +115,7 @@ export function createMockBackend(): Backend {
   let models: ModelConfig[] = defaultModels(gateway.url).map((m) => (m.id === "gothink3" ? { ...m, hidden: true } : m));
   let status: GatewayStatus = { state: "ok", message: null, checkedAt: now() };
   let localBgeM3 = false;
-  let embedServer = { url: "", hasToken: false, tokenLast4: null as string | null };
+  let embedServer = { url: "", hasToken: false, tokenLast4: null as string | null, builtin: false, tokenLocked: false };
   let embedding: EmbeddingStatus = { model: "bge-m3", ready: true, path: "%APPDATA%\\DocAsk\\models\\bge-m3", sizeBytes: 568e6 };
   const streams = new Map<string, { stopped: boolean }>();
   let updateAvailable = false;
@@ -413,7 +413,7 @@ export function createMockBackend(): Backend {
         throw { code: "invalid_url", message: "http:// ใช้ได้เฉพาะ localhost หรือที่อยู่ Tailscale (100.x.x.x, *.ts.net) — ที่อื่นต้องเป็น https://" };
       }
       if (token && token.trim().length < 16) throw { code: "key_format", message: "Token ต้องยาวอย่างน้อย 16 ตัวและไม่มีช่องว่าง" };
-      embedServer = { url: u, hasToken: embedServer.hasToken || !!token, tokenLast4: token ? token.trim().slice(-4) : embedServer.tokenLast4 };
+      embedServer = { ...embedServer, url: u, hasToken: embedServer.hasToken || !!token, tokenLast4: token ? token.trim().slice(-4) : embedServer.tokenLast4 };
       return clone(embedServer);
     },
     testEmbedServer: async () => {
@@ -430,7 +430,7 @@ export function createMockBackend(): Backend {
     },
     forgetEmbedServer: async () => {
       if (settings.embeddingModel.startsWith("server:")) throw { code: "in_use", message: "กำลังใช้เซิร์ฟเวอร์นี้ทำ embedding — เปลี่ยนไปใช้โมเดลในเครื่องก่อน" };
-      embedServer = { url: "", hasToken: false, tokenLast4: null };
+      embedServer = { url: "", hasToken: false, tokenLast4: null, builtin: false, tokenLocked: false };
       return clone(embedServer);
     },
     reindexAll: async () => {},

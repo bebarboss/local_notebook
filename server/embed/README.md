@@ -73,6 +73,13 @@ port 8080 ผูกไว้ที่ `127.0.0.1` เท่านั้น เ�
 
 token ถูกเก็บใน Windows Credential Manager ไม่ได้เก็บในไฟล์
 
+**ฝัง URL + token มากับโปรแกรม (v0.12.1 ขึ้นไป)** — GitHub repo › Settings › Secrets and variables › Actions ›
+เพิ่ม secret `DOCASK_EMBED_URL` (เช่น `https://xxxx.ngrok-free.app` — ควรเป็น `NGROK_DOMAIN` แบบ static) และ
+`DOCASK_EMBED_TOKEN` (= `EMBED_TOKEN`) แล้วออกเวอร์ชันใหม่ · เครื่องที่ยังไม่ได้ดาวน์โหลด bge-m3 จะใช้เซิร์ฟเวอร์นี้เอง ·
+token ที่ฝังมาเปลี่ยนในแอปไม่ได้ เปลี่ยนได้แค่ URL · ไม่อยู่ในโค้ดของ repo แต่**ไฟล์ติดตั้งเป็น public ใครก็แกะ token ออกได้**
+→ ตั้ง `NGROK_ALLOW_IPS` ไว้ด้วย คนนอก IP ที่อนุญาตจะเข้าไม่ถึงเลยแม้มี token · เปลี่ยน token: แก้ `.env` +
+`docker compose up -d` + แก้ secret แล้วออกเวอร์ชันใหม่
+
 **5. (แนะนำ) โมเดลสำรองในเครื่อง** — ใต้ผลทดสอบกด **ดาวน์โหลด bge-m3 ไว้สำรอง** (~570 MB) ถ้า Mac ปิดหรือเน็ตหลุด
 DocAsk จะคำนวณคำถามในเครื่องแทนและยังค้นเอกสารได้ (index อยู่บน Windows อยู่แล้ว) · ไฟล์ใหม่จะรอ index จนเซิร์ฟเวอร์กลับมา
 

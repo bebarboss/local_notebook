@@ -690,16 +690,29 @@ function EmbedServerRow({ onChanged }: { onChanged: (s: EmbeddingStatus) => void
         <span className="t">หรือใช้เซิร์ฟเวอร์ embedding ของตัวเอง</span>
         <span className="d">
           เช่น Docker บน Mac mini ที่บ้าน (โฟลเดอร์ server/embed ใน repo) · ข้อความทุกท่อนของเอกสารถูกส่งไปเครื่องนั้นตอนทำ index (และคำถามตอนค้นหา) ·
-          ต่อผ่าน Tailscale · token เก็บใน Windows Credential Manager · ถ้าเครื่องนั้นปิด จะค้นเอกสารไม่ได้
+          ต่อผ่าน ngrok หรือ Tailscale · token เก็บใน Windows Credential Manager · ถ้าเครื่องนั้นปิด จะใช้โมเดลในเครื่องสำรอง (ถ้ามี)
         </span>
+        {info?.builtin && (
+          <span className="d">
+            <span className="ok-text">ตั้งค่ามากับโปรแกรมแล้ว</span>
+            {info.tokenLocked ? " · กดทดสอบได้เลย · ถ้า URL ของเซิร์ฟเวอร์เปลี่ยน ใส่ URL ใหม่แล้วกด บันทึกและทดสอบ"
+              : info.hasToken ? " · กดทดสอบได้เลย" : " · ใส่ token ครั้งเดียว (ขอจากเจ้าของเซิร์ฟเวอร์) แล้วกด บันทึกและทดสอบ"}
+          </span>
+        )}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <label className="sr-only" htmlFor="es-url">URL ของเซิร์ฟเวอร์ embedding</label>
           <input id="es-url" className="input mono" placeholder="https://mac-mini.xxxx.ts.net" value={url} onChange={(e) => setUrl(e.target.value)} style={{ width: 300 }} spellCheck={false} autoComplete="off" />
-          <label className="sr-only" htmlFor="es-token">Token</label>
-          <input id="es-token" className="input mono" type="password" autoComplete="off" spellCheck={false} style={{ width: 230 }}
-            placeholder={info?.hasToken ? `มีแล้ว ····${info.tokenLast4 ?? ""}` : "token จาก .env ของเซิร์ฟเวอร์"}
-            title={info?.hasToken ? "ใส่ token ใหม่เพื่อเปลี่ยน · เว้นว่างไว้ = ใช้ token เดิม" : undefined}
-            value={token} onChange={(e) => setToken(e.target.value)} />
+          {info?.tokenLocked ? (
+            <span className="d" title="token ฝังมากับโปรแกรม เปลี่ยนได้แค่ URL">token มากับโปรแกรม ····{info.tokenLast4}</span>
+          ) : (
+            <>
+              <label className="sr-only" htmlFor="es-token">Token</label>
+              <input id="es-token" className="input mono" type="password" autoComplete="off" spellCheck={false} style={{ width: 230 }}
+                placeholder={info?.hasToken ? `มีแล้ว ····${info.tokenLast4 ?? ""}` : "token จาก .env ของเซิร์ฟเวอร์"}
+                title={info?.hasToken ? "ใส่ token ใหม่เพื่อเปลี่ยน · เว้นว่างไว้ = ใช้ token เดิม" : undefined}
+                value={token} onChange={(e) => setToken(e.target.value)} />
+            </>
+          )}
           <button className="btn" disabled={busy || !url.trim() || (!info?.hasToken && !token.trim())} onClick={saveAndTest}>
             {busy ? "กำลังทดสอบ…" : dirty ? "บันทึกและทดสอบ" : "ทดสอบ"}
           </button>
@@ -719,8 +732,8 @@ function EmbedServerRow({ onChanged }: { onChanged: (s: EmbeddingStatus) => void
         {current && <span className="d">กำลังใช้ <span className="mono">{current}</span> บนเซิร์ฟเวอร์ · จะกลับไปใช้โมเดลในเครื่อง กดดาวน์โหลดหรือเลือกโฟลเดอร์ด้านบน</span>}
         {!current && info?.url && (
           <button className="btn btn-ghost" style={{ alignSelf: "flex-start" }} onClick={async () => {
-            try { const i = await api.forgetEmbedServer(); setInfo(i); setUrl(""); setTest(null); app.toast("ลบ URL และ token ของเซิร์ฟเวอร์แล้ว"); } catch (e) { app.toast((e as { message: string }).message); }
-          }}>ลบ URL และ token</button>
+            try { const i = await api.forgetEmbedServer(); setInfo(i); setUrl(i.url); setTest(null); app.toast(i.builtin ? "กลับไปใช้ค่าที่มากับโปรแกรมแล้ว" : "ลบ URL และ token ของเซิร์ฟเวอร์แล้ว"); } catch (e) { app.toast((e as { message: string }).message); }
+          }}>{info.builtin ? "กลับไปใช้ URL ที่มากับโปรแกรม" : "ลบ URL และ token"}</button>
         )}
       </div>
       {confirm && r && (

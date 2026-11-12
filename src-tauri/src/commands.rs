@@ -1112,6 +1112,9 @@ pub fn embed_server_info() -> crate::embed_server::ServerInfo {
 pub fn set_embed_server(url: String, token: Option<String>) -> AppResult<crate::embed_server::ServerInfo> {
     let base = crate::embed_server::validate_url(&url)?;
     if let Some(t) = token.filter(|t| !t.trim().is_empty()) {
+        if crate::embed_server::token_locked() {
+            return Err(AppError::new("invalid", "token ฝังมากับโปรแกรม เปลี่ยนได้แค่ URL"));
+        }
         secrets::set_server_token(&t)?;
     }
     crate::embed_server::ServerConfig { url: base }.save()?;

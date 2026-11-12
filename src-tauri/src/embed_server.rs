@@ -1,5 +1,5 @@
 //! Embeddings from the user's own server (`server/embed` in this repo: Docker on a home
-//! machine, reached over Tailscale). OpenAI-style `/v1/embeddings` plus `/health`.
+//! machine, reached over ngrok or Tailscale). OpenAI-style `/v1/embeddings` plus `/health`.
 //!
 //! Opt-in (Settings › Embedding): every chunk's text goes to that server when indexing, and
 //! each question when searching. The Bearer token lives in the Windows credential store and
@@ -54,17 +54,65 @@ impl ServerConfig {
     }
 }
 
+// The release build gets the server URL and token from GitHub secrets (release.yml) so a new
+// install works without typing them. Never in the repo. The installer is public, so anyone
+// can pull the token out of it — the owner chose this knowingly (worst case: strangers use
+// the home server's CPU; it stores nothing). Values saved in Settings win.
+const BUILTIN_URL: Option<&str> = option_env!("DOCASK_EMBED_URL");
+const BUILTIN_TOKEN: Option<&str> = option_env!("DOCASK_EMBED_TOKEN");
+
+fn builtin_url() -> Option<String> {
+    BUILTIN_URL.map(str::trim).filter(|u| !u.is_empty()).and_then(|u| validate_url(u).ok())
+}
+
+fn builtin_token() -> Option<String> {
+    BUILTIN_TOKEN.map(str::trim).filter(|t| crate::secrets::validate_server_token(t).is_ok()).map(str::to_string)
+}
+
+/// This build came with a server URL.
+pub fn builtin() -> bool {
+    builtin_url().is_some()
+}
+
+/// The saved URL, else the one built in.
+fn url() -> String {
+    let saved = ServerConfig::load().url;
+    if saved.trim().is_empty() {
+        builtin_url().unwrap_or_default()
+    } else {
+        saved
+    }
+}
+
+/// The built-in token is fixed (only the URL can change in Settings); a build without one
+/// uses the token typed in Settings (credential store).
+fn token() -> AppResult<Option<String>> {
+    match builtin_token() {
+        Some(t) => Ok(Some(t)),
+        None => crate::secrets::get_server_token(),
+    }
+}
+
+/// The token came with the program and cannot be changed in Settings.
+pub fn token_locked() -> bool {
+    builtin_token().is_some()
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
     pub url: String,
     pub has_token: bool,
     pub token_last4: Option<String>,
+    /// the URL came with the program (and maybe the token; Settings can override both)
+    pub builtin: bool,
+    /// the token is built in: Settings shows no token field
+    pub token_locked: bool,
 }
 
 pub fn info() -> ServerInfo {
-    let (has_token, token_last4) = crate::secrets::server_token_status();
-    ServerInfo { url: ServerConfig::load().url, has_token, token_last4 }
+    let tok = token().ok().flatten();
+    ServerInfo { url: url(), has_token: tok.is_some(), token_last4: tok.as_deref().map(crate::redact::last4), builtin: builtin(), token_locked: token_locked() }
 }
 
 /// What `/health` says (no token needed).
@@ -121,24 +169,24 @@ fn private_host(host: &str) -> bool {
 fn unreachable(base: &str) -> AppError {
     AppError::new(
         "server_unreachable",
-        format!("ติดต่อเซิร์ฟเวอร์ embedding ไม่ได้ ({base}) — เครื่องที่บ้านเปิดอยู่ไหม, Docker ทำงานอยู่ไหม, Tailscale ต่ออยู่ทั้งสองเครื่องไหม"),
+        format!("ติดต่อเซิร์ฟเวอร์ embedding ไม่ได้ ({base}) — เครื่องที่บ้านเปิดอยู่ไหม, Docker ทำงานอยู่ไหม, ngrok (หรือ Tailscale) ยังเปิดอยู่ไหม"),
     )
 }
 
 /// The base URL and token, or a message saying what is missing.
 fn target() -> AppResult<(String, String)> {
-    let url = ServerConfig::load().url;
+    let url = url();
     if url.trim().is_empty() {
         return Err(AppError::new("no_server", "ยังไม่ได้ตั้งเซิร์ฟเวอร์ embedding — ไปที่ ตั้งค่า › Embedding และ Index"));
     }
-    let token = crate::secrets::get_server_token()?
+    let token = token()?
         .ok_or_else(|| AppError::new("no_key", "ยังไม่ได้ใส่ token ของเซิร์ฟเวอร์ embedding — ไปที่ ตั้งค่า › Embedding และ Index"))?;
     Ok((url, token))
 }
 
 /// Configured well enough to try (URL + token saved) — not a network check.
 pub fn configured() -> bool {
-    !ServerConfig::load().url.trim().is_empty() && matches!(crate::secrets::get_server_token(), Ok(Some(_)))
+    !url().trim().is_empty() && matches!(token(), Ok(Some(_)))
 }
 
 pub async fn health(base: &str) -> AppResult<Health> {
@@ -278,6 +326,6 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let e = rt.block_on(embed_at(&base, "home-token-0123456789", "bge-m3", &["x".into()], "query", 0, Duration::from_secs(30))).unwrap_err();
         assert_eq!(e.code, "server_unreachable", "{}", e.message);
-        assert!(e.message.contains("Tailscale"));
+        assert!(e.message.contains("ngrok"));
     }
 }
