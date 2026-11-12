@@ -15,6 +15,8 @@ import type {
   DownloadProgress,
   EmbeddingModelId,
   EmbeddingTest,
+  ExportResult,
+  ShareProgress,
   EmbeddingStatus,
   GatewayInfo,
   GatewayStatus,
@@ -46,6 +48,7 @@ export interface EventMap {
   "gateway-status": GatewayStatus;
   "services-changed": null;
   "update-progress": UpdateProgress;
+  "share-progress": ShareProgress;
 }
 
 export type EventName = keyof EventMap;
@@ -96,7 +99,11 @@ export interface Backend {
   imageData(serviceId: string, id: number): Promise<string>;
   reindexService(serviceId: string, full: boolean): Promise<void>;
   cancelIndex(serviceId: string): Promise<void>;
-  exportService(serviceId: string, destDir: string): Promise<string>;
+  /** one .zip with the index and the documents */
+  exportServiceZip(serviceId: string, destDir: string): Promise<ExportResult>;
+  importServiceZip(zipPath: string, destDir: string, reembed: boolean): Promise<Service>;
+  /** the files of `from` now live in `to` — follow them without re-indexing */
+  moveServiceFolder(serviceId: string, from: string, to: string): Promise<Service>;
   // chats
   listChats(serviceId: string | null, query: string): Promise<Chat[]>;
   getChat(chatId: string): Promise<Chat>;
@@ -126,6 +133,7 @@ export interface Backend {
   // dialogs
   pickFolder(): Promise<string | null>;
   pickFiles(): Promise<string[]>;
+  pickZip(): Promise<string | null>;
   pickJson(): Promise<string | null>;
   // events
   on<E extends EventName>(event: E, cb: (payload: EventMap[E]) => void): Promise<Unlisten>;
@@ -188,7 +196,9 @@ function createTauriBackend(): Backend {
     imageData: (serviceId, id) => call("image_data", { serviceId, id }),
     reindexService: (serviceId, full) => call("reindex_service", { serviceId, full }),
     cancelIndex: (serviceId) => call("cancel_index", { serviceId }),
-    exportService: (serviceId, destDir) => call("export_service", { serviceId, destDir }),
+    exportServiceZip: (serviceId, destDir) => call("export_service_zip", { serviceId, destDir }),
+    importServiceZip: (zipPath, destDir, reembed) => call("import_service_zip", { zipPath, destDir, reembed }),
+    moveServiceFolder: (serviceId, from, to) => call("move_service_folder", { serviceId, from, to }),
     listChats: (serviceId, query) => call("list_chats", { serviceId, query }),
     getChat: (chatId) => call("get_chat", { chatId }),
     getMessages: (chatId) => call("get_messages", { chatId }),
@@ -225,6 +235,11 @@ function createTauriBackend(): Backend {
       });
       if (!r) return [];
       return Array.isArray(r) ? r : [r];
+    },
+    pickZip: async () => {
+      const { open } = await dialog;
+      const r = await open({ multiple: false, filters: [{ name: "Service ที่ส่งออกจาก DocAsk", extensions: ["zip"] }] });
+      return typeof r === "string" ? r : null;
     },
     pickJson: async () => {
       const { open } = await dialog;

@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { Download, FolderPlus, RefreshCw, Trash2 } from "lucide-react";
+import { Download, FolderInput, FolderPlus, RefreshCw, Trash2 } from "lucide-react";
 import { api, type NewService } from "../lib/api";
 import type { Effort, Service } from "../lib/types";
 import { th } from "../i18n/th";
-import { useApp, visibleModels } from "../state";
+import { formatBytes, useApp, visibleModels } from "../state";
 import { ConfirmDialog, Modal, Switch } from "./ui";
 
 // All have white-text contrast >= 4.5:1
@@ -18,6 +18,7 @@ export function ServiceEditor({ service, onClose }: { service: Service | null; o
       : { name: "", code: "", color: SERVICE_COLORS[app.services.length % SERVICE_COLORS.length], folders: [], model: models[0]?.id ?? "godev1", effort: "medium", topK: app.settings.topK, systemPrompt: "" },
   );
   const [error, setError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteChats, setDeleteChats] = useState(false);
@@ -72,6 +73,21 @@ export function ServiceEditor({ service, onClose }: { service: Service | null; o
           {form.folders.map((f) => (
             <div key={f} style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <span className="input mono" style={{ fontSize: 12, display: "flex", alignItems: "center", wordBreak: "break-all" }}>{f}</span>
+              {service?.folders.includes(f) && (
+                <button type="button" className="icon-btn" aria-label={`ย้ายโฟลเดอร์ ${f}`} title="ย้ายเอกสารไปที่อื่นแล้ว — ชี้ไปที่ใหม่โดยไม่ต้อง index ใหม่"
+                  onClick={async () => {
+                    const to = await api.pickFolder();
+                    if (!to || to === f) return;
+                    try {
+                      await api.moveServiceFolder(service.id, f, to);
+                      set("folders", form.folders.map((x) => (x === f ? to : x)));
+                      app.refreshServices();
+                      app.toast(`ชี้โฟลเดอร์ไปที่ ${to} แล้ว — ไฟล์ที่เนื้อหาเหมือนเดิมไม่ต้อง index ใหม่`);
+                    } catch (e) { setError((e as { message: string }).message); }
+                  }}>
+                  <FolderInput size={16} strokeWidth={1.8} />
+                </button>
+              )}
               <button type="button" className="icon-btn" aria-label={`ลบโฟลเดอร์ ${f}`} onClick={() => set("folders", form.folders.filter((x) => x !== f))}>
                 <Trash2 size={16} strokeWidth={1.8} />
               </button>
@@ -128,13 +144,22 @@ export function ServiceEditor({ service, onClose }: { service: Service | null; o
               <button
                 type="button"
                 className="btn btn-lg"
+                disabled={exporting != null}
+                title="ไฟล์ .zip เดียว มี index และเอกสารทั้งหมด — ผู้รับนำเข้าแล้วถามได้ทันที"
                 onClick={async () => {
                   const dest = await api.pickFolder();
                   if (!dest) return;
-                  try { app.toast(`ส่งออกแล้ว: ${await api.exportService(service.id, dest)}`); } catch (e) { setError((e as { message: string }).message); }
+                  setExporting(0);
+                  const off = api.on("share-progress", (p) => p.phase === "export" && setExporting(p.total ? p.done / p.total : 0));
+                  try {
+                    const r = await api.exportServiceZip(service.id, dest);
+                    app.toast(`ส่งออกแล้ว ${r.documents} ไฟล์ (${formatBytes(r.bytes)}): ${r.path}${r.missing ? ` · ข้าม ${r.missing} ไฟล์ที่ไม่มีแล้ว` : ""}`);
+                  } catch (e) { setError((e as { message: string }).message); }
+                  finally { setExporting(null); off.then((f) => f()); }
                 }}
               >
-                <Download size={16} strokeWidth={1.8} aria-hidden="true" /> ส่งออก index
+                <Download size={16} strokeWidth={1.8} aria-hidden="true" />
+                {exporting != null ? `กำลังส่งออก ${Math.round(exporting * 100)}%` : "ส่งออก (.zip พร้อมเอกสาร)"}
               </button>
               <button
                 type="button"

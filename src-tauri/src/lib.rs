@@ -17,6 +17,7 @@ pub mod rerank;
 pub mod search;
 pub mod secrets;
 pub mod services;
+pub mod share;
 pub mod store;
 pub mod updater;
 
@@ -86,7 +87,9 @@ pub fn run() {
             commands::reindex_service,
             commands::reindex_all,
             commands::cancel_index,
-            commands::export_service,
+            commands::export_service_zip,
+            commands::import_service_zip,
+            commands::move_service_folder,
             commands::list_chats,
             commands::get_chat,
             commands::get_messages,

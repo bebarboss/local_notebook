@@ -271,7 +271,24 @@ export function createMockBackend(): Backend {
     imageData: async (_sid, id) => mockPicture(id),
     reindexService: async (sid) => { emit("index-progress", { serviceId: sid, jobId: "mock", docPath: null, fileName: null, done: 0, total: 0, docProgress: 1, phase: "done", message: null }); },
     cancelIndex: async () => {},
-    exportService: async (_sid, dest) => `${dest}\\docask-export.zip`,
+    exportServiceZip: async (sid, dest) => {
+      const s = services.find((x) => x.id === sid)!;
+      for (let d = 1; d <= 6; d++) { await wait(150); emit("share-progress", { phase: "export", done: d, total: 6 }); }
+      return { path: `${dest}\\DocAsk-${s.code}-${s.name}.zip`, documents: 6, bytes: 12_400_000, missing: 0 };
+    },
+    importServiceZip: async (zip, dest, reembed) => {
+      if (!reembed && zip.includes("bge")) throw { code: "embedding_mismatch", message: "ไฟล์นี้ทำ index ด้วยโมเดล bge-m3 แต่เครื่องนี้ใช้ multilingual-e5-small — เปลี่ยนโมเดลให้ตรงกันก่อน หรือนำเข้าแล้วทำ index ใหม่ในเครื่องนี้" };
+      for (let d = 1; d <= 4; d++) { await wait(150); emit("share-progress", { phase: "import", done: d, total: 4 }); }
+      const s: Service = { ...services[0], id: `imp${services.length}`, name: "นโยบาย (นำเข้า)", code: "IMP", folders: [`${dest}\\นโยบาย\\docs`], files: [], excluded: [] };
+      services.push(s);
+      emit("services-changed", null);
+      return clone(s);
+    },
+    moveServiceFolder: async (sid, from, to) => {
+      const i = services.findIndex((s) => s.id === sid);
+      services[i] = { ...services[i], folders: services[i].folders.map((f) => (f === from ? to : f)) };
+      return clone(services.find((s) => s.id === sid)!);
+    },
     listChats: async (sid, query) => {
       const q = query.trim().toLowerCase();
       return clone(
@@ -400,6 +417,7 @@ export function createMockBackend(): Backend {
     },
     pickFolder: async () => "D:\\Docs\\ตัวอย่าง",
     pickFiles: async () => ["D:\\Docs\\เอกสารใหม่.pdf"],
+    pickZip: async () => "C:\\Users\\me\\Downloads\\DocAsk-HR-นโยบาย.zip",
     pickJson: async () => "C:\\Users\\me\\AppData\\Roaming\\Code\\User\\chatLanguageModels.json",
     on: async (event, cb) => {
       let set = listeners.get(event);

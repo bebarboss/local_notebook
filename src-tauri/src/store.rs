@@ -163,6 +163,32 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Point documents at new paths (export / import / a moved folder). `f` returns the new
+    /// path, or None to keep the old one. Returns how many changed.
+    pub fn rewrite_paths(&mut self, f: impl Fn(&str) -> Option<String>) -> AppResult<usize> {
+        let rows: Vec<(i64, String)> = {
+            let mut st = self.conn.prepare("SELECT id, path FROM documents")?;
+            let r = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+            r
+        };
+        let tx = self.conn.transaction()?;
+        let mut n = 0;
+        for (id, p) in rows {
+            if let Some(np) = f(&p).filter(|np| *np != p) {
+                tx.execute("UPDATE documents SET path=?2 WHERE id=?1", params![id, np])?;
+                n += 1;
+            }
+        }
+        tx.commit()?;
+        self.cache = None;
+        Ok(n)
+    }
+
+    pub fn vacuum(&self) -> AppResult<()> {
+        self.conn.execute_batch("VACUUM")?;
+        Ok(())
+    }
+
     pub fn get_chunk(&self, chunk_id: i64) -> AppResult<Option<Hit>> {
         Ok(self
             .conn

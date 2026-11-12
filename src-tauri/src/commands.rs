@@ -455,15 +455,100 @@ pub fn cancel_index(state: S<'_>, service_id: String) {
     state.indexer.cancel(&service_id);
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareProgress {
+    phase: &'static str,
+    done: usize,
+    total: usize,
+}
+
+/// One .zip with the index and the documents (see share.rs).
 #[tauri::command]
-pub fn export_service(state: S<'_>, service_id: String, dest_dir: String) -> AppResult<String> {
+pub async fn export_service_zip(app: AppHandle, service_id: String, dest_dir: String) -> AppResult<crate::share::ExportResult> {
+    let state = app.state::<AppState>();
     let svc = state.services.lock().get(&service_id)?;
-    let dir = PathBuf::from(dest_dir);
-    let base = format!("DocAsk-{}-{}", svc.code, svc.id);
-    let db = dir.join(format!("{base}.db"));
-    state.stores.get(&service_id)?.lock().export_to(&db)?;
-    config::write_json(&dir.join(format!("{base}.json")), &svc)?;
-    Ok(db.to_string_lossy().into_owned())
+    let store = state.stores.get(&service_id)?;
+    let embedding = state.embedding_source()?.id();
+    let a = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::share::export_zip(&svc, &store, &embedding, Path::new(&dest_dir), |done, total| {
+            let _ = a.emit("share-progress", ShareProgress { phase: "export", done, total });
+        })
+    })
+    .await
+    .map_err(|e| AppError::new("export", e.to_string()))?
+}
+
+/// Unpack a service .zip into `dest_dir` and add it as a service. The vectors are kept
+/// when the embedding model matches; with `reembed` the documents are indexed again here.
+#[tauri::command]
+pub async fn import_service_zip(app: AppHandle, zip_path: String, dest_dir: String, reembed: bool) -> AppResult<Service> {
+    let zip = PathBuf::from(&zip_path);
+    let manifest = crate::share::read_manifest(&zip)?;
+    let state = app.state::<AppState>();
+    let ours = state.embedding_source()?.id();
+    if manifest.embedding != ours && !reembed {
+        return Err(AppError::new(
+            "embedding_mismatch",
+            format!("ไฟล์นี้ทำ index ด้วยโมเดล {} แต่เครื่องนี้ใช้ {} — เปลี่ยนโมเดลให้ตรงกันก่อน หรือนำเข้าแล้วทำ index ใหม่ในเครื่องนี้", manifest.embedding, ours),
+        ));
+    }
+    let target = crate::share::free_folder(Path::new(&dest_dir), &manifest.name);
+    let svc = state.services.lock().create(NewService {
+        name: manifest.name.clone(),
+        code: manifest.code.clone(),
+        color: manifest.color.clone(),
+        folders: vec![target.join("docs").to_string_lossy().into_owned()],
+        model: manifest.model.clone(),
+        effort: manifest.effort.clone(),
+        top_k: manifest.top_k,
+        system_prompt: manifest.system_prompt.clone(),
+    })?;
+    let id = svc.id.clone();
+    let keep_index = manifest.embedding == ours;
+    let a = app.clone();
+    let unpacked = tauri::async_runtime::spawn_blocking(move || {
+        let db = crate::services::index_path(&id);
+        crate::share::unpack(&zip, &target, keep_index.then_some(db.as_path()), |done, total| {
+            let _ = a.emit("share-progress", ShareProgress { phase: "import", done, total });
+        })
+    })
+    .await
+    .map_err(|e| AppError::new("import", e.to_string()))?;
+    if let Err(e) = unpacked {
+        // leave nothing half-made behind (the unpacked files stay for the user to look at)
+        state.stores.close(&svc.id);
+        let _ = state.services.lock().delete(&svc.id);
+        return Err(e);
+    }
+    crate::diag::log(format!("[{}] imported from {} ({} documents, vectors {})", svc.code, zip_path, manifest.documents, if keep_index { "kept" } else { "redone" }));
+    state.watchers.watch(&svc);
+    state.indexer.start(app.clone(), svc.id.clone(), false);
+    Ok(svc)
+}
+
+/// The files of a service folder were moved to `to`: follow them without re-indexing.
+#[tauri::command]
+pub fn move_service_folder(app: AppHandle, state: S<'_>, service_id: String, from: String, to: String) -> AppResult<Service> {
+    if !Path::new(&to).is_dir() {
+        return Err(AppError::new("not_found", "ไม่พบโฟลเดอร์ใหม่"));
+    }
+    let mut svc = state.services.lock().get(&service_id)?;
+    let Some(slot) = svc.folders.iter_mut().find(|f| f.eq_ignore_ascii_case(&from)) else {
+        return Err(AppError::new("not_found", "ไม่พบโฟลเดอร์นี้ใน service"));
+    };
+    *slot = to.clone();
+    let to_dir = PathBuf::from(&to);
+    state.indexer.cancel(&service_id);
+    let moved = state.stores.get(&service_id)?.lock().rewrite_paths(|p| {
+        crate::share::relative_to(p, &from).map(|rel| to_dir.join(rel.replace('/', "\\")).to_string_lossy().into_owned())
+    })?;
+    let svc = state.services.lock().update(svc)?;
+    crate::diag::log(format!("[{}] folder moved {from} -> {to} ({moved} documents)", svc.code));
+    state.watchers.watch(&svc);
+    state.indexer.start(app, svc.id.clone(), false);
+    Ok(svc)
 }
 
 // ------------------------------------------------------------------ chats

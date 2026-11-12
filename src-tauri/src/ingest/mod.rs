@@ -514,8 +514,9 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
         });
         // mtime changed but content identical → just record the new mtime
         if let Some(d) = &prev {
-            if d.status == "ready" && !d.hash.is_empty() && file_hash(p).ok().as_deref() == Some(d.hash.as_str()) {
-                store.lock().upsert_document(&path, &d.hash, mtime, bytes, "ready", None)?;
+            // (also how an imported service keeps the vectors that came in its .zip)
+            if matches!(d.status.as_str(), "ready" | "skipped") && !d.hash.is_empty() && file_hash(p).ok().as_deref() == Some(d.hash.as_str()) {
+                store.lock().upsert_document(&path, &d.hash, mtime, bytes, &d.status, d.message.as_deref())?;
                 continue;
             }
         }

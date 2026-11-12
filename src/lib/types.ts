@@ -175,6 +175,20 @@ export interface Settings {
 }
 
 
+export interface ExportResult {
+  path: string;
+  documents: number;
+  bytes: number;
+  /** documents in the index whose file no longer exists (left out of the zip) */
+  missing: number;
+}
+
+export interface ShareProgress {
+  phase: "export" | "import";
+  done: number;
+  total: number;
+}
+
 export interface EmbeddingTest {
   dims: number;
   ms: number;
