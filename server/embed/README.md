@@ -1,6 +1,6 @@
 # DocAsk embedding server
 
-เซิร์ฟเวอร์ทำ embedding ให้ DocAsk รันใน Docker บนเครื่องที่บ้าน (เขียนไว้สำหรับ Mac mini Apple Silicon และใช้กับเครื่อง Linux หรือ Windows ได้ด้วย) แล้วต่อจากที่ทำงานผ่าน Tailscale
+เซิร์ฟเวอร์ทำ embedding ให้ DocAsk รันใน Docker บนเครื่องที่บ้าน (เขียนไว้สำหรับ Mac mini Apple Silicon และใช้กับเครื่อง Linux หรือ Windows ได้ด้วย) แล้วต่อจากที่ทำงานผ่าน ngrok (HTTPS)
 
 - ใช้โมเดล `BAAI/bge-m3` (1024 มิติ, รองรับภาษาไทย) แบบ fp32 เต็มความแม่น ไม่ใช่ int8 แบบที่แอปใช้ในเครื่อง
 - API เป็นแบบเดียวกับ OpenAI `POST /v1/embeddings` และต้องส่ง `Authorization: Bearer <token>`
@@ -10,22 +10,31 @@
 
 - **Docker Desktop:** ตั้งค่า › General › เปิด *Start Docker Desktop when you sign in* และตั้งค่า › Resources › Memory **อย่างน้อย 6 GB**
   - ใช้ OrbStack แทนได้ กิน RAM น้อยกว่า
-- **Tailscale:** ลงทั้งบน Mac mini และเครื่อง Windows ที่ใช้ DocAsk แล้ว login บัญชีเดียวกัน
-  - ที่ <https://login.tailscale.com/admin/dns> ให้เปิด **MagicDNS** และ **HTTPS Certificates**
+- **บัญชี ngrok** (สมัครฟรีที่ <https://dashboard.ngrok.com>) ไม่ต้องลงโปรแกรมใดๆ บนเครื่อง Windows
+  - **Your Authtoken** (เมนู Getting Started)
 - **ไม่ให้เครื่องหลับ:** ตั้งค่าระบบ › พลังงาน › เปิด *ป้องกันการพักเครื่องอัตโนมัติเมื่อจอดับ*
 
 > Docker บน Mac ใช้ GPU (Metal) ไม่ได้ จึงรันบน CPU ซึ่งชิป M-series ทำ bge-m3 ได้ราว 32 ท่อนใน 3–8 วินาที
 
 ## ติดตั้ง
 
-**1. คัดลอกโฟลเดอร์ `server/embed` ไปไว้บน Mac แล้วสร้าง token**
+**1. คัดลอกโฟลเดอร์ `server/embed` ไปไว้บน Mac แล้วสร้าง `.env`**
 
 ```bash
 cd server/embed
 cp .env.example .env
-echo "EMBED_TOKEN=$(openssl rand -hex 32)" > .env
-cat .env          # ← คัดลอก token นี้ไว้ใส่ใน DocAsk
+sed -i '' "s/^EMBED_TOKEN=.*/EMBED_TOKEN=$(openssl rand -hex 32)/" .env
+grep EMBED_TOKEN .env   # ← คัดลอก token นี้ไว้ใส่ใน DocAsk
 ```
+
+แล้วเปิด `.env` ใส่ค่า ngrok
+
+```ini
+NGROK_AUTHTOKEN=<authtoken จาก dashboard>
+NGROK_ALLOW_IPS=203.0.113.10/32      # IP สาธารณะของที่ทำงาน (เปิด https://ifconfig.me บนเครื่อง Windows)
+```
+
+`NGROK_ALLOW_IPS` ใส่ได้หลายค่า คั่นด้วย `,` ถ้าเว้นว่างไว้ ใครที่รู้ URL ก็ยิงเข้ามาได้ (ยังต้องมี token อยู่ดี)
 
 **2. build และเปิด**
 
@@ -41,16 +50,20 @@ curl http://127.0.0.1:8080/health
 # {"status":"ok","model":"bge-m3","dim":1024,"device":"cpu"}
 ```
 
-**3. เปิดให้เครื่องที่ทำงานเข้าถึงผ่าน Tailscale (HTTPS)**
+**3. ตรวจ ngrok**
+
+container `docask-ngrok` เปิดพร้อมกันจากข้อ 2 แล้ว
+
+ดู URL ปัจจุบัน
 
 ```bash
-tailscale serve --bg 8080
-tailscale serve status    # ได้ URL เช่น https://mac-mini.tail1234.ts.net
+docker compose logs ngrok | grep -o 'url=https://[^ ]*' | tail -1
+curl https://<URL ที่ได้>/health
 ```
 
-container ผูก port ไว้ที่ `127.0.0.1` เท่านั้น เครื่องอื่นใน LAN หรืออินเทอร์เน็ตจึงเข้าตรงไม่ได้ เข้าได้ทาง `tailscale serve` ซึ่งเห็นเฉพาะเครื่องใน tailnet ของคุณ
+**URL อาจเปลี่ยนทุกครั้งที่ ngrok รีสตาร์ท** (รีบูตเครื่อง, `docker compose up -d`, เน็ตหลุดนาน) ถ้า DocAsk ขึ้นว่าติดต่อเซิร์ฟเวอร์ไม่ได้ ให้รันคำสั่งข้างบนแล้วใส่ URL ใหม่ใน DocAsk ถ้าไม่อยากเปลี่ยนบ่อย ให้ใส่ `NGROK_DOMAIN` เป็น static domain จาก dashboard (เมนู Domains)
 
-> ถ้าเรียก `tailscale` ใน Terminal ไม่ได้ (ลงจาก App Store) ให้ใช้ `/Applications/Tailscale.app/Contents/MacOS/Tailscale serve --bg 8080`
+port 8080 ผูกไว้ที่ `127.0.0.1` เท่านั้น เครื่องอื่นใน LAN เข้าตรงไม่ได้ ช่องทางเดียวจากข้างนอกคือ ngrok ซึ่งกรอง IP (ถ้าตั้ง `NGROK_ALLOW_IPS`) แล้วจึงส่งต่อให้เซิร์ฟเวอร์ตรวจ token
 
 **4. ตั้งค่าใน DocAsk (เครื่อง Windows)**
 
@@ -67,10 +80,11 @@ DocAsk จะคำนวณคำถามในเครื่องแทน�
 
 | งาน | คำสั่ง |
 |---|---|
-| ดูสถานะ | `docker compose ps` (คอลัมน์ STATUS ต้องเป็น `healthy`) |
+| ดูสถานะ | `docker compose ps` (`docask-embed` ต้องเป็น `healthy` และ `docask-ngrok` ต้องเป็น `running`) |
 | ดู log | `docker compose logs --tail 50` |
 | อัปเดตโค้ด | คัดลอกไฟล์ใหม่ทับ แล้ว `docker compose up -d --build` |
 | เปลี่ยน token | แก้ `.env` → `docker compose up -d` → ใส่ token ใหม่ใน DocAsk |
+| IP ที่ทำงานเปลี่ยน | แก้ `NGROK_ALLOW_IPS` ใน `.env` → `docker compose up -d` |
 | หยุด | `docker compose down` (โมเดลยังอยู่ใน volume) |
 
 container มี `restart: unless-stopped` จึงกลับมาทำงานเองหลังรีสตาร์ทเครื่อง ตราบใดที่ Docker Desktop ตั้งให้เปิดตอน login
@@ -79,7 +93,9 @@ container มี `restart: unless-stopped` จึงกลับมาทำง�
 
 | อาการใน DocAsk | ตรวจ |
 |---|---|
-| ติดต่อเซิร์ฟเวอร์ embedding ไม่ได้ | Mac หลับหรือปิดอยู่ไหม · `docker compose ps` · Tailscale บน Windows ต่ออยู่ไหม · `tailscale serve status` |
+| ติดต่อเซิร์ฟเวอร์ embedding ไม่ได้ | URL ของ ngrok เปลี่ยนหรือเปล่า (ดูข้อ 3) · Mac หลับหรือปิดอยู่ไหม · `docker compose ps` |
+| ได้ 403 / ERR_NGROK_3208 | IP ของที่ทำงานไม่อยู่ใน `NGROK_ALLOW_IPS` (IP อาจเปลี่ยน) |
+| ngrok restart วน | `NGROK_AUTHTOKEN` ผิด หรือ ngrok ตัวอื่นในบัญชีเดียวกันรันอยู่แล้ว ดู `docker compose logs ngrok` |
 | token ไม่ถูกต้อง | token ใน DocAsk ตรงกับ `EMBED_TOKEN` ใน `.env` ไหม (ถ้าแก้ `.env` ต้อง `docker compose up -d` ใหม่) |
 | เซิร์ฟเวอร์ไม่มีโมเดล … | เปลี่ยน `EMBED_MODEL` แล้วหรือเปล่า ให้กดทดสอบและ "ใช้เซิร์ฟเวอร์นี้" ใหม่ |
 | container restart วน | RAM ของ Docker ไม่พอ ให้เพิ่มเป็น 6 GB ขึ้นไป |
@@ -88,15 +104,19 @@ container มี `restart: unless-stopped` จึงกลับมาทำง�
 
 - ห้าม commit ไฟล์ `.env` (อยู่ใน `.gitignore` แล้ว)
 - ห้ามเปลี่ยน port เป็น `0.0.0.0:8080` หรือเปิด port ที่ router เพราะข้อความในเอกสารของบริษัทจะวิ่งผ่านเส้นนี้
-- ห้ามใช้ `tailscale funnel` เพราะจะเปิดให้ทั้งอินเทอร์เน็ตเข้าถึง ให้ใช้ `serve` เท่านั้น
+- URL ของ ngrok เปิดสู่อินเทอร์เน็ต ควรตั้ง `NGROK_ALLOW_IPS` เสมอ และอย่าเผยแพร่ URL หรือ token
+- ngrok ถอด HTTPS ที่เซิร์ฟเวอร์ของ ngrok ข้อความจากเอกสารจึงผ่านบริษัท ngrok ในรูปที่อ่านได้ (Tailscale ไม่เป็นแบบนี้) ให้ตรวจว่านโยบายบริษัทยอมรับได้
+- แผนฟรีของ ngrok มีโควตา request และปริมาณข้อมูลต่อเดือน ถ้า index เอกสารเยอะอาจชนเพดาน ดูการใช้งานได้ที่ dashboard
 - DocAsk ยอมใช้ `http://` เฉพาะกับ localhost และที่อยู่ Tailscale (`100.64.0.0/10`, `*.ts.net`) ที่อื่นต้องเป็น `https://`
-- เครื่อง Windows ของบริษัทอาจไม่อนุญาตให้ลง Tailscale หรือส่งข้อมูลออกนอกเครือข่าย ให้ตรวจนโยบายบริษัทก่อนใช้
 
 ## ตั้งค่าเพิ่มเติม (`.env`)
 
 | ตัวแปร | ค่าเริ่มต้น | ความหมาย |
 |---|---|---|
 | `EMBED_TOKEN` | (ต้องใส่) | ยาวอย่างน้อย 16 ตัว |
+| `NGROK_AUTHTOKEN` | (ต้องใส่) | authtoken จาก ngrok dashboard |
+| `NGROK_DOMAIN` | ว่าง | static domain จาก dashboard ว่าง = ngrok เลือก URL ให้ (อาจเปลี่ยนเมื่อรีสตาร์ท) |
+| `NGROK_ALLOW_IPS` | ว่าง | CIDR ที่ยอมให้เข้า คั่นด้วย `,` ว่าง = ไม่กรอง IP |
 | `EMBED_MODEL` | `BAAI/bge-m3` | โมเดล sentence-transformers จาก Hugging Face (เปลี่ยนแล้ว DocAsk ต้อง index ใหม่) |
 | `EMBED_MODEL_REVISION` | `main` | ระบุ commit ของโมเดลเพื่อให้ผลไม่เปลี่ยน |
 | `EMBED_QUERY_PREFIX` / `EMBED_PASSAGE_PREFIX` | ว่าง | สำหรับโมเดลตระกูล e5 ให้ใส่ `query: ` / `passage: ` |
