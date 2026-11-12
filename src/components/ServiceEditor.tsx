@@ -69,7 +69,7 @@ export function ServiceEditor({ service, onClose }: { service: Service | null; o
 
         <div className="field">
           <span className="field-label">โฟลเดอร์ต้นทาง</span>
-          <span className="field-hint">แอปจะ index ไฟล์ .pdf .docx .pptx .txt .md .sql และรูปภาพ (OCR) ในโฟลเดอร์ และติดตามไฟล์ใหม่อัตโนมัติ</span>
+          <span className="field-hint">แอปจะ index ไฟล์ .pdf .docx .pptx .xlsx .xls .csv .txt .md .sql และรูปภาพ (OCR) ในโฟลเดอร์ และติดตามไฟล์ใหม่อัตโนมัติ</span>
           {form.folders.map((f) => (
             <div key={f} style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <span className="input mono" style={{ fontSize: 12, display: "flex", alignItems: "center", wordBreak: "break-all" }}>{f}</span>

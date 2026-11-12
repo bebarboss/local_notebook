@@ -1,6 +1,6 @@
 [package]
 name = "docask"
-version = "0.9.0"
+version = "0.10.0"
 description = "DocAsk — ถามตอบจากเอกสารในเครื่อง (RAG) ผ่าน Gosoft Agent Gateway"
 edition = "2021"
 rust-version = "1.77"
@@ -33,6 +33,9 @@ keyring = { version = "3", features = ["windows-native"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 pdf-extract = "0.7"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# spreadsheets: xlsx / xls / ods (pure Rust) and csv
+calamine = "0.38"
+csv = "1"
 # OCR: PaddleOCR models run on the same ONNX Runtime that fastembed links
 ort = { version = "=2.0.0-rc.9", default-features = false, features = ["ndarray", "download-binaries"] }
 ndarray = "0.16"

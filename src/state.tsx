@@ -55,6 +55,8 @@ export const DEFAULT_SETTINGS: Settings = {
   rerank: true,
   hybrid: true,
   indexLoad: "normal",
+  font: "looped",
+  textSize: "m",
 };
 
 export function AppProvider({ children }: { children: ReactNode }) {
@@ -110,6 +112,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     document.documentElement.dataset.theme = settings.theme;
   }, [settings.theme]);
+  useEffect(() => {
+    document.documentElement.dataset.font = settings.font;
+    document.documentElement.dataset.size = settings.textSize;
+  }, [settings.font, settings.textSize]);
 
   // live events
   useEffect(() => {

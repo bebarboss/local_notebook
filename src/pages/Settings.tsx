@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft, FolderOpen, Download } from "lucide-react";
 import { api } from "../lib/api";
-import type { UpdateInfo, AppInfo, DownloadProgress, EmbeddingModelId, EmbeddingStatus, EmbeddingTest, GatewayInfo, ModelConfig, RerankStatus, ThemeMode } from "../lib/types";
+import type { UpdateInfo, AppInfo, DownloadProgress, EmbeddingModelId, EmbeddingStatus, EmbeddingTest, GatewayInfo, ModelConfig, RerankStatus, ThemeMode, FontChoice, TextSize } from "../lib/types";
 import { th } from "../i18n/th";
 import { formatBytes, useApp, type SettingsSection } from "../state";
 import { ApiKeyField, keyFormatError, ModelList, SecurityNotes, TestTable, useModelTest } from "../components/GatewayForms";
@@ -45,7 +45,7 @@ export default function SettingsPage({ section = "gateway" }: { section?: Settin
             {cur === "embedding" && <EmbeddingSection />}
             {cur === "search" && <SearchSection />}
             {cur === "history" && <HistorySection />}
-            {cur === "theme" && <section><h2>ธีม</h2><div className="list-card"><ThemeRow /></div></section>}
+            {cur === "theme" && <section><h2>ธีม</h2><div className="list-card"><ThemeRow /><FontRow /><TextSizeRow /></div></section>}
             {cur === "trouble" && <section><h2>ตรวจสอบและแก้ปัญหา</h2><TroubleshootTable /></section>}
             {cur === "about" && <AboutSection />}
           </div>
@@ -63,6 +63,37 @@ function ThemeRow() {
       <div className="l"><span className="t">ธีม</span><span className="d">ตามระบบ Windows หรือเลือกเอง</span></div>
       <div className="segmented" role="radiogroup" aria-label="ธีม">
         {opts.map((o) => <button key={o.v} role="radio" aria-checked={settings.theme === o.v} onClick={() => updateSettings({ theme: o.v })}>{o.label}</button>)}
+      </div>
+    </div>
+  );
+}
+
+function FontRow() {
+  const { settings, updateSettings } = useApp();
+  const opts: { v: FontChoice; label: string; family: string }[] = [
+    { v: "looped", label: "มีหัว (แนะนำ)", family: '"IBM Plex Sans Thai Looped"' },
+    { v: "sarabun", label: "สารบรรณ", family: '"Sarabun"' },
+    { v: "plex", label: "ไม่มีหัว", family: '"IBM Plex Sans Thai"' },
+    { v: "system", label: "ของ Windows", family: '"Leelawadee UI"' },
+  ];
+  return (
+    <div className="list-row">
+      <div className="l"><span className="t">ฟอนต์</span><span className="d">แบบมีหัวอ่านข้อความยาวง่ายที่สุด · สารบรรณคล้ายหนังสือราชการ</span></div>
+      <div className="segmented" role="radiogroup" aria-label="ฟอนต์">
+        {opts.map((o) => <button key={o.v} role="radio" aria-checked={settings.font === o.v} style={{ fontFamily: o.family }} onClick={() => updateSettings({ font: o.v })}>{o.label}</button>)}
+      </div>
+    </div>
+  );
+}
+
+function TextSizeRow() {
+  const { settings, updateSettings } = useApp();
+  const opts: { v: TextSize; label: string }[] = [{ v: "s", label: "เล็ก" }, { v: "m", label: "ปกติ" }, { v: "l", label: "ใหญ่" }, { v: "xl", label: "ใหญ่มาก" }];
+  return (
+    <div className="list-row">
+      <div className="l"><span className="t">ขนาดตัวอักษร</span><span className="d">ขนาดของคำตอบในแชต (ส่วนอื่นขยายตามเล็กน้อย)</span></div>
+      <div className="segmented" role="radiogroup" aria-label="ขนาดตัวอักษร">
+        {opts.map((o) => <button key={o.v} role="radio" aria-checked={settings.textSize === o.v} onClick={() => updateSettings({ textSize: o.v })}>{o.label}</button>)}
       </div>
     </div>
   );

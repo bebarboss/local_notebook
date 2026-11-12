@@ -31,7 +31,8 @@
   --code: #F0F2F5;
   --overlay: rgba(20, 24, 32, .35);
 
-  --font: "IBM Plex Sans Thai", system-ui, "Segoe UI", sans-serif;
+  --font: "IBM Plex Sans Thai Looped", "IBM Plex Sans Thai", system-ui, "Segoe UI", sans-serif;
+  --ai-size: 15px;
   --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
   color-scheme: light;
 }
@@ -105,6 +106,16 @@
     color-scheme: dark;
   }
 }
+
+/* fonts and text size: Settings › ธีม */
+:root[data-font="sarabun"] { --font: "Sarabun", system-ui, "Segoe UI", sans-serif; }
+:root[data-font="plex"] { --font: "IBM Plex Sans Thai", system-ui, "Segoe UI", sans-serif; }
+:root[data-font="system"] { --font: "Leelawadee UI", "Segoe UI", Tahoma, sans-serif; }
+:root[data-size="s"] { --ai-size: 14px; }
+:root[data-size="l"] { --ai-size: 17px; }
+:root[data-size="xl"] { --ai-size: 19px; }
+:root[data-size="l"] body { font-size: 15px; }
+:root[data-size="xl"] body { font-size: 16px; }
 
 /* ---------- base ---------- */
 *, *::before, *::after { box-sizing: border-box; }
@@ -246,7 +257,7 @@ code { font-family: var(--mono); font-size: 12.5px; background: var(--code); col
 }
 .user-msg .text { line-height: 1.7; padding-top: 1px; white-space: pre-wrap; word-break: break-word; }
 .ai-msg { display: flex; flex-direction: column; gap: 10px; }
-.ai-text { font-size: 15px; line-height: 1.85; color: var(--text); word-break: break-word; }
+.ai-text { font-size: var(--ai-size); line-height: 1.85; color: var(--text); word-break: break-word; }
 .ai-text p { margin: 0 0 12px; }
 .ai-text p:last-child { margin-bottom: 0; }
 .ai-text strong { font-weight: 600; }

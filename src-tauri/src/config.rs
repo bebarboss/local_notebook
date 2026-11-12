@@ -66,6 +66,10 @@ pub struct Settings {
     pub hybrid: bool,
     /// how hard indexing may work the CPU: "light" | "normal" | "fast"
     pub index_load: String,
+    /// UI font: "looped" (Thai with loops, easiest to read) | "sarabun" | "plex" | "system"
+    pub font: String,
+    /// text size: "s" | "m" | "l" | "xl"
+    pub text_size: String,
 }
 
 impl Default for Settings {
@@ -90,6 +94,8 @@ impl Default for Settings {
             rerank: true,
             hybrid: true,
             index_load: "normal".into(),
+            font: "looped".into(),
+            text_size: "m".into(),
         }
     }
 }
@@ -116,6 +122,12 @@ impl Settings {
         // v0.8.0 had no local models and could save an empty choice
         if self.embedding_model.trim().is_empty() || self.embedding_model.trim() == crate::gateway_embed::PREFIX {
             self.embedding_model = Self::default().embedding_model;
+        }
+        if !matches!(self.font.as_str(), "looped" | "sarabun" | "plex" | "system") {
+            self.font = "looped".into();
+        }
+        if !matches!(self.text_size.as_str(), "s" | "m" | "l" | "xl") {
+            self.text_size = "m".into();
         }
         if !matches!(self.index_load.as_str(), "light" | "normal" | "fast") {
             self.index_load = "normal".into();

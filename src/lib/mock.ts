@@ -97,7 +97,7 @@ export function createMockBackend(): Backend {
   let settings: Settings = {
     theme: "system", userName: "navaritrod", setupDone: false, historyTurns: 6, autoDeleteDays: 0,
     topK: 5, threshold: 0.3, chunkSize: 1000, chunkOverlap: 150, embeddingModel: "multilingual-e5-small", lastServiceId: "hr",
-    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true, rerank: true, hybrid: true, indexLoad: "normal",
+    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true, rerank: true, hybrid: true, indexLoad: "normal", font: "looped", textSize: "m",
   };
   try {
     const saved = localStorage.getItem("docask-mock-settings");

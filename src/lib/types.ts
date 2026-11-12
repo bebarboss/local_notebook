@@ -2,6 +2,8 @@
 
 export type Effort = "low" | "medium" | "high";
 export type ThemeMode = "light" | "dark" | "system";
+export type FontChoice = "looped" | "sarabun" | "plex" | "system";
+export type TextSize = "s" | "m" | "l" | "xl";
 
 export interface Service {
   id: string;
@@ -172,6 +174,8 @@ export interface Settings {
   /** fuse keyword (exact words) search with vector search */
   hybrid: boolean;
   indexLoad: "light" | "normal" | "fast";
+  font: FontChoice;
+  textSize: TextSize;
 }
 
 

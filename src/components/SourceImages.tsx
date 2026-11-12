@@ -75,7 +75,7 @@ function useImageUrl(serviceId: string, id: number): string | null {
 }
 
 function caption(s: Source): string {
-  return s.page != null ? `${s.fileName} · ${th.page(s.page)}` : s.fileName;
+  return s.page != null ? `${s.fileName} · ${th.pageOf(s.fileName, s.page)}` : s.fileName;
 }
 
 export function Thumb({ img, onOpen, size = 96 }: { img: SourceImage; onOpen: () => void; size?: number }) {

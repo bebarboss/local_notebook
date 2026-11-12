@@ -887,7 +887,8 @@ pub fn build_prompt(svc: &Service, sources: &[SourceRef], history: &[(String, St
         user.push_str("(ไม่พบท่อนเอกสารที่เกี่ยวข้อง)\n");
     }
     for s in sources {
-        let page = s.page.map(|p| format!(" · หน้า {p}")).unwrap_or_default();
+        let unit = if crate::ingest::is_spreadsheet(&s.file_name) { "แถว" } else { "หน้า" };
+        let page = s.page.map(|p| format!(" · {unit} {p}")).unwrap_or_default();
         let from = if all { format!(" · service {}", s.service_name) } else { String::new() };
         user.push_str(&format!("\n[{}] {}{}{}\n{}\n", s.n, s.file_name, page, from, s.text));
     }

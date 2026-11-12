@@ -6,6 +6,7 @@ pub mod image;
 pub mod ocr;
 pub mod pdf;
 pub mod pptx;
+pub mod sheet;
 pub mod text;
 pub mod watcher;
 
@@ -185,6 +186,7 @@ fn extractors() -> Vec<Box<dyn Extractor>> {
         Box::new(pdf::PdfExtractor),
         Box::new(docx::DocxExtractor),
         Box::new(pptx::PptxExtractor),
+        Box::new(sheet::SheetExtractor),
         Box::new(text::TextExtractor),
         Box::new(image::ImageExtractor),
     ]
@@ -193,6 +195,13 @@ fn extractors() -> Vec<Box<dyn Extractor>> {
 pub fn extractor_for(path: &Path) -> Option<Box<dyn Extractor>> {
     let ext = path.extension()?.to_string_lossy().to_lowercase();
     extractors().into_iter().find(|e| e.extensions().contains(&ext.as_str()))
+}
+
+/// Spreadsheet sources cite rows, not pages.
+pub fn is_spreadsheet(file_name: &str) -> bool {
+    Path::new(file_name)
+        .extension()
+        .is_some_and(|e| sheet::EXTENSIONS.contains(&e.to_string_lossy().to_lowercase().as_str()))
 }
 
 pub fn is_supported(path: &Path) -> bool {

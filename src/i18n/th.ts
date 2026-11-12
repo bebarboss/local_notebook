@@ -25,6 +25,8 @@ export const th = {
   addDocs: "เพิ่มเอกสาร",
   seconds: (ms: number) => `${(ms / 1000).toFixed(1)} วิ`,
   page: (p: number) => `น.${p}`,
+  /** "น.3" for documents, "แถว 3" for spreadsheet rows */
+  pageOf: (fileName: string, p: number) => (/\.(xlsx|xlsm|xls|ods|csv|tsv)$/i.test(fileName) ? `แถว ${p}` : `น.${p}`),
   openSource: "เปิดไฟล์ต้นฉบับ",
   score: (s: number) => `คะแนน ${s.toFixed(2)}`,
   mock: "MOCK MODE",
