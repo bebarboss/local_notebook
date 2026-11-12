@@ -33,6 +33,8 @@ pub(crate) struct Endpoint<'a> {
     pub key: &'a str,
     pub input_type: Option<&'a str>,
     pub retries: u32,
+    /// whole request, including the model's work
+    pub timeout: Duration,
     /// error message prefix, e.g. "Gateway embedding"
     pub label: &'a str,
 }
@@ -47,7 +49,7 @@ pub async fn embed(model: &str, texts: &[String]) -> AppResult<Vec<Vec<f32>>> {
     let url = format!("{}/v1/embeddings", base());
     let mut out = Vec::with_capacity(texts.len());
     for part in texts.chunks(MAX_INPUTS) {
-        let ep = Endpoint { url: &url, key: &key, input_type: None, retries: RETRIES, label: "Gateway embedding" };
+        let ep = Endpoint { url: &url, key: &key, input_type: None, retries: RETRIES, timeout: Duration::from_secs(120), label: "Gateway embedding" };
         out.extend(post(&ep, model, part).await?);
     }
     Ok(out)
@@ -58,7 +60,7 @@ pub(crate) async fn post(ep: &Endpoint<'_>, model: &str, texts: &[String]) -> Ap
     let body = Body { model, input: texts, encoding_format: "float", input_type: ep.input_type };
     let mut attempt = 0;
     loop {
-        let sent = CLIENT.post(url).bearer_auth(key).timeout(Duration::from_secs(120)).json(&body).send().await;
+        let sent = CLIENT.post(url).bearer_auth(key).timeout(ep.timeout).json(&body).send().await;
         let retry_in = Duration::from_secs(2u64.pow(attempt + 1));
         let resp = match sent {
             Ok(r) => r,
@@ -215,7 +217,7 @@ pub(crate) mod tests {
         let (url, server) = fake_gateway(vec![(429, r#"{"error":{"message":"rate limit"}}"#.into()), (200, ok.into())]);
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let texts = vec!["ลาพักร้อน".to_string(), "รหัสผ่าน".to_string()];
-        let v = rt.block_on(post(&Endpoint { url: &url, key: "sk-test-key", input_type: None, retries: RETRIES, label: "t" }, "bge-m3", &texts)).unwrap();
+        let v = rt.block_on(post(&Endpoint { url: &url, key: "sk-test-key", input_type: None, retries: RETRIES, timeout: Duration::from_secs(30), label: "t" }, "bge-m3", &texts)).unwrap();
         assert_eq!(v, vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
         let seen = server.join().unwrap();
         assert_eq!(seen.len(), 2, "429 must be retried");
@@ -229,7 +231,7 @@ pub(crate) mod tests {
     fn gateway_errors_never_show_the_key() {
         let (url, server) = fake_gateway(vec![(400, r#"{"error":{"message":"model not found for key sk-test-key"}}"#.into())]);
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let e = rt.block_on(post(&Endpoint { url: &url, key: "sk-test-key", input_type: None, retries: RETRIES, label: "t" }, "nope", &["x".to_string()])).unwrap_err();
+        let e = rt.block_on(post(&Endpoint { url: &url, key: "sk-test-key", input_type: None, retries: RETRIES, timeout: Duration::from_secs(30), label: "t" }, "nope", &["x".to_string()])).unwrap_err();
         assert!(!e.message.contains("sk-test-key"), "{}", e.message);
         server.join().unwrap();
     }

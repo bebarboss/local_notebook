@@ -46,7 +46,7 @@ export const DEFAULT_SETTINGS: Settings = {
   threshold: 0.3,
   chunkSize: 1000,
   chunkOverlap: 150,
-  embeddingModel: "multilingual-e5-small",
+  embeddingModel: "bge-m3",
   lastServiceId: null,
   updateUrl: "",
   autoCheckUpdate: true,
@@ -151,6 +151,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
     clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => setToastMsg(null), 2600);
   }, []);
+
+  // embedding server down → questions use the local model; say so at most every 2 minutes
+  const fallbackShown = useRef(0);
+  useEffect(() => {
+    const off = api.on("embed-fallback", (msg) => {
+      if (Date.now() - fallbackShown.current < 120_000) return;
+      fallbackShown.current = Date.now();
+      toast(msg);
+    });
+    return () => { off.then((f) => f()); };
+  }, [toast]);
 
   const value = useMemo<Ctx>(
     () => ({

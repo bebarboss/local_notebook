@@ -232,6 +232,11 @@ export interface EmbedServerTest extends EmbeddingTest {
   /** model id the server serves, e.g. "bge-m3" */
   model: string;
   device: string;
+  /** the same model on this PC, used for questions while the server is down (null: none exists) */
+  fallbackModel: EmbeddingModelId | null;
+  fallbackReady: boolean;
+  /** cosine of server vs local vector for one question (≈ 1: interchangeable) */
+  fallbackMatch: number | null;
 }
 
 export type EmbeddingModelId = "multilingual-e5-small" | "multilingual-e5-base" | "bge-m3";

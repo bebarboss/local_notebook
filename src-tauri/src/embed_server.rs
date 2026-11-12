@@ -11,14 +11,30 @@ use crate::gateway_embed::{post, Endpoint};
 use crate::llm::CLIENT;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
+use parking_lot::Mutex;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// `settings.embedding_model` value prefix for a model on the embedding server.
 pub const PREFIX: &str = "server:";
 
 /// The server accepts up to 64; the indexer sends 32 at a time anyway.
 const MAX_INPUTS: usize = 32;
+/// After the server failed, questions go straight to the local fallback for this long.
+const DOWN_FOR: Duration = Duration::from_secs(120);
+
+static DOWN_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// The server could not be reached or is broken (502 from `tailscale serve` while the
+/// container is down) — as opposed to a wrong token or model, which a fallback would hide.
+pub fn is_down(e: &AppError) -> bool {
+    e.code == "server_unreachable" || e.status.is_some_and(|s| s >= 500)
+}
+
+/// The server failed within the last two minutes.
+pub fn recently_down() -> bool {
+    DOWN_AT.lock().is_some_and(|t| t.elapsed() < DOWN_FOR)
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -142,22 +158,28 @@ pub async fn health(base: &str) -> AppResult<Health> {
 
 /// Passages for the index (patient: retries while the home machine wakes up).
 pub async fn embed_passages(model: &str, texts: &[String]) -> AppResult<Vec<Vec<f32>>> {
-    embed(model, texts, "passage", 4).await
+    embed(model, texts, "passage", 4, Duration::from_secs(120)).await
 }
 
-/// One question — fails fast so the chat says so instead of hanging.
+/// One question — fails fast (no retry) so the local fallback can answer instead.
 pub async fn embed_query(model: &str, q: &str) -> AppResult<Vec<f32>> {
-    Ok(embed(model, &[q.to_string()], "query", 1).await?.pop().unwrap_or_default())
+    Ok(embed(model, &[q.to_string()], "query", 0, Duration::from_secs(15)).await?.pop().unwrap_or_default())
 }
 
-async fn embed(model: &str, texts: &[String], kind: &str, retries: u32) -> AppResult<Vec<Vec<f32>>> {
+async fn embed(model: &str, texts: &[String], kind: &str, retries: u32, timeout: Duration) -> AppResult<Vec<Vec<f32>>> {
     let (base, token) = target()?;
-    embed_at(&base, &token, model, texts, kind, retries).await
+    let r = embed_at(&base, &token, model, texts, kind, retries, timeout).await;
+    match &r {
+        Ok(_) => *DOWN_AT.lock() = None,
+        Err(e) if is_down(e) => *DOWN_AT.lock() = Some(Instant::now()),
+        Err(_) => {}
+    }
+    r
 }
 
-async fn embed_at(base: &str, token: &str, model: &str, texts: &[String], kind: &str, retries: u32) -> AppResult<Vec<Vec<f32>>> {
+async fn embed_at(base: &str, token: &str, model: &str, texts: &[String], kind: &str, retries: u32, timeout: Duration) -> AppResult<Vec<Vec<f32>>> {
     let url = format!("{base}/v1/embeddings");
-    let ep = Endpoint { url: &url, key: token, input_type: Some(kind), retries, label: "เซิร์ฟเวอร์ embedding" };
+    let ep = Endpoint { url: &url, key: token, input_type: Some(kind), retries, timeout, label: "เซิร์ฟเวอร์ embedding" };
     let mut out = Vec::with_capacity(texts.len());
     for part in texts.chunks(MAX_INPUTS) {
         let v = post(&ep, model, part).await.map_err(|e| {
@@ -180,6 +202,23 @@ async fn embed_at(base: &str, token: &str, model: &str, texts: &[String], kind: 
 mod tests {
     use super::*;
     use crate::gateway_embed::tests::fake_gateway;
+
+    #[test]
+    fn down_means_unreachable_or_broken_not_a_wrong_token() {
+        assert!(is_down(&unreachable("http://x")));
+        assert!(is_down(&AppError::from_status(502, "")));
+        assert!(!is_down(&AppError::from_status(401, "")));
+        assert!(!is_down(&AppError::from_status(404, "")));
+    }
+
+    #[test]
+    fn server_models_map_to_local_fallbacks() {
+        use crate::embed::ModelId;
+        assert_eq!(ModelId::from_server_model("bge-m3"), Some(ModelId::BgeM3));
+        assert_eq!(ModelId::from_server_model("BAAI/bge-m3"), Some(ModelId::BgeM3));
+        assert_eq!(ModelId::from_server_model("intfloat/multilingual-e5-small"), Some(ModelId::MultilingualE5Small));
+        assert_eq!(ModelId::from_server_model("all-MiniLM-L6-v2"), None);
+    }
 
     #[test]
     fn urls() {
@@ -206,9 +245,9 @@ mod tests {
         let (url, server) = fake_gateway(vec![(200, ok.into()), (401, r#"{"error":{"message":"invalid token"}}"#.into())]);
         let base = url.trim_end_matches("/v1/embeddings").to_string();
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let v = rt.block_on(embed_at(&base, "home-token-0123456789", "bge-m3", &["ลาพักร้อน".into()], "query", 0)).unwrap();
+        let v = rt.block_on(embed_at(&base, "home-token-0123456789", "bge-m3", &["ลาพักร้อน".into()], "query", 0, Duration::from_secs(30))).unwrap();
         assert_eq!(v, vec![vec![0.6, 0.8]]);
-        let e = rt.block_on(embed_at(&base, "home-token-0123456789", "bge-m3", &["x".into()], "passage", 0)).unwrap_err();
+        let e = rt.block_on(embed_at(&base, "home-token-0123456789", "bge-m3", &["x".into()], "passage", 0, Duration::from_secs(30))).unwrap_err();
         assert!(!e.message.contains("home-token"), "{}", e.message);
         let seen = server.join().unwrap();
         assert!(seen[0].contains(r#""input_type":"query""#), "{}", seen[0]);
@@ -225,10 +264,10 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let h = rt.block_on(health(&base)).unwrap();
         let texts: Vec<String> = (0..40).map(|i| format!("ท่อนที่ {i} ของเอกสาร")).collect();
-        let v = rt.block_on(embed_at(&base, &token, &h.model, &texts, "passage", 0)).unwrap();
+        let v = rt.block_on(embed_at(&base, &token, &h.model, &texts, "passage", 0, Duration::from_secs(30))).unwrap();
         assert_eq!(v.len(), 40, "two requests of 32 + 8");
         assert!(v.iter().all(|x| x.len() == h.dim));
-        let e = rt.block_on(embed_at(&base, "wrong-token-0000000000", &h.model, &texts[..1], "query", 0)).unwrap_err();
+        let e = rt.block_on(embed_at(&base, "wrong-token-0000000000", &h.model, &texts[..1], "query", 0, Duration::from_secs(30))).unwrap_err();
         assert!(e.message.contains("token"), "{}", e.message);
     }
 
@@ -237,7 +276,7 @@ mod tests {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let base = format!("http://127.0.0.1:{port}");
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let e = rt.block_on(embed_at(&base, "home-token-0123456789", "bge-m3", &["x".into()], "query", 0)).unwrap_err();
+        let e = rt.block_on(embed_at(&base, "home-token-0123456789", "bge-m3", &["x".into()], "query", 0, Duration::from_secs(30))).unwrap_err();
         assert_eq!(e.code, "server_unreachable", "{}", e.message);
         assert!(e.message.contains("Tailscale"));
     }

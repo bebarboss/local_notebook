@@ -313,17 +313,14 @@ function ModelsSection() {
   );
 }
 
-const EMBED_MODELS: { id: EmbeddingModelId; label: string; size: string }[] = [
-  { id: "multilingual-e5-small", label: "multilingual-e5-small (int8) — ค่าเริ่มต้น เร็ว", size: "~120 MB" },
-  { id: "multilingual-e5-base", label: "multilingual-e5-base (int8) — แม่นขึ้น ช้ากว่า", size: "~280 MB" },
-  { id: "bge-m3", label: "bge-m3 (int8) — แม่นที่สุด ใช้ RAM มาก", size: "~570 MB" },
-];
+/** the only local embedding model (also the server's model, so either can stand in for the other) */
+const LOCAL_MODEL: EmbeddingModelId = "bge-m3";
+const LOCAL_SIZE = "~570 MB";
 
 function EmbeddingSection() {
   const app = useApp();
   const [st, setSt] = useState<EmbeddingStatus | null>(null);
-  const remote = /^(gateway|server):/.test(app.settings.embeddingModel);
-  const [model, setModel] = useState<EmbeddingModelId>(remote ? "multilingual-e5-small" : (app.settings.embeddingModel as EmbeddingModelId));
+  const model = LOCAL_MODEL;
   const [dl, setDl] = useState<DownloadProgress | null>(null);
   const [confirmReindex, setConfirmReindex] = useState(false);
   const load = () => api.embeddingStatus().then(setSt);
@@ -337,7 +334,6 @@ function EmbeddingSection() {
     });
     return () => { off.then((f) => f()); };
   }, [app]);
-  const changed = st && st.model !== model;
   return (
     <section>
       <h2>Embedding และ Index</h2>
@@ -349,24 +345,10 @@ function EmbeddingSection() {
             {st?.path && <span className="d mono" style={{ wordBreak: "break-all" }}>{st.path}</span>}
           </div>
         </div>
-        <div className="list-row" style={{ alignItems: "flex-start" }}>
-          <div className="l" style={{ gap: 8 }}>
-            <span className="t" id="emb-label">โมเดลในเครื่อง (ค่าเริ่มต้น)</span>
-            <div role="radiogroup" aria-labelledby="emb-label" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {EMBED_MODELS.map((m) => (
-                <label key={m.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, minHeight: 32 }}>
-                  <input type="radio" name="emb" checked={model === m.id} onChange={() => setModel(m.id)} />
-                  <span>{m.label} <span className="muted">{m.size}</span></span>
-                </label>
-              ))}
-            </div>
-            {changed && <span className="d" style={{ color: "var(--warn-text)" }}>เปลี่ยนโมเดลแล้วต้อง index ใหม่ทุก service</span>}
-          </div>
-        </div>
         <div className="list-row">
           <div className="l">
-            <span className="t">(ก) ดาวน์โหลดจาก Hugging Face</span>
-            <span className="d">เก็บที่ %APPDATA%\DocAsk\models\ · ดาวน์โหลดครั้งเดียว</span>
+            <span className="t">(ก) ดาวน์โหลด bge-m3 จาก Hugging Face</span>
+            <span className="d">โมเดลในเครื่อง bge-m3 (int8) {LOCAL_SIZE} · เก็บที่ %APPDATA%\DocAsk\models\ · ดาวน์โหลดครั้งเดียว</span>
             {dl && <div style={{ marginTop: 6 }}><ProgressBar value={dl.total ? dl.downloaded / dl.total : 0} label="ดาวน์โหลดโมเดล" /><span className="d">{dl.file} · {formatBytes(dl.downloaded)}{dl.total ? ` / ${formatBytes(dl.total)}` : ""}</span></div>}
           </div>
           <button className="btn" disabled={!!dl} onClick={async () => {
@@ -629,6 +611,48 @@ function HybridRow() {
   );
 }
 
+/** questions fall back to the same model on this PC while the server is down */
+function FallbackLine({ r, onDownloaded }: { r: EmbedServerTest; onDownloaded: () => void }) {
+  const app = useApp();
+  const [dl, setDl] = useState<DownloadProgress | null>(null);
+  useEffect(() => {
+    if (!r.fallbackModel) return;
+    const off = api.on("embed-download", (p) => {
+      if (p.model !== r.fallbackModel) return;
+      setDl(p.done || p.error ? null : p);
+      if (p.done) onDownloaded(); // re-test: now with the local comparison
+    });
+    return () => { off.then((f) => f()); };
+  }, [r.fallbackModel, onDownloaded]);
+
+  if (!r.fallbackModel) {
+    return <span className="d">สำรองในเครื่อง: ไม่มี — แอปไม่มีโมเดล {r.model} แบบในเครื่อง ถ้าเซิร์ฟเวอร์ล่มจะค้นเอกสารไม่ได้</span>;
+  }
+  if (!r.fallbackReady) {
+    const size = r.fallbackModel === LOCAL_MODEL ? LOCAL_SIZE : "";
+    return (
+      <span className="d" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <span style={{ color: "var(--warn-text)" }}>สำรองในเครื่อง: ยังไม่มี {r.fallbackModel} บนเครื่องนี้ — ถ้าเซิร์ฟเวอร์ล่มจะถามไม่ได้</span>
+        {dl ? (
+          <><ProgressBar value={dl.total ? dl.downloaded / dl.total : 0} label={`ดาวน์โหลด ${r.fallbackModel}`} /><span>{dl.file} · {formatBytes(dl.downloaded)}{dl.total ? ` / ${formatBytes(dl.total)}` : ""}</span></>
+        ) : (
+          <button className="btn" style={{ alignSelf: "flex-start" }} onClick={() => {
+            // download only — the embedding source stays on the server
+            api.downloadEmbedding(r.fallbackModel!).catch((e) => app.toast((e as { message: string }).message));
+          }}><Download size={16} strokeWidth={1.8} aria-hidden="true" />ดาวน์โหลด {r.fallbackModel} ไว้สำรอง {size && <span className="muted">{size}</span>}</button>
+        )}
+      </span>
+    );
+  }
+  const m = r.fallbackMatch;
+  return (
+    <span className="d">
+      สำรองในเครื่อง: <span className="ok-text">{r.fallbackModel} พร้อม</span> · ถ้าเซิร์ฟเวอร์ล่ม คำถามจะคำนวณในเครื่องแทน (ทำ index ใหม่ต้องรอเซิร์ฟเวอร์)
+      {m !== null && <> · ผลตรงกับเซิร์ฟเวอร์ {m.toFixed(3)}{m < 0.95 && <span style={{ color: "var(--warn-text)" }}> · ต่างกันมาก ผลค้นตอนสำรองอาจไม่ดี</span>}</>}
+    </span>
+  );
+}
+
 function EmbedServerRow({ onChanged }: { onChanged: (s: EmbeddingStatus) => void }) {
   const app = useApp();
   const current = app.settings.embeddingModel.startsWith("server:") ? app.settings.embeddingModel.slice(7) : "";
@@ -684,6 +708,7 @@ function EmbedServerRow({ onChanged }: { onChanged: (s: EmbeddingStatus) => void
           )}
         </div>
         {test?.error && <span className="d" style={{ color: "var(--warn-text)" }} role="alert">ใช้ไม่ได้: {test.error}</span>}
+        {r && <FallbackLine r={r} onDownloaded={saveAndTest} />}
         {r && (
           <span className="d">
             <span className="ok-text">ใช้ได้</span> · <span className="mono">{r.model}</span> · {r.dims} มิติ · {r.device} · {r.ms} ms ·

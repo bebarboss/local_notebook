@@ -44,6 +44,13 @@ impl ModelId {
         }
     }
 
+    /// The local model that makes the same vectors as a server model of this name
+    /// ("bge-m3", "BAAI/bge-m3", "intfloat/multilingual-e5-small", …).
+    pub fn from_server_model(name: &str) -> Option<Self> {
+        let n = name.rsplit('/').next()?.trim().to_lowercase();
+        [ModelId::MultilingualE5Small, ModelId::MultilingualE5Base, ModelId::BgeM3].into_iter().find(|m| m.as_str() == n)
+    }
+
     pub fn spec(&self) -> Spec {
         match self {
             ModelId::MultilingualE5Small => Spec { repo: "Xenova/multilingual-e5-small", onnx: "onnx/model_quantized.onnx", pooling: Pooling::Mean, e5_prefix: true, max_length: 512 },
@@ -222,15 +229,45 @@ impl Embedder {
         }
     }
 
-    /// A question to search with.
-    pub async fn embed_query_from(self: Arc<Self>, src: Source, q: String) -> AppResult<Vec<f32>> {
+    /// A question to search with, plus a notice when the embedding server was down and the
+    /// same model on this machine made the vector instead (the index stays as it is).
+    pub async fn embed_query_from(self: Arc<Self>, src: Source, q: String) -> AppResult<(Vec<f32>, Option<String>)> {
         match src {
-            Source::Local(m) => tauri::async_runtime::spawn_blocking(move || self.embed_query(m, &q))
-                .await
-                .map_err(|e| AppError::new("embedding", format!("ทำ embedding ไม่สำเร็จ: {e}")))?,
-            Source::Gateway(m) => Ok(crate::gateway_embed::embed(&m, &[q]).await?.pop().unwrap_or_default()),
-            Source::Server(m) => crate::embed_server::embed_query(&m, &q).await,
+            Source::Local(m) => Ok((self.embed_query_local(m, q).await?, None)),
+            Source::Gateway(m) => Ok((crate::gateway_embed::embed(&m, &[q]).await?.pop().unwrap_or_default(), None)),
+            Source::Server(m) => {
+                let local = ModelId::from_server_model(&m).filter(|l| Self::status(*l).ready);
+                let notice = |l: ModelId| format!("เซิร์ฟเวอร์ embedding ติดต่อไม่ได้ — ค้นด้วย {} ในเครื่องแทน", l.as_str());
+                if let Some(l) = local {
+                    if crate::embed_server::recently_down() {
+                        return Ok((self.embed_query_local(l, q).await?, Some(notice(l))));
+                    }
+                }
+                match crate::embed_server::embed_query(&m, &q).await {
+                    Ok(v) => Ok((v, None)),
+                    Err(e) if crate::embed_server::is_down(&e) => match local {
+                        Some(l) => {
+                            crate::diag::log(format!("embedding server down ({}) — question embedded locally with {}", e.code, l.as_str()));
+                            Ok((self.embed_query_local(l, q).await?, Some(notice(l))))
+                        }
+                        None => {
+                            let mut e = e;
+                            if ModelId::from_server_model(&m).is_some() {
+                                e.message.push_str(&format!(" · ดาวน์โหลด {m} ในเครื่องไว้สำรองได้ที่ ตั้งค่า › Embedding และ Index"));
+                            }
+                            Err(e)
+                        }
+                    },
+                    Err(e) => Err(e),
+                }
+            }
         }
+    }
+
+    pub async fn embed_query_local(self: Arc<Self>, m: ModelId, q: String) -> AppResult<Vec<f32>> {
+        tauri::async_runtime::spawn_blocking(move || self.embed_query(m, &q))
+            .await
+            .map_err(|e| AppError::new("embedding", format!("ทำ embedding ไม่สำเร็จ: {e}")))?
     }
 
     pub fn status(model: ModelId) -> EmbeddingStatus {

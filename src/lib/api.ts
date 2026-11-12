@@ -54,6 +54,8 @@ export interface EventMap {
   "services-changed": null;
   "update-progress": UpdateProgress;
   "share-progress": ShareProgress;
+  /** the embedding server was down; this question was embedded on this PC instead */
+  "embed-fallback": string;
 }
 
 export type EventName = keyof EventMap;

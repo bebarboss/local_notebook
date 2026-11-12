@@ -820,7 +820,10 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, question: &str) -> 
         // ≈ 0.3–0.5) — keep the cut-off from hiding good passages; top-k still limits
         threshold = threshold.min(0.15);
     }
-    let qv = state.embedder.clone().embed_query_from(src, question.to_string()).await?;
+    let (qv, notice) = state.embedder.clone().embed_query_from(src, question.to_string()).await?;
+    if let Some(n) = notice {
+        let _ = app.emit("embed-fallback", n);
+    }
 
     let targets: Vec<Service> = if all { state.services.lock().list() } else { vec![svc.clone()] };
     let k = svc.top_k as usize;
@@ -1122,11 +1125,16 @@ pub struct ServerTest {
     pub device: String,
     #[serde(flatten)]
     pub test: EmbeddingTest,
+    /// the same model on this machine, used for questions while the server is down
+    pub fallback_model: Option<String>,
+    pub fallback_ready: bool,
+    /// cosine of the server's and the local vector for the same question (≈ 1 = interchangeable)
+    pub fallback_match: Option<f32>,
 }
 
 /// `/health` for the model name, then the same three Thai sentences as the Gateway test.
 #[tauri::command]
-pub async fn test_embed_server() -> AppResult<ServerTest> {
+pub async fn test_embed_server(app: AppHandle) -> AppResult<ServerTest> {
     let info = crate::embed_server::info();
     if info.url.is_empty() {
         return Err(AppError::new("no_server", "ใส่ URL ของเซิร์ฟเวอร์ก่อน"));
@@ -1140,10 +1148,22 @@ pub async fn test_embed_server() -> AppResult<ServerTest> {
     if q.len() != h.dim {
         return Err(AppError::new("server", format!("เซิร์ฟเวอร์บอกว่า {} มิติ แต่ส่งมา {} มิติ", h.dim, q.len())));
     }
+    let test = EmbeddingTest { dims: q.len(), ms: t.elapsed().as_millis() as u64, similar: dot(&q, &p[0]), unrelated: dot(&q, &p[1]) };
+    let local = ModelId::from_server_model(&h.model);
+    let fallback_ready = local.is_some_and(|l| Embedder::status(l).ready);
+    let mut fallback_match = None;
+    if let (Some(l), true) = (local, fallback_ready) {
+        let embedder = app.state::<AppState>().embedder.clone();
+        let lv = embedder.embed_query_local(l, texts[0].clone()).await?;
+        fallback_match = Some(dot(&q, &lv));
+    }
     Ok(ServerTest {
         model: h.model,
         device: h.device,
-        test: EmbeddingTest { dims: q.len(), ms: t.elapsed().as_millis() as u64, similar: dot(&q, &p[0]), unrelated: dot(&q, &p[1]) },
+        test,
+        fallback_model: local.map(|l| l.as_str().to_string()),
+        fallback_ready,
+        fallback_match,
     })
 }
 

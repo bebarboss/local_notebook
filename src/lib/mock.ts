@@ -97,7 +97,7 @@ export function createMockBackend(): Backend {
 
   let settings: Settings = {
     theme: "system", userName: "navaritrod", setupDone: false, historyTurns: 6, autoDeleteDays: 0,
-    topK: 5, threshold: 0.3, chunkSize: 1000, chunkOverlap: 150, embeddingModel: "multilingual-e5-small", lastServiceId: "hr",
+    topK: 5, threshold: 0.3, chunkSize: 1000, chunkOverlap: 150, embeddingModel: "bge-m3", lastServiceId: "hr",
     updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true, rerank: true, hybrid: true, indexLoad: "normal", font: "looped", textSize: "m", startHidden: true,
   };
   try {
@@ -114,8 +114,9 @@ export function createMockBackend(): Backend {
   };
   let models: ModelConfig[] = defaultModels(gateway.url).map((m) => (m.id === "gothink3" ? { ...m, hidden: true } : m));
   let status: GatewayStatus = { state: "ok", message: null, checkedAt: now() };
+  let localBgeM3 = false;
   let embedServer = { url: "", hasToken: false, tokenLast4: null as string | null };
-  let embedding: EmbeddingStatus = { model: "multilingual-e5-small", ready: true, path: "%APPDATA%\\DocAsk\\models\\multilingual-e5-small", sizeBytes: 118e6 };
+  let embedding: EmbeddingStatus = { model: "bge-m3", ready: true, path: "%APPDATA%\\DocAsk\\models\\bge-m3", sizeBytes: 568e6 };
   const streams = new Map<string, { stopped: boolean }>();
   let updateAvailable = false;
   let reranker: RerankStatus & { model: "mmarco-mMiniLMv2-L12" } = { model: "mmarco-mMiniLMv2-L12", ready: false, path: "%APPDATA%\\DocAsk\\models\\mmarco-mMiniLMv2-L12", sizeBytes: null };
@@ -283,7 +284,7 @@ export function createMockBackend(): Backend {
       return { path: `${dest}\\DocAsk-${s.code}-${s.name}.zip`, documents: 6, bytes: 12_400_000, missing: 0 };
     },
     importServiceZip: async (zip, dest, reembed) => {
-      if (!reembed && zip.includes("bge")) throw { code: "embedding_mismatch", message: "ไฟล์นี้ทำ index ด้วยโมเดล bge-m3 แต่เครื่องนี้ใช้ multilingual-e5-small — เปลี่ยนโมเดลให้ตรงกันก่อน หรือนำเข้าแล้วทำ index ใหม่ในเครื่องนี้" };
+      if (!reembed && zip.includes("e5")) throw { code: "embedding_mismatch", message: "ไฟล์นี้ทำ index ด้วยโมเดล multilingual-e5-small แต่เครื่องนี้ใช้ bge-m3 — เปลี่ยนโมเดลให้ตรงกันก่อน หรือนำเข้าแล้วทำ index ใหม่ในเครื่องนี้" };
       for (let d = 1; d <= 4; d++) { await wait(150); emit("share-progress", { phase: "import", done: d, total: 4 }); }
       const s: Service = { ...services[0], id: `imp${services.length}`, name: "นโยบาย (นำเข้า)", code: "IMP", folders: [`${dest}\\นโยบาย\\docs`], files: [], excluded: [] };
       services.push(s);
@@ -386,7 +387,8 @@ export function createMockBackend(): Backend {
         await wait(120);
         emit("embed-download", { model, file: "onnx/model_quantized.onnx", downloaded: d, total, done: false, error: null });
       }
-      embedding = { model, ready: true, path: `%APPDATA%\\DocAsk\\models\\${model}`, sizeBytes: total };
+      if (model === "bge-m3") localBgeM3 = true;
+      if (!settings.embeddingModel.startsWith("server:")) embedding = { model, ready: true, path: `%APPDATA%\\DocAsk\\models\\${model}`, sizeBytes: total };
       emit("embed-download", { model, file: "", downloaded: total, total, done: true, error: null });
     },
     useEmbeddingFolder: async (model, folder) => { embedding = { model, ready: true, path: folder, sizeBytes: null }; return clone(embedding); },
@@ -417,7 +419,8 @@ export function createMockBackend(): Backend {
     testEmbedServer: async () => {
       await wait(700);
       if (!embedServer.hasToken) throw { code: "no_key", message: "ยังไม่ได้ใส่ token ของเซิร์ฟเวอร์ embedding" };
-      return { model: "bge-m3", device: "cpu", dims: 1024, ms: 380, similar: 0.86, unrelated: 0.34 };
+      const ready = embedding.model === "bge-m3" || localBgeM3;
+      return { model: "bge-m3", device: "cpu", dims: 1024, ms: 380, similar: 0.86, unrelated: 0.34, fallbackModel: "bge-m3", fallbackReady: ready, fallbackMatch: ready ? 0.993 : null };
     },
     useEmbedServer: async (model) => {
       await wait(500);

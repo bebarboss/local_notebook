@@ -86,8 +86,8 @@ impl Default for Settings {
             threshold: 0.3,
             chunk_size: 1000,
             chunk_overlap: 150,
-            // a local model, or "gateway:<model>" (Settings › Embedding)
-            embedding_model: "multilingual-e5-small".into(),
+            // "bge-m3" on this PC, or "server:<model>" / "gateway:<model>" (Settings › Embedding)
+            embedding_model: crate::embed::ModelId::BgeM3.as_str().into(),
             last_service_id: None,
             update_url: crate::updater::DEFAULT_UPDATE_URL.to_string(),
             auto_check_update: true,
@@ -123,8 +123,11 @@ impl Settings {
         self.chunk_size = self.chunk_size.clamp(300, 4000);
         self.chunk_overlap = self.chunk_overlap.min(self.chunk_size / 2);
         // v0.8.0 had no local models and could save an empty choice
+        // bge-m3 is the only local model since v0.12.0 (e5 indexes are redone once it is there)
         let m = self.embedding_model.trim();
-        if m.is_empty() || m == crate::gateway_embed::PREFIX || m == crate::embed_server::PREFIX {
+        let remote = (m.starts_with(crate::gateway_embed::PREFIX) && m != crate::gateway_embed::PREFIX)
+            || (m.starts_with(crate::embed_server::PREFIX) && m != crate::embed_server::PREFIX);
+        if !remote {
             self.embedding_model = Self::default().embedding_model;
         }
         if !matches!(self.font.as_str(), "looped" | "sarabun" | "plex" | "system") {
@@ -413,6 +416,18 @@ fn strip_jsonc(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bge_m3_is_the_only_local_model() {
+        let with = |m: &str| Settings { embedding_model: m.into(), ..Settings::default() }.sanitize().embedding_model;
+        assert_eq!(Settings::default().embedding_model, "bge-m3");
+        assert_eq!(with("multilingual-e5-small"), "bge-m3");
+        assert_eq!(with("multilingual-e5-base"), "bge-m3");
+        assert_eq!(with(""), "bge-m3");
+        assert_eq!(with("server:"), "bge-m3");
+        assert_eq!(with("server:bge-m3"), "server:bge-m3");
+        assert_eq!(with("gateway:text-embedding-3-small"), "gateway:text-embedding-3-small");
+    }
 
     #[test]
     fn defaults_match_guide() {
