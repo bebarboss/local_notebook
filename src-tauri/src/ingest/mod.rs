@@ -10,6 +10,7 @@ pub mod text;
 pub mod watcher;
 
 use crate::commands::AppState;
+use crate::embed::{Embedder, Source};
 use crate::errors::{AppError, AppResult};
 use crate::store::{NewChunk, NewImage, VectorStore};
 use chunker::{chunk, normalize, section_title, ChunkOptions};
@@ -43,11 +44,12 @@ static KEEP_IMAGES: AtomicBool = AtomicBool::new(true);
 /// How hard indexing may work the CPU (Settings › index_load).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Load {
-    /// OCR on 2 threads + a pause as long as each file took to read
+    /// one embedding inference at a time, OCR on 2 threads, and a pause as long as each
+    /// piece of work (measured, 18 mixed files on 8 threads: 16% of the CPU, 33 s vs 15 s normal)
     Light,
-    /// OCR on half the cores
+    /// half of the parallel inferences / cores
     Normal,
-    /// OCR on every core
+    /// everything but one core
     Fast,
 }
 
@@ -71,6 +73,15 @@ pub fn load_level() -> Load {
 }
 
 impl Load {
+    /// Parallel embedding inferences out of `all`.
+    pub fn embed_workers(self, all: usize) -> usize {
+        match self {
+            Load::Light => 1,
+            Load::Normal => all.div_ceil(2).max(1),
+            Load::Fast => all.max(1),
+        }
+    }
+
     /// Threads for OCR (fixed when the OCR models are loaded).
     pub fn ocr_threads(self, cores: usize) -> usize {
         match self {
@@ -420,8 +431,8 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
     let state = app.state::<AppState>();
     let svc = state.services.lock().get(service_id)?;
     let settings = state.settings.lock().clone();
-    let model = crate::embed::gateway_model(&settings.embedding_model)?;
-    let src_id = format!("{}{model}", crate::gateway_embed::PREFIX);
+    let src = Source::parse(&settings.embedding_model)?;
+    let src_id = src.id();
     let opts = ChunkOptions { size: settings.chunk_size, overlap: settings.chunk_overlap };
     let store = state.stores.get(service_id)?;
     let progress = |doc: Option<&Path>, done: usize, total: usize, dp: f32, phase: &'static str, msg: Option<String>| {
@@ -528,13 +539,16 @@ fn run_job(app: &AppHandle, service_id: &str, job_id: &str, full: bool, cancel: 
         return Ok(());
     }
 
-    if crate::secrets::get_key().ok().flatten().is_none() {
-        return Err(AppError::new("no_api_key", "ยังไม่ได้ใส่ API key ของ Gateway — เอกสารรอคิวไว้"));
+    if !Embedder::status_of(&src).ready {
+        return Err(match src {
+            Source::Local(_) => AppError::new("no_embedding_model", "ยังไม่มีโมเดล embedding — เอกสารรอคิวไว้ ไปที่ ตั้งค่า › Embedding และ Index"),
+            Source::Gateway(_) => AppError::new("no_api_key", "ยังไม่ได้ใส่ API key ของ Gateway — เอกสารรอคิวไว้"),
+        });
     }
 
     let store_ref: &Mutex<crate::store::SqliteStore> = &store;
     let t = std::time::Instant::now();
-    let finished = index_files(store_ref, &work, opts, cancel, &|texts| crate::embed::embed_passages(&model, texts), &progress)
+    let finished = index_files(store_ref, &work, opts, cancel, &|texts| state.embedder.embed_passages_from(&src, texts), &progress)
         .inspect_err(|e| crate::diag::log(format!("[{}] error: {}", svc.code, e.message)))?;
     crate::diag::log(format!("[{}] {} in {:.0?}", svc.code, if finished { "finished" } else { "cancelled" }, t.elapsed()));
     if finished {

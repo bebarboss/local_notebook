@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft, FolderOpen, Download } from "lucide-react";
 import { api } from "../lib/api";
-import type { UpdateInfo, AppInfo, DownloadProgress, EmbeddingStatus, EmbeddingTest, GatewayInfo, ModelConfig, RerankStatus, ThemeMode } from "../lib/types";
+import type { UpdateInfo, AppInfo, DownloadProgress, EmbeddingModelId, EmbeddingStatus, EmbeddingTest, GatewayInfo, ModelConfig, RerankStatus, ThemeMode } from "../lib/types";
 import { th } from "../i18n/th";
 import { formatBytes, useApp, type SettingsSection } from "../state";
 import { ApiKeyField, keyFormatError, ModelList, SecurityNotes, TestTable, useModelTest } from "../components/GatewayForms";
@@ -238,15 +238,77 @@ function ModelsSection() {
   );
 }
 
+const EMBED_MODELS: { id: EmbeddingModelId; label: string; size: string }[] = [
+  { id: "multilingual-e5-small", label: "multilingual-e5-small (int8) — ค่าเริ่มต้น เร็ว", size: "~120 MB" },
+  { id: "multilingual-e5-base", label: "multilingual-e5-base (int8) — แม่นขึ้น ช้ากว่า", size: "~280 MB" },
+  { id: "bge-m3", label: "bge-m3 (int8) — แม่นที่สุด ใช้ RAM มาก", size: "~570 MB" },
+];
+
 function EmbeddingSection() {
   const app = useApp();
   const [st, setSt] = useState<EmbeddingStatus | null>(null);
+  const onGateway = app.settings.embeddingModel.startsWith("gateway:");
+  const [model, setModel] = useState<EmbeddingModelId>(onGateway ? "multilingual-e5-small" : (app.settings.embeddingModel as EmbeddingModelId));
+  const [dl, setDl] = useState<DownloadProgress | null>(null);
   const [confirmReindex, setConfirmReindex] = useState(false);
-  useEffect(() => { api.embeddingStatus().then(setSt); }, []);
+  const load = () => api.embeddingStatus().then(setSt);
+  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const off = api.on("embed-download", (p) => {
+      if (p.model === RERANK_MODEL) return; // shown by RerankRow
+      setDl(p.done || p.error ? null : p);
+      if (p.error) app.toast(p.error);
+      if (p.done) { load(); app.toast("ดาวน์โหลดโมเดลเสร็จแล้ว"); }
+    });
+    return () => { off.then((f) => f()); };
+  }, [app]);
+  const changed = st && st.model !== model;
   return (
     <section>
       <h2>Embedding และ Index</h2>
       <div className="list-card">
+        <div className="list-row">
+          <div className="l">
+            <span className="t">โมเดลที่ใช้อยู่</span>
+            <span className="d">{st ? <>{st.model} · {st.ready ? <span className="ok-text">พร้อมใช้งาน</span> : <span style={{ color: "var(--warn-text)" }}>{st.model.startsWith("gateway:") ? "ยังไม่มี API key" : "ยังไม่มีไฟล์โมเดล — กดดาวน์โหลด"}</span>}{st.sizeBytes ? ` · ${formatBytes(st.sizeBytes)}` : ""}</> : "…"}</span>
+            {st?.path && <span className="d mono" style={{ wordBreak: "break-all" }}>{st.path}</span>}
+          </div>
+        </div>
+        <div className="list-row" style={{ alignItems: "flex-start" }}>
+          <div className="l" style={{ gap: 8 }}>
+            <span className="t" id="emb-label">โมเดลในเครื่อง (ค่าเริ่มต้น)</span>
+            <div role="radiogroup" aria-labelledby="emb-label" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {EMBED_MODELS.map((m) => (
+                <label key={m.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, minHeight: 32 }}>
+                  <input type="radio" name="emb" checked={model === m.id} onChange={() => setModel(m.id)} />
+                  <span>{m.label} <span className="muted">{m.size}</span></span>
+                </label>
+              ))}
+            </div>
+            {changed && <span className="d" style={{ color: "var(--warn-text)" }}>เปลี่ยนโมเดลแล้วต้อง index ใหม่ทุก service</span>}
+          </div>
+        </div>
+        <div className="list-row">
+          <div className="l">
+            <span className="t">(ก) ดาวน์โหลดจาก Hugging Face</span>
+            <span className="d">เก็บที่ %APPDATA%\DocAsk\models\ · ดาวน์โหลดครั้งเดียว</span>
+            {dl && <div style={{ marginTop: 6 }}><ProgressBar value={dl.total ? dl.downloaded / dl.total : 0} label="ดาวน์โหลดโมเดล" /><span className="d">{dl.file} · {formatBytes(dl.downloaded)}{dl.total ? ` / ${formatBytes(dl.total)}` : ""}</span></div>}
+          </div>
+          <button className="btn" disabled={!!dl} onClick={async () => {
+            try { await app.updateSettings({ embeddingModel: model }); await api.downloadEmbedding(model); } catch (e) { app.toast((e as { message: string }).message); }
+          }}><Download size={16} strokeWidth={1.8} aria-hidden="true" />ดาวน์โหลด</button>
+        </div>
+        <div className="list-row">
+          <div className="l">
+            <span className="t">(ข) เลือกโฟลเดอร์โมเดลที่ดาวน์โหลดไว้แล้ว</span>
+            <span className="d">สำหรับเครือข่ายที่บล็อก huggingface.co — โฟลเดอร์ต้องมี onnx/model_quantized.onnx (หรือ model.onnx) และ tokenizer.json</span>
+          </div>
+          <button className="btn" onClick={async () => {
+            const f = await api.pickFolder();
+            if (!f) return;
+            try { await app.updateSettings({ embeddingModel: model }); setSt(await api.useEmbeddingFolder(model, f)); app.toast("ใช้โมเดลจากโฟลเดอร์แล้ว"); } catch (e) { app.toast((e as { message: string }).message); }
+          }}><FolderOpen size={16} strokeWidth={1.8} aria-hidden="true" />เลือกโฟลเดอร์</button>
+        </div>
         <GatewayEmbeddingRow onChanged={setSt} />
         <IndexLoadRow />
         <OcrRow />
@@ -501,53 +563,56 @@ function GatewayEmbeddingRow({ onChanged }: { onChanged: (s: EmbeddingStatus) =>
   const [test, setTest] = useState<{ model: string; result?: EmbeddingTest; error?: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  const typed = name.trim();
 
   // the list comes from the Gateway by itself when this page opens
   useEffect(() => {
     let alive = true;
     api.gatewayEmbeddingModels()
-      .then((m) => { if (!alive) return; setModels(m); if (!current && m.includes("bge-m3")) setName("bge-m3"); })
+      .then((m) => { if (!alive) return; setModels(m); if (!current && m.length) setName(m.includes("bge-m3") ? "bge-m3" : m[0]); })
       .catch((e) => alive && setListError((e as { message: string }).message));
     return () => { alive = false; };
   }, [current]);
 
-  // and every picked model is tried right away
+  // a picked / typed model is tried once typing stops
   useEffect(() => {
-    if (!name) return;
+    if (!typed) { setTest(null); return; }
     let alive = true;
-    setTest({ model: name });
-    api.testGatewayEmbedding(name)
-      .then((r) => alive && setTest({ model: name, result: r }))
-      .catch((e) => alive && setTest({ model: name, error: (e as { message: string }).message }));
-    return () => { alive = false; };
-  }, [name]);
+    const t = setTimeout(() => {
+      setTest({ model: typed });
+      api.testGatewayEmbedding(typed)
+        .then((r) => alive && setTest({ model: typed, result: r }))
+        .catch((e) => alive && setTest({ model: typed, error: (e as { message: string }).message }));
+    }, 700);
+    return () => { alive = false; clearTimeout(t); };
+  }, [typed]);
 
-  const options = models ? Array.from(new Set([...(current ? [current] : []), ...models])) : current ? [current] : [];
-  const r = test?.model === name ? test.result : undefined;
+  const r = test?.model === typed ? test.result : undefined;
   return (
     <div className="list-row" style={{ alignItems: "flex-start" }}>
       <div className="l" style={{ gap: 6 }}>
-        <span className="t" id="gw-embed-label">โมเดล embedding บน Gateway</span>
+        <span className="t" id="gw-embed-label">หรือใช้โมเดล embedding บน Gateway</span>
         <span className="d">
-          เครื่องไม่ต้องคำนวณ embedding · ข้อความทุกท่อนของเอกสารถูกส่งไป Gateway ตอนทำ index (และคำถามตอนค้นหา) ·
-          ใช้ API key เดียวกับแชต · ต้องต่อ VPN · เปลี่ยนโมเดลแล้วต้อง index ใหม่ทั้งหมด
+          เครื่องไม่ต้องคำนวณ embedding · แต่ข้อความทุกท่อนของเอกสารถูกส่งไป Gateway ตอนทำ index (และคำถามตอนค้นหา) ·
+          ใช้ API key เดียวกับแชต · ต้องต่อ VPN · เปลี่ยนแล้วต้อง index ใหม่ทั้งหมด
         </span>
-        {models === null && !listError && <span className="d">กำลังดึงรายชื่อโมเดลจาก Gateway…</span>}
+        {models === null && !listError && <span className="d">กำลังดูรายชื่อโมเดลบน Gateway…</span>}
         {listError && <span className="d" style={{ color: "var(--warn-text)" }}>ดึงรายชื่อไม่ได้: {listError}</span>}
-        {models?.length === 0 && <span className="d" style={{ color: "var(--warn-text)" }}>Gateway ยังไม่มีโมเดล embedding ที่ key นี้ใช้ได้ — ติดต่อแอดมิน Gateway</span>}
-        {options.length > 0 && (
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-            <select className="input" aria-labelledby="gw-embed-label" value={name} onChange={(e) => setName(e.target.value)} style={{ width: 260 }}>
-              {!name && <option value="">เลือกโมเดล…</option>}
-              {options.map((m) => <option key={m} value={m}>{m}{m === current ? " (ใช้อยู่)" : ""}</option>)}
-            </select>
-            <button className="btn btn-primary" disabled={busy || !r || name === current} onClick={() => setConfirm(true)}>
-              {busy ? "กำลังเปลี่ยน…" : "ใช้โมเดลนี้"}
-            </button>
-          </div>
+        {models?.length === 0 && (
+          <span className="d" style={{ color: "var(--warn-text)" }}>
+            key นี้ยังไม่มีโมเดล embedding บน Gateway — ใช้โมเดลในเครื่องไปก่อน · ถ้าแอดมินเปิดให้แล้ว พิมพ์ชื่อโมเดลด้านล่างได้
+          </span>
         )}
-        {test?.model === name && !test.result && !test.error && <span className="d">กำลังทดสอบ {name}…</span>}
-        {test?.model === name && test.error && <span className="d" style={{ color: "var(--danger-text, var(--warn-text))" }}>ใช้ไม่ได้: {test.error}</span>}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <input className="input" list="gw-embed-models" aria-labelledby="gw-embed-label" placeholder="ชื่อโมเดล เช่น bge-m3"
+            value={name} onChange={(e) => setName(e.target.value)} style={{ width: 260 }} />
+          <datalist id="gw-embed-models">{(models ?? []).map((m) => <option key={m} value={m} />)}</datalist>
+          <button className="btn btn-primary" disabled={busy || !r || typed === current} onClick={() => setConfirm(true)}>
+            {busy ? "กำลังเปลี่ยน…" : "ใช้โมเดลนี้"}
+          </button>
+        </div>
+        {test?.model === typed && !test.result && !test.error && <span className="d">กำลังทดสอบ {typed}…</span>}
+        {test?.model === typed && test.error && <span className="d" style={{ color: "var(--warn-text)" }}>ใช้ไม่ได้: {test.error}</span>}
         {r && (
           <span className="d">
             <span className="ok-text">ใช้ได้</span> · {r.dims} มิติ · {r.ms} ms ·
@@ -555,9 +620,10 @@ function GatewayEmbeddingRow({ onChanged }: { onChanged: (s: EmbeddingStatus) =>
             {r.similar - r.unrelated < 0.1 && <span style={{ color: "var(--warn-text)" }}> · แยกความหมายภาษาไทยได้ไม่ดี</span>}
           </span>
         )}
+        {current && <span className="d">กำลังใช้ <span className="mono">{current}</span> บน Gateway · จะกลับไปใช้โมเดลในเครื่อง กดดาวน์โหลดหรือเลือกโฟลเดอร์ด้านบน</span>}
       </div>
       {confirm && (
-        <ConfirmDialog title={`ใช้ ${name} บน Gateway?`}
+        <ConfirmDialog title={`ใช้ ${typed} บน Gateway?`}
           body="ข้อความทุกท่อนของทุก service จะถูกส่งไป Gateway เพื่อทำ embedding ใหม่ทั้งหมด (vector เดิมใช้ต่อไม่ได้) · ถ้าเน็ตหรือ Gateway ล่ม จะค้นเอกสารไม่ได้"
           confirmLabel="เปลี่ยนและ index ใหม่"
           onCancel={() => setConfirm(false)}
@@ -565,10 +631,10 @@ function GatewayEmbeddingRow({ onChanged }: { onChanged: (s: EmbeddingStatus) =>
             setConfirm(false);
             setBusy(true);
             try {
-              const st = await api.useGatewayEmbedding(name);
-              await app.updateSettings({ embeddingModel: `gateway:${name}` });
+              const st = await api.useGatewayEmbedding(typed);
+              await app.updateSettings({ embeddingModel: `gateway:${typed}` });
               onChanged(st);
-              app.toast(`เปลี่ยนเป็น ${name} แล้ว — เริ่ม index ใหม่ทุก service`);
+              app.toast(`เปลี่ยนเป็น ${typed} แล้ว — เริ่ม index ใหม่ทุก service`);
             } catch (e) {
               app.toast((e as { message: string }).message);
             } finally {
@@ -581,7 +647,7 @@ function GatewayEmbeddingRow({ onChanged }: { onChanged: (s: EmbeddingStatus) =>
 }
 
 const LOADS = [
-  { v: "light", l: "เบา", toast: "ทำ index แบบเบา — OCR ช้าลงแต่เครื่องไม่หนัก (มีผลหลังเปิดแอปใหม่)" },
+  { v: "light", l: "เบา", toast: "ทำ index แบบเบา — ช้าลงแต่เครื่องไม่หนัก" },
   { v: "normal", l: "ปกติ", toast: "ทำ index แบบปกติ" },
   { v: "fast", l: "เร็ว", toast: "ทำ index เต็มกำลัง" },
 ] as const;
@@ -593,8 +659,8 @@ function IndexLoadRow() {
       <div className="l">
         <span className="t">ความแรงตอนทำ index</span>
         <span className="d">
-          ส่วนที่ยังทำในเครื่องคืออ่านไฟล์และ OCR · เบา: OCR 2 threads และพักเป็นช่วงๆ · ปกติ: ครึ่งเครื่อง (แนะนำ) · เร็ว: เต็มที่ ·
-          ทุกระดับให้โปรแกรมอื่นได้ CPU ก่อน · มีผลกับ OCR หลังเปิดแอปใหม่
+          เบา: ใช้ CPU ราว 15% และพักเป็นช่วงๆ ช้ากว่าปกติประมาณ 2 เท่า · ปกติ: ราวครึ่งเครื่อง (แนะนำ) ·
+          เร็ว: เต็มที่ เร็วขึ้นเฉพาะเครื่องที่มีหลาย core · ทุกระดับให้โปรแกรมอื่นได้ CPU ก่อน · OCR เปลี่ยนตามหลังเปิดแอปใหม่
         </span>
       </div>
       <div className="segmented" role="radiogroup" aria-label="ความแรงตอนทำ index">

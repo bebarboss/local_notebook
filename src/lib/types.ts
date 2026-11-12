@@ -157,8 +157,8 @@ export interface Settings {
   threshold: number;
   chunkSize: number;
   chunkOverlap: number;
-  /** "gateway:<model>" — the embedding model on the Gateway; "" until one is chosen */
-  embeddingModel: string;
+  /** a local model id, or "gateway:<model>" for an embedding model on the Gateway */
+  embeddingModel: EmbeddingModelId | `gateway:${string}`;
   lastServiceId: string | null;
   /** latest.json URL for in-app updates; empty = updates off */
   updateUrl: string;
@@ -183,11 +183,14 @@ export interface EmbeddingTest {
   unrelated: number;
 }
 
+export type EmbeddingModelId = "multilingual-e5-small" | "multilingual-e5-base" | "bge-m3";
+
 export interface EmbeddingStatus {
-  /** "gateway:<model>", or "" when none is chosen yet */
+  /** local model id, or "gateway:<model>" */
   model: string;
-  /** a model is chosen and the API key is saved */
   ready: boolean;
+  path: string | null;
+  sizeBytes: number | null;
 }
 
 export interface DownloadProgress {

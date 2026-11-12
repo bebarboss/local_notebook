@@ -32,10 +32,13 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, app.settings.setupDone]);
 
-  // no embedding model chosen on the Gateway yet → documents cannot be indexed
+  // first run: the embedding model is not bundled — ask the user to download or pick a folder
   useEffect(() => {
     if (!ready || page.name === "setup") return;
-    api.embeddingStatus().then((s) => setNeedEmbedding(!s.model)).catch(() => {});
+    const check = () => api.embeddingStatus().then((s) => setNeedEmbedding(!s.ready)).catch(() => {});
+    check();
+    const off = api.on("embed-download", (p) => { if (p.done) check(); });
+    return () => { off.then((f) => f()); };
   }, [ready, page.name, app.settings.embeddingModel]);
 
   if (loadError) {
@@ -81,7 +84,7 @@ export default function App() {
       )}
       {needEmbedding && !(page.name === "settings" && page.section === "embedding") && (
         <div className="banner warn" role="status">
-          <span>ยังไม่ได้เลือกโมเดล embedding บน Gateway — ต้องเลือกก่อน จึงจะ index และค้นเอกสารได้</span>
+          <span>ยังไม่มีโมเดล embedding — ดาวน์โหลดโมเดลในเครื่อง (ครั้งเดียว ~120 MB) ก่อน จึงจะ index และค้นเอกสารได้</span>
           <button className="btn" onClick={() => app.go({ name: "settings", section: "embedding" })}>ตั้งค่า Embedding</button>
         </div>
       )}

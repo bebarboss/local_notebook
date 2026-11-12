@@ -46,7 +46,7 @@ export const DEFAULT_SETTINGS: Settings = {
   threshold: 0.3,
   chunkSize: 1000,
   chunkOverlap: 150,
-  embeddingModel: "",
+  embeddingModel: "multilingual-e5-small",
   lastServiceId: null,
   updateUrl: "",
   autoCheckUpdate: true,

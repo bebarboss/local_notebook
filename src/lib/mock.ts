@@ -96,7 +96,7 @@ export function createMockBackend(): Backend {
 
   let settings: Settings = {
     theme: "system", userName: "navaritrod", setupDone: false, historyTurns: 6, autoDeleteDays: 0,
-    topK: 5, threshold: 0.3, chunkSize: 1000, chunkOverlap: 150, embeddingModel: "gateway:bge-m3", lastServiceId: "hr",
+    topK: 5, threshold: 0.3, chunkSize: 1000, chunkOverlap: 150, embeddingModel: "multilingual-e5-small", lastServiceId: "hr",
     updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true, rerank: true, hybrid: true, indexLoad: "normal",
   };
   try {
@@ -113,7 +113,7 @@ export function createMockBackend(): Backend {
   };
   let models: ModelConfig[] = defaultModels(gateway.url).map((m) => (m.id === "gothink3" ? { ...m, hidden: true } : m));
   let status: GatewayStatus = { state: "ok", message: null, checkedAt: now() };
-  let embedding: EmbeddingStatus = { model: "gateway:bge-m3", ready: true };
+  let embedding: EmbeddingStatus = { model: "multilingual-e5-small", ready: true, path: "%APPDATA%\\DocAsk\\models\\multilingual-e5-small", sizeBytes: 118e6 };
   const streams = new Map<string, { stopped: boolean }>();
   let updateAvailable = false;
   let reranker: RerankStatus & { model: "mmarco-mMiniLMv2-L12" } = { model: "mmarco-mMiniLMv2-L12", ready: false, path: "%APPDATA%\\DocAsk\\models\\mmarco-mMiniLMv2-L12", sizeBytes: null };
@@ -342,7 +342,19 @@ export function createMockBackend(): Backend {
     stop: async (rid) => { const s = streams.get(rid); if (s) s.stopped = true; },
     openSource: async () => {},
     embeddingStatus: async () => clone(embedding),
-    gatewayEmbeddingModels: async () => { await wait(400); return ["bge-m3", "text-embedding-3-small"]; },
+    downloadEmbedding: async (model) => {
+      embedding = { ...embedding, model, ready: false };
+      const total = 118_000_000;
+      for (let d = 0; d <= total; d += total / 20) {
+        await wait(120);
+        emit("embed-download", { model, file: "onnx/model_quantized.onnx", downloaded: d, total, done: false, error: null });
+      }
+      embedding = { model, ready: true, path: `%APPDATA%\\DocAsk\\models\\${model}`, sizeBytes: total };
+      emit("embed-download", { model, file: "", downloaded: total, total, done: true, error: null });
+    },
+    useEmbeddingFolder: async (model, folder) => { embedding = { model, ready: true, path: folder, sizeBytes: null }; return clone(embedding); },
+    // like this company's Gateway today: no embedding model for the key
+    gatewayEmbeddingModels: async () => { await wait(400); return []; },
     testGatewayEmbedding: async (model) => {
       await wait(500);
       if (!model.trim()) throw { code: "invalid", message: "ใส่ชื่อโมเดลก่อน" };
@@ -351,7 +363,7 @@ export function createMockBackend(): Backend {
     useGatewayEmbedding: async (model) => {
       await wait(500);
       settings = { ...settings, embeddingModel: `gateway:${model}` };
-      embedding = { model: `gateway:${model}`, ready: true };
+      embedding = { model: `gateway:${model}`, ready: true, path: null, sizeBytes: null };
       return clone(embedding);
     },
     reindexAll: async () => {},

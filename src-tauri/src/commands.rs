@@ -3,7 +3,7 @@
 
 use crate::chats::{ChatDb, Chat, Message, NewMessage, SourceRef};
 use crate::config::{self, GatewayConfig, GatewayInfo, ModelConfig, Settings};
-use crate::embed::{DownloadProgress, EmbeddingStatus};
+use crate::embed::{self, DownloadProgress, Embedder, EmbeddingStatus, ModelId, Source};
 use crate::errors::{AppError, AppResult};
 use crate::gateway_test::{self, TestResult};
 use crate::ingest::watcher::Watchers;
@@ -30,6 +30,7 @@ pub struct GatewayStatus {
 }
 
 pub struct AppState {
+    pub embedder: Arc<Embedder>,
     pub settings: Mutex<Settings>,
     pub gateway: Mutex<GatewayConfig>,
     pub models: Mutex<Vec<ModelConfig>>,
@@ -53,6 +54,7 @@ impl AppState {
         let _ = chats.purge_older_than(settings.auto_delete_days);
         let indexer = Arc::new(IndexManager::default());
         Ok(Self {
+            embedder: Arc::new(Embedder::default()),
             settings: Mutex::new(settings),
             gateway: Mutex::new(gateway),
             models: Mutex::new(models),
@@ -67,8 +69,8 @@ impl AppState {
         })
     }
 
-    fn embedding_setting(&self) -> String {
-        self.settings.lock().embedding_model.clone()
+    fn embedding_source(&self) -> AppResult<Source> {
+        Source::parse(&self.settings.lock().embedding_model)
     }
 }
 
@@ -706,11 +708,14 @@ impl AskJob {
 /// Embed the question locally and search the service's index (or all services).
 async fn retrieve(app: &AppHandle, svc: &Service, all: bool, question: &str) -> AppResult<Vec<SourceRef>> {
     let state = app.state::<AppState>();
-    let model = crate::embed::gateway_model(&state.embedding_setting())?;
-    // Gateway models spread cosine scores lower than the old local e5 (OpenAI: unrelated ≈ 0.1,
-    // related ≈ 0.3–0.5) — keep a cut-off tuned for e5 from hiding good passages; top-k limits
-    let threshold = state.settings.lock().threshold.min(0.15);
-    let qv = crate::embed::embed_query(&model, question).await?;
+    let src = state.embedding_source()?;
+    let mut threshold = state.settings.lock().threshold;
+    if matches!(src, Source::Gateway(_)) {
+        // other models spread cosine scores lower than e5 (OpenAI: unrelated ≈ 0.1, related
+        // ≈ 0.3–0.5) — keep the cut-off from hiding good passages; top-k still limits
+        threshold = threshold.min(0.15);
+    }
+    let qv = state.embedder.clone().embed_query_from(src, question.to_string()).await?;
 
     let targets: Vec<Service> = if all { state.services.lock().list() } else { vec![svc.clone()] };
     let k = svc.top_k as usize;
@@ -823,8 +828,8 @@ pub fn open_source_file(path: String) -> AppResult<()> {
 // ------------------------------------------------------------------ embedding
 
 #[tauri::command]
-pub fn embedding_status(state: S<'_>) -> EmbeddingStatus {
-    crate::embed::status(&state.embedding_setting())
+pub fn embedding_status(state: S<'_>) -> AppResult<EmbeddingStatus> {
+    Ok(Embedder::status_of(&state.embedding_source()?))
 }
 
 /// Embedding models offered by the Gateway.
@@ -865,10 +870,47 @@ pub async fn use_gateway_embedding(app: AppHandle, model: String) -> AppResult<E
         cur.clone()
     };
     s.save()?;
+    state.embedder.unload();
     for svc in state.services.lock().list() {
         state.indexer.start(app.clone(), svc.id, false);
     }
-    Ok(crate::embed::status(&state.embedding_setting()))
+    Ok(Embedder::status_of(&state.embedding_source()?))
+}
+
+#[tauri::command]
+pub async fn download_embedding(app: AppHandle, model: String) -> AppResult<()> {
+    let id = ModelId::parse(&model)?;
+    let a = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let res = embed::download(id, |p: DownloadProgress| {
+            let _ = a.emit("embed-download", p);
+        })
+        .await;
+        match res {
+            Ok(_) => {
+                let st = a.state::<AppState>();
+                st.embedder.unload();
+                // documents waiting for a model can now be indexed
+                for s in st.services.lock().list() {
+                    st.indexer.start(a.clone(), s.id, false);
+                }
+            }
+            Err(e) => {
+                let _ = a.emit("embed-download", DownloadProgress { model: id.as_str().into(), file: String::new(), downloaded: 0, total: None, done: false, error: Some(e.message) });
+            }
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn use_embedding_folder(app: AppHandle, state: S<'_>, model: String, folder: String) -> AppResult<EmbeddingStatus> {
+    let id = ModelId::parse(&model)?;
+    let st = state.embedder.use_folder(id, Path::new(&folder))?;
+    for s in state.services.lock().list() {
+        state.indexer.start(app.clone(), s.id, false);
+    }
+    Ok(st)
 }
 
 // ------------------------------------------------------------------ reranker
@@ -920,6 +962,7 @@ pub fn wipe_all_data(state: S<'_>) -> AppResult<()> {
     state.indexer.cancel_all();
     state.watchers.clear();
     state.stores.close_all();
+    state.embedder.unload();
     state.reranker.unload();
     for t in state.streams.lock().values() {
         t.cancel();

@@ -80,8 +80,8 @@ impl Default for Settings {
             threshold: 0.3,
             chunk_size: 1000,
             chunk_overlap: 150,
-            // "gateway:<model>" — chosen in Settings › Embedding (from the Gateway's list)
-            embedding_model: String::new(),
+            // a local model, or "gateway:<model>" (Settings › Embedding)
+            embedding_model: "multilingual-e5-small".into(),
             last_service_id: None,
             update_url: crate::updater::DEFAULT_UPDATE_URL.to_string(),
             auto_check_update: true,
@@ -99,7 +99,7 @@ impl Settings {
         data_dir().join("settings.json")
     }
     pub fn load() -> Settings {
-        read_json(&Self::path()).ok().flatten().unwrap_or_default()
+        read_json::<Settings>(&Self::path()).ok().flatten().unwrap_or_default().sanitize()
     }
     pub fn save(&self) -> AppResult<()> {
         write_json(&Self::path(), self)
@@ -113,6 +113,10 @@ impl Settings {
         self.threshold = self.threshold.clamp(0.0, 1.0);
         self.chunk_size = self.chunk_size.clamp(300, 4000);
         self.chunk_overlap = self.chunk_overlap.min(self.chunk_size / 2);
+        // v0.8.0 had no local models and could save an empty choice
+        if self.embedding_model.trim().is_empty() || self.embedding_model.trim() == crate::gateway_embed::PREFIX {
+            self.embedding_model = Self::default().embedding_model;
+        }
         if !matches!(self.index_load.as_str(), "light" | "normal" | "fast") {
             self.index_load = "normal".into();
         }
