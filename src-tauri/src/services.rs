@@ -160,6 +160,24 @@ impl ServiceRegistry {
         Ok(s)
     }
 
+    /// A service from the team database: added with the same id (no folders on this PC).
+    /// Returns false when this PC already has it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn adopt(&mut self, id: &str, name: &str, code: &str, color: &str, model: &str, effort: &str, top_k: u32, system_prompt: &str) -> AppResult<bool> {
+        if id.is_empty() || self.items.iter().any(|s| s.id == id) {
+            return Ok(false);
+        }
+        let (name, code, color, effort) = validate(name, code, color, if effort.is_empty() { "medium" } else { effort })?;
+        let now = now_ms();
+        self.items.push(Service {
+            id: id.to_string(), name, code, color, folders: vec![], files: vec![], excluded: vec![],
+            model: model.to_string(), effort, top_k: top_k.clamp(1, 30), system_prompt: system_prompt.to_string(),
+            knowledge_dir: String::new(), created_at: now, updated_at: now,
+        });
+        self.save()?;
+        Ok(true)
+    }
+
     pub fn update(&mut self, s: Service) -> AppResult<Service> {
         let (name, code, color, effort) = validate(&s.name, &s.code, &s.color, &s.effort)?;
         let cur = self.items.iter_mut().find(|x| x.id == s.id).ok_or_else(|| AppError::new("not_found", "ไม่พบ service นี้"))?;

@@ -189,6 +189,13 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// (page, ord, text, vector) of one document, in order — what the team sync uploads.
+    pub fn export_chunks(&self, doc_id: i64) -> AppResult<Vec<(Option<u32>, i64, String, Vec<f32>)>> {
+        let mut st = self.conn.prepare("SELECT page, ord, text, embedding FROM chunks WHERE doc_id=?1 ORDER BY ord, id")?;
+        let rows = st.query_map([doc_id], |r| Ok((r.get::<_, Option<u32>>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, from_blob(&r.get::<_, Vec<u8>>(3)?))))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn get_chunk(&self, chunk_id: i64) -> AppResult<Option<Hit>> {
         Ok(self
             .conn

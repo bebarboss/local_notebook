@@ -97,7 +97,7 @@ export function createMockBackend(): Backend {
 
   let settings: Settings = {
     theme: "system", userName: "navaritrod", setupDone: false, historyTurns: 6, autoDeleteDays: 0,
-    topK: 5, threshold: 0.3, chunkSize: 1000, chunkOverlap: 150, embeddingModel: "bge-m3", lastServiceId: "hr",
+    topK: 5, threshold: 0.3, chunkSize: 1000, chunkOverlap: 150, embeddingModel: "bge-m3", teamServer: false, lastServiceId: "hr",
     updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true, rerank: true, hybrid: true, indexLoad: "normal", font: "looped", textSize: "m", startHidden: true,
   };
   try {
@@ -115,6 +115,7 @@ export function createMockBackend(): Backend {
   let models: ModelConfig[] = defaultModels(gateway.url).map((m) => (m.id === "gothink3" ? { ...m, hidden: true } : m));
   let status: GatewayStatus = { state: "ok", message: null, checkedAt: now() };
   let localBgeM3 = false;
+  let pendingLink: { url: string; token: string } | null = null;
   let embedServer = { url: "", hasToken: false, tokenLast4: null as string | null, builtin: false, tokenLocked: false };
   let embedding: EmbeddingStatus = { model: "bge-m3", ready: true, path: "%APPDATA%\\DocAsk\\models\\bge-m3", sizeBytes: 568e6 };
   const streams = new Map<string, { stopped: boolean }>();
@@ -436,6 +437,40 @@ export function createMockBackend(): Backend {
       embedServer = { url: "", hasToken: false, tokenLast4: null, builtin: false, tokenLocked: false };
       return clone(embedServer);
     },
+    teamStatus: async () => ({
+      enabled: settings.teamServer,
+      info: embedServer.hasToken ? { model: "bge-m3", dim: 1024, documents: 136, chunks: 1840, chats: 12 } : null,
+      error: embedServer.hasToken ? null : "ยังไม่ได้ใส่ token ของเซิร์ฟเวอร์ embedding",
+      machine: "DESKTOP-MOCK",
+    }),
+    setTeamServer: async (enabled) => {
+      await wait(500);
+      if (enabled && !embedServer.hasToken) throw { code: "no_key", message: "ยังไม่ได้ใส่ token ของเซิร์ฟเวอร์ embedding" };
+      settings = { ...settings, teamServer: enabled };
+      if (enabled) setTimeout(() => services.forEach((s, i) => emit("team-sync", { serviceId: s.id, uploaded: i === 0 ? 3 : 0, deleted: 0, unchanged: 4, error: null })), 800);
+      return { enabled, info: { model: "bge-m3", dim: 1024, documents: 136, chunks: 1840, chats: 12 }, error: null, machine: "DESKTOP-MOCK" };
+    },
+    teamSyncNow: async () => { setTimeout(() => emit("team-sync", { serviceId: services[0].id, uploaded: 1, deleted: 0, unchanged: 6, error: null }), 600); },
+    connectPending: async () => null,
+    connectPaste: async (link) => {
+      const m = /^docask:\/\/connect\/?\?(.*)$/.exec(link.trim());
+      const p = new URLSearchParams(m?.[1] ?? "");
+      const url = p.get("url") ?? "";
+      if (!m || !url.startsWith("https://") || (p.get("token") ?? "").length < 16) throw { code: "invalid_link", message: "ลิงก์ตั้งค่าไม่ถูกต้อง — ขอลิงก์ใหม่จากผู้ดูแลเซิร์ฟเวอร์" };
+      const info = { host: new URL(url).host, url };
+      pendingLink = { url, token: p.get("token")! };
+      emit("connect-link", info);
+      return info;
+    },
+    connectApply: async () => {
+      await wait(800);
+      if (!pendingLink) throw { code: "invalid", message: "ไม่มีลิงก์ที่รอเชื่อมต่อ — กดลิงก์อีกครั้ง" };
+      embedServer = { ...embedServer, url: pendingLink.url, hasToken: true, tokenLast4: pendingLink.token.slice(-4) };
+      pendingLink = null;
+      settings = { ...settings, embeddingModel: "server:bge-m3", teamServer: true };
+      return { team: { enabled: true, info: { model: "bge-m3", dim: 1024, documents: 136, chunks: 1840, chats: 12 }, error: null, machine: "DESKTOP-MOCK" }, teamError: null };
+    },
+    connectDiscard: async () => { pendingLink = null; },
     reindexAll: async () => {},
     wipeAllData: async () => { try { localStorage.removeItem("docask-mock-settings"); } catch { /* ignore */ } location.reload(); },
     ocrStatus: async () => ({ available: true, enabled: settings.ocrEnabled }),

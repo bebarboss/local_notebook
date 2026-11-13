@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft, FolderOpen, Download } from "lucide-react";
 import { api } from "../lib/api";
-import type { UpdateInfo, AppInfo, DownloadProgress, EmbeddingModelId, EmbeddingStatus, EmbedServerInfo, EmbedServerTest, GatewayInfo, ModelConfig, RerankStatus, ThemeMode, FontChoice, TextSize } from "../lib/types";
+import type { UpdateInfo, AppInfo, DownloadProgress, EmbeddingModelId, EmbeddingStatus, EmbedServerInfo, EmbedServerTest, TeamStatus, GatewayInfo, ModelConfig, RerankStatus, ThemeMode, FontChoice, TextSize } from "../lib/types";
 import { th } from "../i18n/th";
 import { formatBytes, useApp, type SettingsSection } from "../state";
 import { ApiKeyField, keyFormatError, ModelList, SecurityNotes, TestTable, useModelTest } from "../components/GatewayForms";
@@ -367,6 +367,7 @@ function EmbeddingSection() {
           }}><FolderOpen size={16} strokeWidth={1.8} aria-hidden="true" />เลือกโฟลเดอร์</button>
         </div>
         <EmbedServerRow onChanged={setSt} />
+        <TeamRow />
         <IndexLoadRow />
         <OcrRow />
         <KeepImagesRow />
@@ -650,6 +651,88 @@ function FallbackLine({ r, onDownloaded }: { r: EmbedServerTest; onDownloaded: (
       สำรองในเครื่อง: <span className="ok-text">{r.fallbackModel} พร้อม</span> · ถ้าเซิร์ฟเวอร์ล่ม คำถามจะคำนวณในเครื่องแทน (ทำ index ใหม่ต้องรอเซิร์ฟเวอร์)
       {m !== null && <> · ผลตรงกับเซิร์ฟเวอร์ {m.toFixed(3)}{m < 0.95 && <span style={{ color: "var(--warn-text)" }}> · ต่างกันมาก ผลค้นตอนสำรองอาจไม่ดี</span>}</>}
     </span>
+  );
+}
+
+/** For when clicking a docask:// link did not open DocAsk: paste it here instead. */
+function PasteLink() {
+  const [link, setLink] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <label className="sr-only" htmlFor="connect-link">ลิงก์ตั้งค่าจากผู้ดูแลเซิร์ฟเวอร์</label>
+        <input id="connect-link" className="input mono" type="password" autoComplete="off" spellCheck={false} style={{ width: 360 }}
+          placeholder="วางลิงก์ตั้งค่า docask://connect?… (ถ้ากดลิงก์แล้วไม่เปิดแอป)" value={link} onChange={(e) => setLink(e.target.value)} />
+        <button className="btn" disabled={!link.trim()} onClick={async () => {
+          setError(null);
+          try { await api.connectPaste(link.trim()); setLink(""); } catch (e) { setError((e as { message: string }).message); }
+        }}>ใช้ลิงก์</button>
+      </div>
+      {error && <span className="d" style={{ color: "var(--warn-text)" }} role="alert">{error}</span>}
+    </div>
+  );
+}
+
+/** "ใช้ฐานข้อมูลของทีมบน server": search the server's database, sync local indexes up */
+function TeamRow() {
+  const app = useApp();
+  const [st, setSt] = useState<TeamStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const load = () => api.teamStatus().then(setSt).catch(() => {});
+  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const off = api.on("team-sync", (r) => {
+      const name = app.services.find((s) => s.id === r.serviceId)?.name ?? r.serviceId;
+      if (r.error) app.toast(`ซิงก์ ${name} ไม่สำเร็จ: ${r.error}`);
+      else if (r.uploaded || r.deleted) app.toast(`ซิงก์ ${name} ขึ้น server แล้ว · ส่ง ${r.uploaded} ไฟล์${r.deleted ? ` · ลบ ${r.deleted}` : ""}`);
+      load();
+    });
+    return () => { off.then((f) => f()); };
+  }, [app]);
+
+  const on = app.settings.teamServer;
+  const toggle = async (v: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      setSt(await api.setTeamServer(v));
+      await app.updateSettings({ teamServer: v });
+      await app.refreshServices();
+      app.toast(v ? "เปิดใช้ฐานข้อมูลของทีมแล้ว · กำลังซิงก์ index ขึ้น server" : "ปิดฐานข้อมูลของทีมแล้ว · ค้นจาก index ในเครื่อง");
+    } catch (e) {
+      setError((e as { message: string }).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="list-row" style={{ alignItems: "flex-start" }}>
+      <div className="l" style={{ gap: 6 }}>
+        <span className="t">ใช้ฐานข้อมูลของทีมบน server</span>
+        <span className="d">
+          ค้นเอกสารจากฐานข้อมูลบนเซิร์ฟเวอร์ (ใช้ร่วมกันทั้งทีม — เครื่องที่ไม่มีไฟล์ก็ถามได้) · เครื่องที่มีไฟล์ทำ index ตามปกติแล้วส่งขึ้นให้เอง ·
+          ใช้ URL + token เดียวกับเซิร์ฟเวอร์ embedding ด้านบน · ถ้า server ล่ม เครื่องที่มี index จะค้นในเครื่องแทน
+        </span>
+        {st?.info && (
+          <span className="d">
+            บน server: <span className="mono">{st.info.documents.toLocaleString()}</span> เอกสาร ·{" "}
+            <span className="mono">{st.info.chunks.toLocaleString()}</span> ท่อน · โมเดล {st.info.model} · เครื่องนี้ชื่อ <span className="mono">{st.machine}</span>
+          </span>
+        )}
+        {!st?.info && st?.error && <span className="d" style={{ color: "var(--warn-text)" }}>ยังต่อฐานข้อมูลไม่ได้: {st.error}</span>}
+        {error && <span className="d" style={{ color: "var(--warn-text)" }} role="alert">{error}</span>}
+        {on && (
+          <button className="btn" style={{ alignSelf: "flex-start" }} disabled={busy} onClick={async () => {
+            try { await api.teamSyncNow(); app.toast("กำลังซิงก์ทุก service ขึ้น server…"); } catch (e) { app.toast((e as { message: string }).message); }
+          }}>ซิงก์ตอนนี้</button>
+        )}
+        <PasteLink />
+      </div>
+      <Switch checked={on} disabled={busy || (!on && !st?.info)} label="ใช้ฐานข้อมูลของทีมบน server" onChange={toggle} />
+    </div>
   );
 }
 

@@ -47,6 +47,7 @@ export const DEFAULT_SETTINGS: Settings = {
   chunkSize: 1000,
   chunkOverlap: 150,
   embeddingModel: "bge-m3",
+  teamServer: false,
   lastServiceId: null,
   updateUrl: "",
   autoCheckUpdate: true,

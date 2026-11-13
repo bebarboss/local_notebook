@@ -182,6 +182,8 @@ export interface Settings {
   chunkOverlap: number;
   /** a local model id, or "gateway:<model>" for an embedding model on the Gateway */
   embeddingModel: EmbeddingModelId | `gateway:${string}` | `server:${string}`;
+  /** search the team database on the server; local indexes sync up */
+  teamServer: boolean;
   lastServiceId: string | null;
   /** latest.json URL for in-app updates; empty = updates off */
   updateUrl: string;
@@ -243,6 +245,42 @@ export interface EmbedServerTest extends EmbeddingTest {
   fallbackReady: boolean;
   /** cosine of server vs local vector for one question (≈ 1: interchangeable) */
   fallbackMatch: number | null;
+}
+
+export interface TeamStoreInfo {
+  model: string;
+  dim: number;
+  documents: number;
+  chunks: number;
+  chats: number;
+}
+
+export interface TeamStatus {
+  enabled: boolean;
+  info: TeamStoreInfo | null;
+  /** why the server's database could not be reached */
+  error: string | null;
+  /** this PC's name, shown on the documents it uploads */
+  machine: string;
+}
+
+/** a docask:// setup link waiting for "เชื่อมต่อ?" (never the token) */
+export interface ConnectLinkInfo {
+  host: string;
+  url: string;
+}
+
+export interface ConnectResult {
+  team: TeamStatus;
+  teamError: string | null;
+}
+
+export interface TeamSync {
+  serviceId: string;
+  uploaded: number;
+  deleted: number;
+  unchanged: number;
+  error: string | null;
 }
 
 export type EmbeddingModelId = "multilingual-e5-small" | "multilingual-e5-base" | "bge-m3";

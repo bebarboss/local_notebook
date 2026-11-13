@@ -395,7 +395,11 @@ impl IndexManager {
                     r
                 };
                 let job_id = uuid::Uuid::new_v4().to_string();
-                if let Err(e) = run_job(&app, &service_id, &job_id, full, &cancel) {
+                let result = run_job(&app, &service_id, &job_id, full, &cancel);
+                if result.is_ok() && !cancel.load(Ordering::Relaxed) {
+                    crate::team::after_index(&app, &service_id);
+                }
+                if let Err(e) = result {
                     emit(&app, IndexProgress {
                         service_id: service_id.clone(), job_id: job_id.clone(), doc_path: None, file_name: None,
                         done: 0, total: 0, doc_progress: 0.0, phase: "error", message: Some(e.message),

@@ -69,7 +69,7 @@ impl AppState {
         })
     }
 
-    fn embedding_source(&self) -> AppResult<Source> {
+    pub fn embedding_source(&self) -> AppResult<Source> {
         Source::parse(&self.settings.lock().embedding_model)
     }
 }
@@ -856,6 +856,10 @@ impl AskJob {
 }
 
 /// Embed the question locally and search the service's index (or all services).
+fn has_local_index(state: &AppState, targets: &[Service]) -> bool {
+    targets.iter().any(|s| state.stores.get(&s.id).ok().and_then(|st| st.lock().stats().ok()).is_some_and(|(_, chunks, ..)| chunks > 0))
+}
+
 /// `queries[0]` is the main query (reranks and labels); later ones only add candidates.
 /// `carried`: passages cited by the previous answer, re-ranked along with the new ones.
 async fn retrieve(app: &AppHandle, svc: &Service, all: bool, queries: &[String], carried: &[SourceRef]) -> AppResult<Vec<SourceRef>> {
@@ -868,22 +872,38 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, queries: &[String],
         // ≈ 0.3–0.5) — keep the cut-off from hiding good passages; top-k still limits
         threshold = threshold.min(0.15);
     }
-    let mut vectors = Vec::with_capacity(queries.len());
-    for q in queries {
-        let (qv, notice) = state.embedder.clone().embed_query_from(src.clone(), q.clone()).await?;
-        if let Some(n) = notice {
-            let _ = app.emit("embed-fallback", n);
-        }
-        vectors.push((q, qv));
-    }
-
     let targets: Vec<Service> = if all { state.services.lock().list() } else { vec![svc.clone()] };
     let k = svc.top_k as usize;
     let rerank = state.settings.lock().rerank && crate::rerank::Reranker::status().ready;
     let hybrid = state.settings.lock().hybrid;
     let want = if rerank { crate::rerank::candidates(k) } else { k };
     let mut hits: Vec<(Service, crate::store::Hit)> = Vec::new();
-    for s in &targets {
+
+    // the team database on the server; this PC's own index when the server is down
+    let mut local = true;
+    if state.settings.lock().team_server {
+        match crate::team::search(&targets, queries, want, threshold, hybrid).await {
+            Ok(h) => {
+                hits = h;
+                local = false;
+            }
+            Err(e) if crate::embed_server::is_down(&e) && has_local_index(&state, &targets) => {
+                let _ = app.emit("embed-fallback", "ฐานข้อมูลของทีมติดต่อไม่ได้ — ค้นจาก index ในเครื่องนี้แทน".to_string());
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let mut vectors = Vec::with_capacity(queries.len());
+    if local {
+        for q in queries {
+            let (qv, notice) = state.embedder.clone().embed_query_from(src.clone(), q.clone()).await?;
+            if let Some(n) = notice {
+                let _ = app.emit("embed-fallback", n);
+            }
+            vectors.push((q, qv));
+        }
+    }
+    for s in targets.iter().filter(|_| local) {
         let store = state.stores.get(&s.id)?;
         for (q, qv) in &vectors {
             let found = if hybrid {
@@ -1268,6 +1288,109 @@ pub async fn use_embed_server(app: AppHandle, model: String) -> AppResult<Embedd
         state.indexer.start(app.clone(), svc.id, false);
     }
     Ok(Embedder::status_of(&state.embedding_source()?))
+}
+
+// ------------------------------------------------------------------ team database
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamStatus {
+    pub enabled: bool,
+    pub info: Option<crate::team::StoreInfo>,
+    pub error: Option<String>,
+    pub machine: String,
+}
+
+#[tauri::command]
+pub async fn team_status(app: AppHandle) -> TeamStatus {
+    let enabled = crate::team::enabled(&app);
+    let (info, error) = match crate::team::info().await {
+        Ok(i) => (Some(i), None),
+        Err(e) => (None, Some(e.message)),
+    };
+    TeamStatus { enabled, info, error, machine: crate::team::machine() }
+}
+
+/// Turn the team database on (after checking the server and the model) or off. On: services
+/// from the server appear here and every local index is synced up in the background.
+#[tauri::command]
+pub async fn set_team_server(app: AppHandle, enabled: bool) -> AppResult<TeamStatus> {
+    let state = app.state::<AppState>();
+    if enabled {
+        let info = crate::team::info().await?;
+        crate::team::compatible(&state.embedding_source()?, &info.model)?;
+        crate::team::pull_services(&app).await?;
+    }
+    let s = {
+        let mut cur = state.settings.lock();
+        cur.team_server = enabled;
+        cur.clone()
+    };
+    s.save()?;
+    if enabled {
+        let ids = state.services.lock().list().into_iter().map(|s| s.id).collect();
+        crate::team::spawn_sync(&app, ids);
+    }
+    Ok(team_status(app).await)
+}
+
+/// "ซิงก์ตอนนี้": pull new services, push every local index.
+#[tauri::command]
+pub async fn team_sync_now(app: AppHandle) -> AppResult<()> {
+    if !crate::team::enabled(&app) {
+        return Err(AppError::new("invalid", "ยังไม่ได้เปิดใช้ฐานข้อมูลของทีม"));
+    }
+    crate::team::pull_services(&app).await?;
+    let ids = app.state::<AppState>().services.lock().list().into_iter().map(|s| s.id).collect();
+    crate::team::spawn_sync(&app, ids);
+    Ok(())
+}
+
+// ------------------------------------------------------------------ setup links
+
+/// A docask:// link waiting for "เชื่อมต่อ?" (host only — never the token).
+#[tauri::command]
+pub fn connect_pending() -> Option<crate::connect::LinkInfo> {
+    crate::connect::pending()
+}
+
+/// A setup link pasted in Settings (when clicking it did not open DocAsk).
+#[tauri::command]
+pub fn connect_paste(app: AppHandle, link: String) -> AppResult<crate::connect::LinkInfo> {
+    crate::connect::receive(&app, &link)
+}
+
+#[tauri::command]
+pub fn connect_discard() {
+    crate::connect::discard();
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectResult {
+    pub team: TeamStatus,
+    /// the team database could not be switched on (the embedding server still is)
+    pub team_error: Option<String>,
+}
+
+/// The user said yes: save URL + token, use the server for embeddings and the team database.
+#[tauri::command]
+pub async fn connect_apply(app: AppHandle) -> AppResult<ConnectResult> {
+    let link = crate::connect::take().ok_or_else(|| AppError::new("invalid", "ไม่มีลิงก์ที่รอเชื่อมต่อ — กดลิงก์อีกครั้ง"))?;
+    secrets::set_server_token(&link.token)?;
+    crate::embed_server::ServerConfig { url: link.url.clone() }.save()?;
+    let h = crate::embed_server::health(&link.url).await?;
+    crate::diag::log("setup link applied");
+    // embeddings from the server (unless already), then the team database
+    let current = app.state::<AppState>().embedding_source()?;
+    if current != Source::Server(h.model.clone()) {
+        use_embed_server(app.clone(), h.model.clone()).await?;
+    }
+    let team_error = match set_team_server(app.clone(), true).await {
+        Ok(_) => None,
+        Err(e) => Some(e.message),
+    };
+    Ok(ConnectResult { team: team_status(app).await, team_error })
 }
 
 /// Remove the URL and token (not while the server is the embedding source).

@@ -1160,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "docask"
-version = "0.12.4"
+version = "0.13.0"
 dependencies = [
  "base64 0.22.1",
  "calamine",
@@ -1198,6 +1198,7 @@ dependencies = [
  "tokio-util",
  "unicode-segmentation",
  "uuid",
+ "winreg",
  "zip 2.6.1",
 ]
 

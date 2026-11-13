@@ -20,6 +20,10 @@ import type {
   EmbeddingTest,
   EmbedServerInfo,
   EmbedServerTest,
+  TeamStatus,
+  TeamSync,
+  ConnectLinkInfo,
+  ConnectResult,
   ExportResult,
   ShareProgress,
   EmbeddingStatus,
@@ -56,6 +60,10 @@ export interface EventMap {
   "share-progress": ShareProgress;
   /** the embedding server was down; this question was embedded on this PC instead */
   "embed-fallback": string;
+  /** one service synced to the team database (or failed) */
+  "team-sync": TeamSync;
+  "connect-link": ConnectLinkInfo;
+  "connect-error": string;
 }
 
 export type EventName = keyof EventMap;
@@ -143,6 +151,14 @@ export interface Backend {
   testEmbedServer(): Promise<EmbedServerTest>;
   useEmbedServer(model: string): Promise<EmbeddingStatus>;
   forgetEmbedServer(): Promise<EmbedServerInfo>;
+  teamStatus(): Promise<TeamStatus>;
+  setTeamServer(enabled: boolean): Promise<TeamStatus>;
+  teamSyncNow(): Promise<void>;
+  connectPending(): Promise<ConnectLinkInfo | null>;
+  /** a setup link pasted by hand; the token stays in Rust */
+  connectPaste(link: string): Promise<ConnectLinkInfo>;
+  connectApply(): Promise<ConnectResult>;
+  connectDiscard(): Promise<void>;
   reindexAll(): Promise<void>;
   wipeAllData(): Promise<void>;
   // updates
@@ -247,6 +263,13 @@ function createTauriBackend(): Backend {
     testEmbedServer: () => call("test_embed_server"),
     useEmbedServer: (model) => call("use_embed_server", { model }),
     forgetEmbedServer: () => call("forget_embed_server"),
+    teamStatus: () => call("team_status"),
+    setTeamServer: (enabled) => call("set_team_server", { enabled }),
+    teamSyncNow: () => call("team_sync_now"),
+    connectPending: () => call("connect_pending"),
+    connectPaste: (link) => call("connect_paste", { link }),
+    connectApply: () => call("connect_apply"),
+    connectDiscard: () => call("connect_discard"),
     reindexAll: () => call("reindex_all"),
     wipeAllData: () => call("wipe_all_data"),
     ocrStatus: () => call("ocr_status"),

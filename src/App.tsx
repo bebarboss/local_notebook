@@ -11,6 +11,7 @@ import ServicesPage from "./pages/Services";
 import SettingsPage from "./pages/Settings";
 import SetupPage from "./pages/Setup";
 import { UpdateDialog } from "./components/UpdateDialog";
+import { ConnectDialog } from "./components/ConnectDialog";
 import type { UpdateInfo } from "./lib/types";
 
 export default function App() {
@@ -64,6 +65,7 @@ export default function App() {
     return (
       <div className="app">
         <SetupPage />
+        <ConnectDialog />
         {api.mock && <span className="mock-badge">{th.mock}</span>}
       </div>
     );
@@ -84,7 +86,7 @@ export default function App() {
       )}
       {needEmbedding && !(page.name === "settings" && page.section === "embedding") && (
         <div className="banner warn" role="status">
-          <span>ยังไม่มีโมเดล embedding — ดาวน์โหลดโมเดลในเครื่อง (ครั้งเดียว ~120 MB) ก่อน จึงจะ index และค้นเอกสารได้</span>
+          <span>ยังไม่มีโมเดล embedding — ใช้ลิงก์ตั้งค่าจากผู้ดูแลเซิร์ฟเวอร์ของทีม หรือดาวน์โหลด bge-m3 ในเครื่อง (~570 MB) ก่อน จึงจะ index และค้นเอกสารได้</span>
           <button className="btn" onClick={() => app.go({ name: "settings", section: "embedding" })}>ตั้งค่า Embedding</button>
         </div>
       )}
@@ -96,6 +98,7 @@ export default function App() {
         </div>
       )}
       {updateOpen && update && <UpdateDialog info={update} onClose={() => setUpdateOpen(false)} />}
+      <ConnectDialog />
       <div className="app" style={{ flex: 1, minHeight: 0 }}>
         <Sidebar open={menuOpen} onNavigate={() => setMenuOpen(false)} />
         {menuOpen && <div className="modal-backdrop only-narrow" style={{ zIndex: 44, background: "var(--overlay)" }} onClick={() => setMenuOpen(false)} aria-hidden="true" />}

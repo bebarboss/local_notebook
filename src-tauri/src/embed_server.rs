@@ -1,5 +1,5 @@
 //! Embeddings from the user's own server (`server/embed` in this repo: Docker on a home
-//! machine, reached over ngrok or Tailscale). OpenAI-style `/v1/embeddings` plus `/health`.
+//! machine, reached over a tunnel). OpenAI-style `/v1/embeddings` plus `/health`.
 //!
 //! Opt-in (Settings › Embedding): every chunk's text goes to that server when indexing, and
 //! each question when searching. The Bearer token lives in the Windows credential store and
@@ -9,6 +9,7 @@ use crate::config::{data_dir, read_json, write_json};
 use crate::errors::{AppError, AppResult};
 use crate::gateway_embed::{post, Endpoint};
 use crate::llm::CLIENT;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use parking_lot::Mutex;
@@ -84,18 +85,15 @@ fn url() -> String {
     }
 }
 
-/// The built-in token is fixed (only the URL can change in Settings); a build without one
-/// uses the token typed in Settings (credential store).
+/// The token typed in Settings (credential store), else one built into an older release.
+/// Since the server holds the team's documents, releases no longer build a token in.
 fn token() -> AppResult<Option<String>> {
-    match builtin_token() {
-        Some(t) => Ok(Some(t)),
-        None => crate::secrets::get_server_token(),
-    }
+    Ok(crate::secrets::get_server_token()?.or_else(builtin_token))
 }
 
-/// The token came with the program and cannot be changed in Settings.
+/// Nothing is locked any more: a typed token always wins.
 pub fn token_locked() -> bool {
-    builtin_token().is_some()
+    false
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -169,7 +167,7 @@ fn private_host(host: &str) -> bool {
 fn unreachable(base: &str) -> AppError {
     AppError::new(
         "server_unreachable",
-        format!("ติดต่อเซิร์ฟเวอร์ embedding ไม่ได้ ({base}) — เครื่องที่บ้านเปิดอยู่ไหม, Docker ทำงานอยู่ไหม, ngrok (หรือ Tailscale) ยังเปิดอยู่ไหม"),
+        format!("ติดต่อเซิร์ฟเวอร์ embedding ไม่ได้ ({base}) — เครื่องที่บ้านเปิดอยู่ไหม, Docker ทำงานอยู่ไหม, URL ของ tunnel เปลี่ยนหรือเปล่า"),
     )
 }
 
@@ -244,6 +242,52 @@ async fn embed_at(base: &str, token: &str, model: &str, texts: &[String], kind: 
         out.extend(v);
     }
     Ok(out)
+}
+
+// ------------------------------------------------ the team database (server/embed/db.py)
+
+/// `{"error":{"message": …}}` from the server, else the status code.
+fn api_error(base: &str, status: u16, body: &str) -> AppError {
+    let msg = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.pointer("/error/message").and_then(|m| m.as_str()).map(str::to_string))
+        .unwrap_or_else(|| format!("HTTP {status}"));
+    let mut e = match status {
+        401 => AppError::new("http_401", "token ของเซิร์ฟเวอร์ไม่ถูกต้อง — ใส่ใหม่ที่ ตั้งค่า › Embedding และ Index"),
+        404 if msg.contains("Not Found") => AppError::new("no_database", "เซิร์ฟเวอร์ยังไม่มีฐานข้อมูล — อัปเดตเซิร์ฟเวอร์และตั้ง POSTGRES_PASSWORD (server/embed/README.md)"),
+        502..=504 | 530 => unreachable(base),
+        _ => AppError::new("server", format!("เซิร์ฟเวอร์ตอบ {status}: {msg}")),
+    };
+    e.status = Some(status);
+    e
+}
+
+/// One JSON call to the server with the token. Never logs the body.
+pub async fn api<T: DeserializeOwned>(method: reqwest::Method, path: &str, body: Option<&serde_json::Value>, timeout: Duration) -> AppResult<T> {
+    let (base, token) = target()?;
+    let mut req = CLIENT.request(method, format!("{base}{path}")).bearer_auth(&token).timeout(timeout);
+    if let Some(b) = body {
+        req = req.json(b);
+    }
+    let r = req.send().await.map_err(|e| if e.is_connect() || e.is_timeout() { unreachable(&base) } else { AppError::from(e) });
+    let r = match r {
+        Ok(r) => r,
+        Err(e) => {
+            *DOWN_AT.lock() = Some(Instant::now());
+            return Err(e);
+        }
+    };
+    let status = r.status().as_u16();
+    if !(200..300).contains(&status) {
+        let text = r.text().await.unwrap_or_default();
+        let e = api_error(&base, status, &text);
+        if is_down(&e) {
+            *DOWN_AT.lock() = Some(Instant::now());
+        }
+        return Err(e);
+    }
+    *DOWN_AT.lock() = None;
+    r.json::<T>().await.map_err(|_| AppError::new("server", "เซิร์ฟเวอร์ตอบกลับในรูปแบบที่ไม่รู้จัก — อัปเดตเซิร์ฟเวอร์ (git pull)"))
 }
 
 #[cfg(test)]
@@ -326,6 +370,6 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let e = rt.block_on(embed_at(&base, "home-token-0123456789", "bge-m3", &["x".into()], "query", 0, Duration::from_secs(30))).unwrap_err();
         assert_eq!(e.code, "server_unreachable", "{}", e.message);
-        assert!(e.message.contains("ngrok"));
+        assert!(e.message.contains("tunnel"));
     }
 }

@@ -14,6 +14,8 @@ pub mod gateway_test;
 pub mod ingest;
 pub mod knowledge;
 pub mod followup;
+pub mod team;
+pub mod connect;
 pub mod llm;
 pub mod redact;
 pub mod rerank;
@@ -31,7 +33,15 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         // a second launch (desktop icon while DocAsk sits in the tray) brings this one forward
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| background::show(app)))
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            background::show(app);
+            // a docask:// setup link clicked while DocAsk is already running
+            if let Some(link) = connect::from_args(args) {
+                if let Err(e) = connect::receive(app, &link) {
+                    let _ = tauri::Emitter::emit(app, "connect-error", e.message);
+                }
+            }
+        }))
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec![background::AUTOSTART_ARG])))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -42,6 +52,13 @@ pub fn run() {
             let state = AppState::new(&handle).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             init_resources(app.handle());
             diag::log(format!("app start v{}", env!("CARGO_PKG_VERSION")));
+            connect::register_scheme();
+            // started by clicking a docask:// setup link
+            if let Some(link) = connect::from_args(std::env::args()) {
+                if let Err(e) = connect::receive(app.handle(), &link) {
+                    log::warn!("setup link rejected: {}", e.code);
+                }
+            }
             ingest::ocr::set_enabled(state.settings.lock().ocr_enabled);
             ingest::set_keep_images(state.settings.lock().keep_images);
             ingest::set_load(&state.settings.lock().index_load);
@@ -131,6 +148,13 @@ pub fn run() {
             commands::test_embed_server,
             commands::use_embed_server,
             commands::forget_embed_server,
+            commands::team_status,
+            commands::set_team_server,
+            commands::team_sync_now,
+            commands::connect_pending,
+            commands::connect_paste,
+            commands::connect_apply,
+            commands::connect_discard,
             commands::wipe_all_data,
             commands::ocr_status,
             commands::rerank_status,

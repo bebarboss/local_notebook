@@ -52,6 +52,8 @@ pub struct Settings {
     pub chunk_size: usize,
     pub chunk_overlap: usize,
     pub embedding_model: String,
+    /// search the team database on the embedding server and sync local indexes up (team.rs)
+    pub team_server: bool,
     pub last_service_id: Option<String>,
     /// latest.json URL for in-app updates (empty = updates off)
     pub update_url: String,
@@ -98,6 +100,7 @@ impl Default for Settings {
             chunk_overlap: 150,
             // "bge-m3" on this PC, or "server:<model>" / "gateway:<model>" (Settings › Embedding)
             embedding_model: default_embedding(),
+            team_server: false,
             last_service_id: None,
             update_url: crate::updater::DEFAULT_UPDATE_URL.to_string(),
             auto_check_update: true,

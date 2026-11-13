@@ -1,6 +1,6 @@
 [package]
 name = "docask"
-version = "0.12.4"
+version = "0.13.0"
 description = "DocAsk — ถามตอบจากเอกสารในเครื่อง (RAG) ผ่าน Gosoft Agent Gateway"
 edition = "2021"
 rust-version = "1.77"
@@ -57,6 +57,10 @@ log = "0.4"
 parking_lot = "0.12"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
+
+[target.'cfg(windows)'.dependencies]
+# docask:// setup links (HKCU\Software\Classes) — same version the autostart plugin uses
+winreg = "0.56"
 
 [dev-dependencies]
 tempfile = "3"
