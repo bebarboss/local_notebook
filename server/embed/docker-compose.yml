@@ -1,6 +1,6 @@
 services:
   # CPU server in Docker. On an Apple Silicon Mac use fast mode instead (./mac-native.sh, Metal GPU):
-  # remove "cpu" from COMPOSE_PROFILES in .env and set NGROK_UPSTREAM=host.docker.internal:8081
+  # remove "cpu" from COMPOSE_PROFILES in .env and set TUNNEL_UPSTREAM=host.docker.internal:8081
   embed:
     profiles: ["cpu"]
     build: .
@@ -8,7 +8,7 @@ services:
     container_name: docask-embed
     restart: unless-stopped
     env_file: .env
-    # only this Mac can reach the port directly; other machines come in through the ngrok service below
+    # only this Mac can reach the port directly; other machines come in through the tunnel below
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
@@ -18,41 +18,16 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
 
-  # public HTTPS tunnel → embed:8080. Needs NGROK_AUTHTOKEN in .env; NGROK_DOMAIN optional
-  # (empty = ngrok picks the URL, which can change on restart — see README for how to read it).
-  # NGROK_ALLOW_IPS (comma-separated CIDRs) limits who can reach it at all; the Bearer token is the second gate.
-  ngrok:
-    image: ngrok/ngrok:3-alpine
-    container_name: docask-ngrok
+  # Cloudflare Quick Tunnel: public https://<random>.trycloudflare.com → TUNNEL_UPSTREAM.
+  # No account or domain needed; the URL changes every time this container restarts (see README).
+  tunnel:
+    image: cloudflare/cloudflared:2025.11.1
+    container_name: docask-tunnel
     restart: unless-stopped
     depends_on:
       embed: { condition: service_started, required: false }
     extra_hosts: ["host.docker.internal:host-gateway"]
-    env_file: .env
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        set -e
-        : "$${NGROK_AUTHTOKEN:?set NGROK_AUTHTOKEN in .env}"
-        # --inspect=false: the request inspector would keep copies of document text
-        set -- http "$${NGROK_UPSTREAM:-embed:8080}" --inspect=false --log stdout --log-format logfmt
-        if [ -n "$${NGROK_DOMAIN}" ]; then set -- "$$@" --url "https://$${NGROK_DOMAIN#https://}"; fi
-        if [ -n "$${NGROK_ALLOW_IPS}" ]; then
-          {
-            echo 'on_http_request:'
-            echo '  - actions:'
-            echo '      - type: restrict-ips'
-            echo '        config:'
-            echo '          enforce: true'
-            echo '          allow:'
-            echo "$${NGROK_ALLOW_IPS}" | tr ',' '\n' | sed 's/[[:space:]]//g; /^$$/d; s/^/            - /'
-          } > /tmp/policy.yml
-          echo "ngrok: only these IPs may connect: $${NGROK_ALLOW_IPS}"
-          set -- "$$@" --traffic-policy-file /tmp/policy.yml
-        else
-          echo "ngrok: WARNING NGROK_ALLOW_IPS is empty, anyone with the URL can reach the server (token still required)"
-        fi
-        exec ngrok "$$@"
+    command: ["tunnel", "--no-autoupdate", "--url", "http://${TUNNEL_UPSTREAM:-embed:8080}"]
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
