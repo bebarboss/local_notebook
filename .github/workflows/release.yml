@@ -42,10 +42,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           DOCASK_UPDATE_URL: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
-          # the home embedding server, built into the app (empty secrets = none) — the
-          # installer is public, so the token can be pulled out of it; see server/embed/README.md
+          # the home server's URL only — never its token: the installer is public and the
+          # server now holds the team's documents and chats (server/embed/README.md)
           DOCASK_EMBED_URL: ${{ secrets.DOCASK_EMBED_URL }}
-          DOCASK_EMBED_TOKEN: ${{ secrets.DOCASK_EMBED_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: DocAsk ${{ github.ref_name }}

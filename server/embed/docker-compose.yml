@@ -8,6 +8,11 @@ services:
     container_name: docask-embed
     restart: unless-stopped
     env_file: .env
+    environment:
+      # inside Docker the database is "db" (mac-native mode uses DATABASE_URL from .env instead)
+      DATABASE_URL: postgresql://docask:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/docask
+    depends_on:
+      db: { condition: service_healthy }
     # only this Mac can reach the port directly; other machines come in through the tunnel below
     ports:
       - "127.0.0.1:8080:8080"
@@ -32,5 +37,53 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
 
+  # the team's shared index (pgvector) and chat history — reachable only from this Mac
+  db:
+    image: pgvector/pgvector:0.8.0-pg16
+    container_name: docask-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: docask
+      POSTGRES_DB: docask
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    # localhost only: for mac-native mode and for backups / psql on this Mac — never the tunnel
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docask -d docask"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # pg_dump every day into ./backups, keeping the last 14
+  backup:
+    image: pgvector/pgvector:0.8.0-pg16
+    container_name: docask-backup
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - ./backups:/backups
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          f=/backups/docask-$$(date +%Y%m%d-%H%M).dump
+          pg_dump -h db -U docask -d docask -Fc -f "$$f.tmp" && mv "$$f.tmp" "$$f" && echo "backup $$f"
+          ls -1t /backups/docask-*.dump 2>/dev/null | tail -n +15 | xargs -r rm -f
+          sleep 86400
+        done
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
 volumes:
   hf-cache:
+  pgdata:

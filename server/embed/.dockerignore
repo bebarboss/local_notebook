@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 test_app.py
 .dockerignore
+backups/

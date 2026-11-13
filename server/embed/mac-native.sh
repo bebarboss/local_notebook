@@ -24,12 +24,14 @@ install() {
   [ "$(uname -s)/$(uname -m)" = "Darwin/arm64" ] || { echo "needs macOS on Apple Silicon"; exit 1; }
   grep -q '^EMBED_TOKEN=.\{16,\}' "$HERE/.env" 2>/dev/null || { echo "set EMBED_TOKEN in $HERE/.env first"; exit 1; }
   mkdir -p "$HOME_DIR" "$(dirname "$PLIST")"
-  if [ ! -x "$VENV/bin/uvicorn" ]; then
-    UV="$(command -v uv || true)"
-    if [ -z "$UV" ]; then python3 -m pip install --user -q uv; UV="$(python3 -m site --user-base)/bin/uv"; fi
-    "$UV" venv -q --python 3.12 "$VENV"
-    VIRTUAL_ENV="$VENV" "$UV" pip install -q torch==2.5.1 -r "$HERE/requirements.txt"
+  UV="$(command -v uv || true)"
+  if [ -z "$UV" ]; then
+    UV="$(python3 -m site --user-base)/bin/uv"
+    [ -x "$UV" ] || python3 -m pip install --user -q uv
   fi
+  [ -x "$VENV/bin/python" ] || "$UV" venv -q --python 3.12 "$VENV"
+  # every install: picks up libraries added by updates (fast when nothing changed)
+  VIRTUAL_ENV="$VENV" "$UV" pip install -q torch==2.5.1 -r "$HERE/requirements.txt"
   cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

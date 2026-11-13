@@ -13,3 +13,4 @@ release/
 src-tauri/resources/
 !server/embed/.env.example
 __pycache__/
+server/embed/backups/

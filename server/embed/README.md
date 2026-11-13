@@ -4,7 +4,9 @@
 
 - ใช้โมเดล `BAAI/bge-m3` (1024 มิติ, รองรับภาษาไทย) แบบ fp32 เต็มความแม่น ไม่ใช่ int8 แบบที่แอปใช้ในเครื่อง
 - API เป็นแบบเดียวกับ OpenAI `POST /v1/embeddings` และต้องส่ง `Authorization: Bearer <token>`
-- ไม่เก็บและไม่ log ข้อความที่ส่งมา log แค่จำนวนข้อความกับเวลาที่ใช้
+- **ฐานข้อมูลของทีม** (PostgreSQL + pgvector ใน container `docask-db`): เก็บ index เอกสาร (ข้อความท่อน + vector) และประวัติแชต
+  ให้ทุกเครื่องในทีมใช้ร่วมกัน — ดูหัวข้อ [ฐานข้อมูลของทีม](#ฐานข้อมูลของทีม-index--แชต)
+- ไม่ log ข้อความที่ส่งมา log แค่จำนวนกับเวลาที่ใช้
 
 ## สิ่งที่ต้องมีบน Mac mini
 
@@ -22,6 +24,7 @@
 cd server/embed
 cp .env.example .env
 sed -i '' "s/^EMBED_TOKEN=.*/EMBED_TOKEN=$(openssl rand -hex 32)/" .env
+sed -i '' "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 24)/" .env
 grep EMBED_TOKEN .env   # ← คัดลอก token นี้ไว้ใส่ใน DocAsk
 ```
 
@@ -97,6 +100,42 @@ URL ของ tunnel จะเปลี่ยน ให้ใส่ URL ให�
 - ดู log: `./mac-native.sh logs` · อัปเดตโค้ด: คัดลอก `app.py` ใหม่ทับ แล้ว `./mac-native.sh install` อีกครั้ง
 - กลับไปใช้ Docker: `./mac-native.sh uninstall` แล้วตั้ง `COMPOSE_PROFILES=cpu` และ `TUNNEL_UPSTREAM=embed:8080` → `docker compose up -d`
 
+## ฐานข้อมูลของทีม (index + แชต)
+
+`docker compose up -d` เปิด 3 container เพิ่มจากเดิม:
+
+| container | หน้าที่ |
+|---|---|
+| `docask-db` | PostgreSQL 16 + pgvector — ตาราง `services`, `documents`, `chunks` (ข้อความ + vector 1024 มิติ, index HNSW), `chats`, `messages` |
+| `docask-backup` | `pg_dump` วันละครั้งลง `./backups/docask-YYYYMMDD-HHMM.dump` เก็บ 14 ไฟล์ล่าสุด |
+
+- ฐานข้อมูลเปิด port แค่ `127.0.0.1:5432` (บน Mac เท่านั้น) **ไม่ผ่าน tunnel** — แอปเข้าผ่าน API ของเซิร์ฟเวอร์ (ต้องมี token) อย่างเดียว
+- เซิร์ฟเวอร์สร้างตารางเองตอนเริ่ม · `/health` บอก `"database": true` เมื่อต่อได้
+- ฐานข้อมูลผูกกับโมเดล: ถ้าเปลี่ยน `EMBED_MODEL` เซิร์ฟเวอร์จะไม่ยอมเริ่ม (vector ของคนละโมเดลค้นด้วยกันไม่ได้)
+- **โหมดเร็ว (mac-native)**: ใส่ใน `.env` แล้ว `./mac-native.sh install` อีกครั้ง (ติดตั้ง library ของ Postgres ด้วย)
+  ```ini
+  DATABASE_URL=postgresql://docask:<POSTGRES_PASSWORD>@127.0.0.1:5432/docask
+  ```
+- เครื่องที่อัปเดตจากเวอร์ชันก่อน: เพิ่ม `POSTGRES_PASSWORD` ใน `.env` ก่อน (`docker compose` จะไม่ยอมเริ่มถ้าไม่มี)
+
+API (ทุกตัวต้องมี token — แอป DocAsk เป็นคนเรียก):
+
+| | |
+|---|---|
+| `GET /v1/store` | จำนวนเอกสาร / ท่อน / แชต |
+| `GET/PUT/DELETE /v1/services[/{id}]` | ตั้งค่า service ที่ใช้ร่วมกัน (เก็บเป็น JSON) |
+| `GET/PUT/DELETE /v1/services/{id}/documents` | รายการเอกสาร / ลงทะเบียน / ลบ (`?path=`) |
+| `POST /v1/documents/{id}/chunks` | ส่งท่อน (≤ 64 ต่อครั้ง) — เซิร์ฟเวอร์ทำ embedding เอง หรือรับ vector ที่ทำไว้แล้ว · `replace: true` ล้างท่อนเก่า |
+| `PATCH /v1/documents/{id}` | สถานะ (indexing / ready / error) |
+| `POST /v1/search` | `{serviceIds, queries[], k, threshold, hybrid}` → vector + keyword (trigram) รวมแบบ RRF |
+| `GET/PUT/DELETE /v1/chats[/{id}]`, `GET/POST /v1/chats/{id}/messages` | ประวัติแชต |
+
+กู้คืนจาก backup:
+
+```bash
+docker compose exec -T db pg_restore -U docask -d docask --clean --if-exists < backups/docask-YYYYMMDD-HHMM.dump
+```
+
 ## ดูแลรักษา
 
 | งาน | คำสั่ง |
@@ -121,7 +160,11 @@ container มี `restart: unless-stopped` จึงกลับมาทำง�
 
 ## ความปลอดภัย
 
-- ห้าม commit ไฟล์ `.env` (อยู่ใน `.gitignore` แล้ว)
+- ห้าม commit ไฟล์ `.env` และโฟลเดอร์ `backups/` (อยู่ใน `.gitignore` แล้ว)
+- **เมื่อใช้ฐานข้อมูล token = กุญแจของเอกสารและแชตทั้งทีม** ใครได้ token ไป (ผ่าน URL ของ tunnel) อ่าน แก้ และลบได้ทั้งหมด
+  → **ห้ามฝัง token ในไฟล์ติดตั้ง** (ลบ secret `DOCASK_EMBED_TOKEN` ใน GitHub แล้ว และ release.yml ไม่ส่งค่านี้แล้ว)
+  ให้แต่ละเครื่องกรอก token เองครั้งเดียว · ถ้า token เคยหลุด (เช่น เคยฝังในไฟล์ติดตั้งรุ่นก่อน) ให้เปลี่ยน `EMBED_TOKEN` ก่อนเริ่มใช้ฐานข้อมูล
+- ข้อความจากเอกสารบริษัทและแชตจะอยู่บน Mac เครื่องนี้และใน `backups/` — ตรวจนโยบายบริษัทก่อน · เปิด FileVault ของ Mac ไว้
 - ห้ามเปลี่ยน port เป็น `0.0.0.0:8080` หรือเปิด port ที่ router เพราะข้อความในเอกสารของบริษัทจะวิ่งผ่านเส้นนี้
 - URL ของ Quick Tunnel เปิดสู่อินเทอร์เน็ตและจำกัด IP ไม่ได้ ด่านเดียวคือ token อย่าเผยแพร่ URL หรือ token
 - Cloudflare ถอด HTTPS ที่เซิร์ฟเวอร์ของ Cloudflare ข้อความจากเอกสารจึงผ่าน Cloudflare ในรูปที่อ่านได้ (Tailscale ไม่เป็นแบบนี้) ให้ตรวจว่านโยบายบริษัทยอมรับได้
@@ -133,6 +176,8 @@ container มี `restart: unless-stopped` จึงกลับมาทำง�
 | ตัวแปร | ค่าเริ่มต้น | ความหมาย |
 |---|---|---|
 | `EMBED_TOKEN` | (ต้องใส่) | ยาวอย่างน้อย 16 ตัว |
+| `POSTGRES_PASSWORD` | (ต้องใส่) | รหัสผ่านฐานข้อมูล (`openssl rand -hex 24`) ใช้แค่ภายใน Mac |
+| `DATABASE_URL` | (Docker ตั้งให้เอง) | โหมดเร็วต้องใส่เอง: `postgresql://docask:<รหัส>@127.0.0.1:5432/docask` · ไม่ใส่ = ไม่มีฐานข้อมูล ทำแค่ embedding |
 | `COMPOSE_PROFILES` | `cpu` | `cpu` = รันเซิร์ฟเวอร์ใน Docker · ว่าง = โหมดเร็ว (`./mac-native.sh`) |
 | `TUNNEL_UPSTREAM` | `embed:8080` | ที่ที่ tunnel ส่งต่อไป · โหมดเร็ว = `host.docker.internal:8081` |
 | `EMBED_MODEL` | `BAAI/bge-m3` | โมเดล sentence-transformers จาก Hugging Face (เปลี่ยนแล้ว DocAsk ต้อง index ใหม่) |
@@ -144,6 +189,10 @@ container มี `restart: unless-stopped` จึงกลับมาทำง�
 ## ทดสอบโค้ด (ไม่ต้องดาวน์โหลดโมเดล)
 
 ```bash
-pip install fastapi httpx pytest
-EMBED_NO_AUTOLOAD=1 python -m pytest -q
+pip install fastapi httpx pytest "psycopg[binary]" psycopg-pool pgvector numpy
+EMBED_NO_AUTOLOAD=1 python -m pytest -q          # test ฐานข้อมูลถูกข้ามถ้าไม่มี TEST_DATABASE_URL
+
+# test ฐานข้อมูลกับ Postgres จริง
+docker run -d --name docask-test-db -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 pgvector/pgvector:0.8.0-pg16
+TEST_DATABASE_URL=postgresql://postgres:test@127.0.0.1:55432/postgres EMBED_NO_AUTOLOAD=1 python -m pytest -q
 ```
