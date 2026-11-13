@@ -380,11 +380,14 @@ pub fn after_index(app: &AppHandle, service_id: &str) {
 
 /// v0.13.0 had one switch for everything: its services with files become shared services.
 pub fn migrate_global_switch(app: &AppHandle) {
-    let state = app.state::<AppState>();
+    // never panic at startup: without the state there is nothing to migrate yet
+    let Some(state) = app.try_state::<AppState>() else { return };
     if !state.settings.lock().team_server {
         return;
     }
-    for s in state.services.lock().list() {
+    // the list first: the registry lock must be free again inside the loop
+    let services = state.services.lock().list();
+    for s in services {
         if !s.folders.is_empty() || !s.files.is_empty() {
             let _ = state.services.lock().set_shared(&s.id, true);
         }

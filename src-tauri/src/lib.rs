@@ -53,7 +53,6 @@ pub fn run() {
             init_resources(app.handle());
             diag::log(format!("app start v{}", env!("CARGO_PKG_VERSION")));
             connect::register_scheme();
-            team::migrate_global_switch(app.handle());
             // started by clicking a docask:// setup link
             if let Some(link) = connect::from_args(std::env::args()) {
                 if let Err(e) = connect::receive(app.handle(), &link) {
@@ -64,6 +63,8 @@ pub fn run() {
             ingest::set_keep_images(state.settings.lock().keep_images);
             ingest::set_load(&state.settings.lock().index_load);
             app.manage(state);
+            // after manage(): it reads the app state
+            team::migrate_global_switch(app.handle());
             if let Err(e) = background::init(app.handle()) {
                 log::warn!("tray icon unavailable: {e}");
             }
