@@ -264,6 +264,13 @@ code { font-family: var(--mono); font-size: 12.5px; background: var(--code); col
 .ai-text ul, .ai-text ol { margin: 0 0 12px; padding-left: 22px; }
 .ai-text pre { background: var(--code); padding: 10px 12px; border-radius: 10px; overflow-x: auto; font-size: 13px; }
 .ai-text pre code { background: none; padding: 0; }
+.md-table { margin: 0 0 12px; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; max-width: 100%; }
+.md-table:focus-visible { outline: 2px solid var(--accent, #3B6FE0); outline-offset: 2px; }
+.md-table table { border-collapse: collapse; width: 100%; font-size: 0.93em; line-height: 1.6; }
+.md-table th, .md-table td { padding: 7px 12px; border-bottom: 1px solid var(--border-soft); text-align: left; vertical-align: top; }
+.md-table th { font-weight: 600; background: var(--code); border-bottom: 1px solid var(--border); white-space: nowrap; }
+.md-table tbody tr:last-child td { border-bottom: none; }
+.md-table td code, .md-table th code { white-space: nowrap; }
 .code-block { position: relative; }
 .code-block pre { padding-right: 40px; white-space: pre; }
 .code-block .code-copy { position: absolute; top: 4px; right: 4px; width: 28px; height: 28px; opacity: .75; }

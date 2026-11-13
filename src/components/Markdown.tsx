@@ -1,5 +1,5 @@
 // Minimal, safe markdown subset for answers: paragraphs, **bold**, `code`, ```fences```,
-// bullet / numbered lists, and [n] citations rendered as CitationChip. No raw HTML.
+// bullet / numbered lists, | tables |, and [n] citations rendered as CitationChip. No raw HTML.
 import { Fragment, useState, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
 import type { Source } from "../lib/types";
@@ -29,13 +29,43 @@ function CodeBlock({ text }: { text: string }) {
   );
 }
 
+type Align = "left" | "center" | "right" | undefined;
+
 type Block =
   | { t: "p"; text: string }
   | { t: "code"; text: string }
   | { t: "ul" | "ol"; items: string[] }
-  | { t: "h"; text: string };
+  | { t: "h"; text: string }
+  | { t: "table"; head: string[]; align: Align[]; rows: string[][] };
 
-function parseBlocks(src: string): Block[] {
+/** `| a | b |` → ["a", "b"]; a `|` inside `code` or written as `\|` stays in the cell */
+function splitRow(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|") && !s.endsWith("\\|")) s = s.slice(0, -1);
+  const cells: string[] = [];
+  let cur = "";
+  let inCode = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "\\" && s[i + 1] === "|") { cur += "|"; i++; continue; }
+    if (c === "`") inCode = !inCode;
+    if (c === "|" && !inCode) { cells.push(cur.trim()); cur = ""; continue; }
+    cur += c;
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+/** the `|---|:---:|` line under a table header */
+function separator(line: string): Align[] | null {
+  if (!line.includes("-")) return null;
+  const cells = splitRow(line);
+  if (!cells.every((c) => /^:?-{1,}:?$/.test(c))) return null;
+  return cells.map((c) => (c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : c.startsWith(":") ? "left" : undefined));
+}
+
+export function parseBlocks(src: string): Block[] {
   const lines = src.replace(/\r\n/g, "\n").split("\n");
   const out: Block[] = [];
   let para: string[] = [];
@@ -59,6 +89,22 @@ function parseBlocks(src: string): Block[] {
       const item = (ul ?? ol)![1];
       if (last && last.t === kind) last.items.push(item);
       else out.push({ t: kind, items: [item] });
+      continue;
+    }
+    // a table: a row with "|", then the |---| line
+    const align = line.includes("|") && i + 1 < lines.length ? separator(lines[i + 1]) : null;
+    if (align) {
+      flush();
+      const head = splitRow(line);
+      const rows: string[][] = [];
+      i += 2;
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
+        const r = splitRow(lines[i++]);
+        // ragged rows from the model: pad / cut to the header's width
+        rows.push(head.map((_, j) => r[j] ?? ""));
+      }
+      i--;
+      out.push({ t: "table", head, align: head.map((_, j) => align[j]), rows });
       continue;
     }
     const h = /^#{1,4}\s+(.*)$/.exec(line);
@@ -106,6 +152,23 @@ export function Markdown({ text, sources, trailing }: { text: string; sources: S
           case "p": return <p key={i}>{inline(b.text, sources, `p${i}`)}{tail}</p>;
           case "h": return <p key={i}><strong>{inline(b.text, sources, `h${i}`)}</strong>{tail}</p>;
           case "code": return <Fragment key={i}><CodeBlock text={b.text} />{tail}</Fragment>;
+          case "table": return (
+            <Fragment key={i}>
+              <div className="md-table" role="region" aria-label="ตาราง" tabIndex={0}>
+                <table>
+                  <thead>
+                    <tr>{b.head.map((c, j) => <th key={j} style={{ textAlign: b.align[j] }}>{inline(c, sources, `t${i}-h${j}`)}</th>)}</tr>
+                  </thead>
+                  <tbody>
+                    {b.rows.map((r, ri) => (
+                      <tr key={ri}>{r.map((c, j) => <td key={j} style={{ textAlign: b.align[j] }}>{inline(c, sources, `t${i}-${ri}-${j}`)}</td>)}</tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {tail}
+            </Fragment>
+          );
           default: {
             const L = b.t;
             return (
