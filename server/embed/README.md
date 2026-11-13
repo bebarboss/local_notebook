@@ -14,7 +14,7 @@
   - **Your Authtoken** (เมนู Getting Started)
 - **ไม่ให้เครื่องหลับ:** ตั้งค่าระบบ › พลังงาน › เปิด *ป้องกันการพักเครื่องอัตโนมัติเมื่อจอดับ*
 
-> Docker บน Mac ใช้ GPU (Metal) ไม่ได้ จึงรันบน CPU ซึ่งชิป M-series ทำ bge-m3 ได้ราว 32 ท่อนใน 3–8 วินาที
+> Docker บน Mac ใช้ GPU (Metal) ไม่ได้ จึงรันบน CPU ซึ่งช้า (M2: ราว 20–40 วินาทีต่อ 32 ท่อน) บน Mac แนะนำ **โหมดเร็ว** ด้านล่าง
 
 ## ติดตั้ง
 
@@ -83,11 +83,38 @@ token ที่ฝังมาเปลี่ยนในแอปไม่ไ�
 **5. (แนะนำ) โมเดลสำรองในเครื่อง** — ใต้ผลทดสอบกด **ดาวน์โหลด bge-m3 ไว้สำรอง** (~570 MB) ถ้า Mac ปิดหรือเน็ตหลุด
 DocAsk จะคำนวณคำถามในเครื่องแทนและยังค้นเอกสารได้ (index อยู่บน Windows อยู่แล้ว) · ไฟล์ใหม่จะรอ index จนเซิร์ฟเวอร์กลับมา
 
+## โหมดเร็ว (Mac Apple Silicon, GPU)
+
+รันเซิร์ฟเวอร์บน macOS ตรงๆ ให้ใช้ GPU (Metal) ได้ เร็วกว่า Docker ราว 6–10 เท่า (M2: ราว 3 วินาทีต่อ 32 ท่อน) และได้ vector เดิมทุกตัว ไม่ต้อง index ใหม่ ngrok ยังรันใน Docker เหมือนเดิม
+
+```bash
+./mac-native.sh install      # ครั้งแรกติดตั้ง Python 3.12 + PyTorch ใน ~/.docask-embed และดาวน์โหลดโมเดล ~2.3 GB
+./mac-native.sh status       # ต้องเห็น "device":"mps:0"
+```
+
+แล้วแก้ `.env` ให้ ngrok ส่งต่อไปที่เซิร์ฟเวอร์ตัวนี้ และปิด container CPU
+
+```ini
+COMPOSE_PROFILES=
+NGROK_UPSTREAM=host.docker.internal:8081
+```
+
+```bash
+docker compose up -d ngrok
+docker compose --profile cpu rm -sf embed
+```
+
+URL ของ ngrok จะเปลี่ยน (ถ้าไม่ได้ตั้ง `NGROK_DOMAIN`) ให้ใส่ URL ใหม่ใน DocAsk ตามข้อ 3–4
+
+- เซิร์ฟเวอร์เริ่มเองตอน login ผ่าน launchd (`~/Library/LaunchAgents/com.docask.embed.plist`) และเปิดใหม่เองถ้าล่ม ฟังที่ `127.0.0.1:8081` เท่านั้น
+- ดู log: `./mac-native.sh logs` · อัปเดตโค้ด: คัดลอก `app.py` ใหม่ทับ แล้ว `./mac-native.sh install` อีกครั้ง
+- กลับไปใช้ Docker: `./mac-native.sh uninstall` แล้วตั้ง `COMPOSE_PROFILES=cpu` และ `NGROK_UPSTREAM=embed:8080` → `docker compose up -d`
+
 ## ดูแลรักษา
 
 | งาน | คำสั่ง |
 |---|---|
-| ดูสถานะ | `docker compose ps` (`docask-embed` ต้องเป็น `healthy` และ `docask-ngrok` ต้องเป็น `running`) |
+| ดูสถานะ | `docker compose ps` (`docask-embed` ต้องเป็น `healthy` และ `docask-ngrok` ต้องเป็น `running`) · โหมดเร็ว: `./mac-native.sh status` |
 | ดู log | `docker compose logs --tail 50` |
 | อัปเดตโค้ด | คัดลอกไฟล์ใหม่ทับ แล้ว `docker compose up -d --build` |
 | เปลี่ยน token | แก้ `.env` → `docker compose up -d` → ใส่ token ใหม่ใน DocAsk |

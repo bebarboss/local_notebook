@@ -1,5 +1,8 @@
 services:
+  # CPU server in Docker. On an Apple Silicon Mac use fast mode instead (./mac-native.sh, Metal GPU):
+  # remove "cpu" from COMPOSE_PROFILES in .env and set NGROK_UPSTREAM=host.docker.internal:8081
   embed:
+    profiles: ["cpu"]
     build: .
     image: docask-embed:local
     container_name: docask-embed
@@ -22,7 +25,9 @@ services:
     image: ngrok/ngrok:3-alpine
     container_name: docask-ngrok
     restart: unless-stopped
-    depends_on: [embed]
+    depends_on:
+      embed: { condition: service_started, required: false }
+    extra_hosts: ["host.docker.internal:host-gateway"]
     env_file: .env
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -30,7 +35,7 @@ services:
         set -e
         : "$${NGROK_AUTHTOKEN:?set NGROK_AUTHTOKEN in .env}"
         # --inspect=false: the request inspector would keep copies of document text
-        set -- http embed:8080 --inspect=false --log stdout --log-format logfmt
+        set -- http "$${NGROK_UPSTREAM:-embed:8080}" --inspect=false --log stdout --log-format logfmt
         if [ -n "$${NGROK_DOMAIN}" ]; then set -- "$$@" --url "https://$${NGROK_DOMAIN#https://}"; fi
         if [ -n "$${NGROK_ALLOW_IPS}" ]; then
           {
