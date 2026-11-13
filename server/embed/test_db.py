@@ -136,6 +136,41 @@ def test_chats_and_messages(client):
     assert c.get("/v1/chats/c1", headers=H).status_code == 404
 
 
+def test_share_keys_open_one_service_only(client):
+    c, _ = client
+    c.put("/v1/services/hr", json={"data": {"name": "HR"}}, headers=H)
+    c.put("/v1/services/pos", json={"data": {"name": "POS"}}, headers=H)
+    doc(c, "pos", "p.pdf", [{"ord": 0, "text": "ลา ยอดขาย"}])
+    key = c.post("/v1/services/hr/key", headers=H).json()["key"]
+    K = {"Authorization": f"Bearer {key}"}
+
+    assert c.post("/v1/services/hr/key", headers=K).status_code == 401, "members cannot make keys"
+    assert c.get("/v1/services/hr", headers=K).json()["data"]["name"] == "HR"
+    assert c.get("/v1/services/pos", headers=K).status_code == 403
+    assert c.get("/v1/services", headers=K).status_code == 401, "the list is the owner's"
+    assert c.get("/v1/store", headers=K).status_code == 401
+
+    # a member adds a document and searches its own service
+    d = c.put("/v1/services/hr/documents", json={"path": "m.pdf", "hash": "h"}, headers=K).json()
+    assert c.post(f"/v1/documents/{d['id']}/chunks", json={"replace": True, "chunks": [{"ord": 0, "text": "การลาพักร้อน"}]}, headers=K).status_code == 200
+    assert c.patch(f"/v1/documents/{d['id']}", json={"status": "ready"}, headers=K).status_code == 200
+    hits = c.post("/v1/search", json={"serviceIds": ["hr"], "queries": ["ลา"]}, headers=K).json()["hits"]
+    assert [h["docPath"] for h in hits] == ["m.pdf"]
+    assert c.post("/v1/search", json={"serviceIds": ["hr", "pos"], "queries": ["ลา"]}, headers=K).status_code == 403
+    pos_doc = c.get("/v1/services/pos/documents", headers=H).json()[0]["id"]
+    assert c.post(f"/v1/documents/{pos_doc}/chunks", json={"chunks": [{"ord": 1, "text": "x"}]}, headers=K).status_code == 403
+    assert c.delete("/v1/services/hr/documents", headers=K).status_code == 403, "no clearing a whole service"
+    assert c.delete("/v1/services/hr/documents", params={"path": "m.pdf"}, headers=K).json()["deleted"] == 1
+    assert c.post("/v1/embeddings", json={"input": ["ลา"]}, headers=K).status_code == 200
+    assert c.get("/v1/chats", headers=K).status_code == 401
+
+    # a new key: the old one stops working
+    new = c.post("/v1/services/hr/key", headers=H).json()["key"]
+    assert new != key
+    assert c.get("/v1/services/hr", headers=K).status_code == 401
+    assert c.get("/v1/services/hr", headers={"Authorization": f"Bearer {new}"}).status_code == 200
+
+
 def test_model_mismatch_refuses_to_start(client):
     from db import Store
 

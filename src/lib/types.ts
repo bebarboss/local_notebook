@@ -21,6 +21,8 @@ export interface Service {
   systemPrompt: string;
   /** where "บันทึกเป็นความรู้" writes notes ("" = default, chosen on the first save) */
   knowledgeDir: string;
+  /** lives in the team database on the server (shared by the owner, or joined with an invite) */
+  shared?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -234,6 +236,8 @@ export interface EmbedServerInfo {
   builtin: boolean;
   /** the token is built in and fixed — only the URL can change */
   tokenLocked: boolean;
+  /** has the server token (may share services); else a member using an invite key */
+  owner: boolean;
 }
 
 export interface EmbedServerTest extends EmbeddingTest {
@@ -256,23 +260,30 @@ export interface TeamStoreInfo {
 }
 
 export interface TeamStatus {
-  enabled: boolean;
+  /** this PC has the server token: may share services and make invite keys */
+  owner: boolean;
+  /** totals on the server (owner only) */
   info: TeamStoreInfo | null;
   /** why the server's database could not be reached */
   error: string | null;
   /** this PC's name, shown on the documents it uploads */
   machine: string;
+  sharedServices: number;
 }
 
 /** a docask:// setup link waiting for "เชื่อมต่อ?" (never the token) */
 export interface ConnectLinkInfo {
+  /** "connect" = server setup link, "join" = invite to one shared service */
+  kind: "connect" | "join";
   host: string;
   url: string;
+  serviceName: string | null;
 }
 
 export interface ConnectResult {
   team: TeamStatus;
-  teamError: string | null;
+  /** the service joined with an invite */
+  service: Service | null;
 }
 
 export interface TeamSync {

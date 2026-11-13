@@ -879,20 +879,20 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, queries: &[String],
     let want = if rerank { crate::rerank::candidates(k) } else { k };
     let mut hits: Vec<(Service, crate::store::Hit)> = Vec::new();
 
-    // the team database on the server; this PC's own index when the server is down
-    let mut local = true;
-    if state.settings.lock().team_server {
-        match crate::team::search(&targets, queries, want, threshold, hybrid).await {
-            Ok(h) => {
-                hits = h;
-                local = false;
-            }
-            Err(e) if crate::embed_server::is_down(&e) && has_local_index(&state, &targets) => {
+    // shared services are searched on the server (each with its own key); the rest here.
+    // When the server is down, a shared service with a local index is searched here instead.
+    let (remote, mut local_targets): (Vec<Service>, Vec<Service>) = targets.iter().cloned().partition(|s| s.shared);
+    if !remote.is_empty() {
+        match crate::team::search(&remote, queries, want, threshold, hybrid).await {
+            Ok(h) => hits = h,
+            Err(e) if crate::embed_server::is_down(&e) && has_local_index(&state, &remote) => {
                 let _ = app.emit("embed-fallback", "ฐานข้อมูลของทีมติดต่อไม่ได้ — ค้นจาก index ในเครื่องนี้แทน".to_string());
+                local_targets.extend(remote);
             }
             Err(e) => return Err(e),
         }
     }
+    let local = !local_targets.is_empty();
     let mut vectors = Vec::with_capacity(queries.len());
     if local {
         for q in queries {
@@ -903,7 +903,7 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, queries: &[String],
             vectors.push((q, qv));
         }
     }
-    for s in targets.iter().filter(|_| local) {
+    for s in local_targets.iter() {
         let store = state.stores.get(&s.id)?;
         for (q, qv) in &vectors {
             let found = if hybrid {
@@ -1217,7 +1217,7 @@ pub fn set_embed_server(url: String, token: Option<String>) -> AppResult<crate::
         }
         secrets::set_server_token(&t)?;
     }
-    crate::embed_server::ServerConfig { url: base }.save()?;
+    { let mut c = crate::embed_server::ServerConfig::load(); c.url = base; c.save()?; }
     Ok(crate::embed_server::info())
 }
 
@@ -1295,66 +1295,75 @@ pub async fn use_embed_server(app: AppHandle, model: String) -> AppResult<Embedd
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamStatus {
-    pub enabled: bool,
+    /// this PC has the server token: may share services and make keys
+    pub owner: bool,
+    /// totals on the server (owner only)
     pub info: Option<crate::team::StoreInfo>,
     pub error: Option<String>,
     pub machine: String,
+    pub shared_services: usize,
 }
 
 #[tauri::command]
 pub async fn team_status(app: AppHandle) -> TeamStatus {
-    let enabled = crate::team::enabled(&app);
-    let (info, error) = match crate::team::info().await {
-        Ok(i) => (Some(i), None),
-        Err(e) => (None, Some(e.message)),
+    let owner = crate::embed_server::is_owner();
+    let (info, error) = if owner {
+        match crate::team::info().await {
+            Ok(i) => (Some(i), None),
+            Err(e) => (None, Some(e.message)),
+        }
+    } else {
+        (None, None)
     };
-    TeamStatus { enabled, info, error, machine: crate::team::machine() }
+    let shared_services = app.state::<AppState>().services.lock().list().iter().filter(|s| s.shared).count();
+    TeamStatus { owner, info, error, machine: crate::team::machine(), shared_services }
 }
 
-/// Turn the team database on (after checking the server and the model) or off. On: services
-/// from the server appear here and every local index is synced up in the background.
+/// "แชร์ service นี้" on → the invite link; off → searches go back to this PC's index
+/// (`delete`: the owner also removes the service from the server).
 #[tauri::command]
-pub async fn set_team_server(app: AppHandle, enabled: bool) -> AppResult<TeamStatus> {
-    let state = app.state::<AppState>();
-    if enabled {
-        let info = crate::team::info().await?;
-        crate::team::compatible(&state.embedding_source()?, &info.model)?;
-        crate::team::pull_services(&app).await?;
+pub async fn share_service(app: AppHandle, service_id: String, shared: bool, delete: Option<bool>) -> AppResult<Option<String>> {
+    if shared {
+        Ok(Some(crate::team::share(&app, &service_id).await?))
+    } else {
+        crate::team::unshare(&app, &service_id, delete.unwrap_or(false)).await?;
+        Ok(None)
     }
-    let s = {
-        let mut cur = state.settings.lock();
-        cur.team_server = enabled;
-        cur.clone()
-    };
-    s.save()?;
-    if enabled {
-        let ids = state.services.lock().list().into_iter().map(|s| s.id).collect();
-        crate::team::spawn_sync(&app, ids);
-    }
-    Ok(team_status(app).await)
 }
 
-/// "ซิงก์ตอนนี้": pull new services, push every local index.
+/// "คัดลอกลิงก์เชิญ" — the link carries the service's share key (for the team only).
 #[tauri::command]
-pub async fn team_sync_now(app: AppHandle) -> AppResult<()> {
-    if !crate::team::enabled(&app) {
-        return Err(AppError::new("invalid", "ยังไม่ได้เปิดใช้ฐานข้อมูลของทีม"));
-    }
-    crate::team::pull_services(&app).await?;
-    let ids = app.state::<AppState>().services.lock().list().into_iter().map(|s| s.id).collect();
-    crate::team::spawn_sync(&app, ids);
-    Ok(())
+pub async fn service_invite(app: AppHandle, service_id: String) -> AppResult<String> {
+    crate::team::invite(&app, &service_id).await
 }
 
-// ------------------------------------------------------------------ setup links
+/// "สร้างคีย์ใหม่": the old invite links stop working.
+#[tauri::command]
+pub async fn rotate_service_key(app: AppHandle, service_id: String) -> AppResult<String> {
+    crate::team::rotate(&app, &service_id).await
+}
 
-/// A docask:// link waiting for "เชื่อมต่อ?" (host only — never the token).
+/// "ออกจาก service" (a joined service): gone from this PC, kept by the team.
+#[tauri::command]
+pub fn leave_service(app: AppHandle, service_id: String) -> AppResult<()> {
+    crate::team::leave(&app, &service_id)
+}
+
+/// "ซิงก์ตอนนี้": push every shared service that has files on this PC.
+#[tauri::command]
+pub fn team_sync_now(app: AppHandle) {
+    crate::team::sync_all(&app);
+}
+
+// ------------------------------------------------------------------ setup / invite links
+
+/// A docask:// link waiting for "เชื่อมต่อ?" (host / service name only — never the key).
 #[tauri::command]
 pub fn connect_pending() -> Option<crate::connect::LinkInfo> {
     crate::connect::pending()
 }
 
-/// A setup link pasted in Settings (when clicking it did not open DocAsk).
+/// A link pasted in Settings (when clicking it did not open DocAsk).
 #[tauri::command]
 pub fn connect_paste(app: AppHandle, link: String) -> AppResult<crate::connect::LinkInfo> {
     crate::connect::receive(&app, &link)
@@ -1369,28 +1378,34 @@ pub fn connect_discard() {
 #[serde(rename_all = "camelCase")]
 pub struct ConnectResult {
     pub team: TeamStatus,
-    /// the team database could not be switched on (the embedding server still is)
-    pub team_error: Option<String>,
+    /// a joined service
+    pub service: Option<Service>,
 }
 
-/// The user said yes: save URL + token, use the server for embeddings and the team database.
+/// The user said yes. Setup link: save URL + server token, embed on the server.
+/// Invite: add the shared service with its key.
 #[tauri::command]
 pub async fn connect_apply(app: AppHandle) -> AppResult<ConnectResult> {
-    let link = crate::connect::take().ok_or_else(|| AppError::new("invalid", "ไม่มีลิงก์ที่รอเชื่อมต่อ — กดลิงก์อีกครั้ง"))?;
-    secrets::set_server_token(&link.token)?;
-    crate::embed_server::ServerConfig { url: link.url.clone() }.save()?;
-    let h = crate::embed_server::health(&link.url).await?;
-    crate::diag::log("setup link applied");
-    // embeddings from the server (unless already), then the team database
-    let current = app.state::<AppState>().embedding_source()?;
-    if current != Source::Server(h.model.clone()) {
-        use_embed_server(app.clone(), h.model.clone()).await?;
-    }
-    let team_error = match set_team_server(app.clone(), true).await {
-        Ok(_) => None,
-        Err(e) => Some(e.message),
+    let pending = crate::connect::take().ok_or_else(|| AppError::new("invalid", "ไม่มีลิงก์ที่รอเชื่อมต่อ — กดลิงก์อีกครั้ง"))?;
+    let service = match pending {
+        crate::connect::Pending::Connect(link) => {
+            let h = crate::embed_server::health(&link.url).await?;
+            secrets::set_server_token(&link.token)?;
+            let mut c = crate::embed_server::ServerConfig::load();
+            c.url = link.url.clone();
+            c.save()?;
+            crate::diag::log("setup link applied");
+            if app.state::<AppState>().embedding_source()? != Source::Server(h.model.clone()) {
+                use_embed_server(app.clone(), h.model.clone()).await?;
+            }
+            None
+        }
+        crate::connect::Pending::Join(j) => {
+            let svc = crate::team::join(&app, &j.url, &j.service, &j.key).await?;
+            Some(svc)
+        }
     };
-    Ok(ConnectResult { team: team_status(app).await, team_error })
+    Ok(ConnectResult { team: team_status(app).await, service })
 }
 
 /// Remove the URL and token (not while the server is the embedding source).
@@ -1523,7 +1538,7 @@ mod tests {
     fn prompt_has_numbered_sources_and_no_old_chunks() {
         let svc = Service {
             id: "hr".into(), name: "HR".into(), code: "HR".into(), color: "#1F4FD1".into(), folders: vec![], files: vec![], excluded: vec![],
-            model: "godev1".into(), effort: "medium".into(), top_k: 5, system_prompt: "ตอบสั้น".into(), knowledge_dir: String::new(), created_at: 0, updated_at: 0,
+            model: "godev1".into(), effort: "medium".into(), top_k: 5, system_prompt: "ตอบสั้น".into(), knowledge_dir: String::new(), shared: false, created_at: 0, updated_at: 0,
         };
         let src = vec![SourceRef { n: 1, service_id: "hr".into(), service_name: "HR".into(), doc_path: "a.pdf".into(), file_name: "a.pdf".into(), page: Some(4), ord: 0, score: 0.9, rerank_score: None, keyword: false, knowledge: false, text: "ลา 10 วัน".into() }];
         let hist = vec![("q0".to_string(), "a0".to_string())];

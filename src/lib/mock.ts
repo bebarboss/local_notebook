@@ -116,7 +116,7 @@ export function createMockBackend(): Backend {
   let status: GatewayStatus = { state: "ok", message: null, checkedAt: now() };
   let localBgeM3 = false;
   let pendingLink: { url: string; token: string } | null = null;
-  let embedServer = { url: "", hasToken: false, tokenLast4: null as string | null, builtin: false, tokenLocked: false };
+  let embedServer = { url: "", hasToken: false, tokenLast4: null as string | null, builtin: false, tokenLocked: false, owner: false };
   let embedding: EmbeddingStatus = { model: "bge-m3", ready: true, path: "%APPDATA%\\DocAsk\\models\\bge-m3", sizeBytes: 568e6 };
   const streams = new Map<string, { stopped: boolean }>();
   let updateAvailable = false;
@@ -417,7 +417,7 @@ export function createMockBackend(): Backend {
         throw { code: "invalid_url", message: "http:// ใช้ได้เฉพาะ localhost หรือที่อยู่ Tailscale (100.x.x.x, *.ts.net) — ที่อื่นต้องเป็น https://" };
       }
       if (token && token.trim().length < 16) throw { code: "key_format", message: "Token ต้องยาวอย่างน้อย 16 ตัวและไม่มีช่องว่าง" };
-      embedServer = { ...embedServer, url: u, hasToken: embedServer.hasToken || !!token, tokenLast4: token ? token.trim().slice(-4) : embedServer.tokenLast4 };
+      embedServer = { ...embedServer, url: u, owner: embedServer.owner || !!token, hasToken: embedServer.hasToken || !!token, tokenLast4: token ? token.trim().slice(-4) : embedServer.tokenLast4 };
       return clone(embedServer);
     },
     testEmbedServer: async () => {
@@ -434,22 +434,29 @@ export function createMockBackend(): Backend {
     },
     forgetEmbedServer: async () => {
       if (settings.embeddingModel.startsWith("server:")) throw { code: "in_use", message: "กำลังใช้เซิร์ฟเวอร์นี้ทำ embedding — เปลี่ยนไปใช้โมเดลในเครื่องก่อน" };
-      embedServer = { url: "", hasToken: false, tokenLast4: null, builtin: false, tokenLocked: false };
+      embedServer = { url: "", hasToken: false, tokenLast4: null, builtin: false, tokenLocked: false, owner: false };
       return clone(embedServer);
     },
     teamStatus: async () => ({
-      enabled: settings.teamServer,
-      info: embedServer.hasToken ? { model: "bge-m3", dim: 1024, documents: 136, chunks: 1840, chats: 12 } : null,
-      error: embedServer.hasToken ? null : "ยังไม่ได้ใส่ token ของเซิร์ฟเวอร์ embedding",
+      owner: embedServer.hasToken,
+      info: embedServer.hasToken ? { model: "bge-m3", dim: 1024, documents: 136, chunks: 1840, chats: 0 } : null,
+      error: null,
       machine: "DESKTOP-MOCK",
+      sharedServices: services.filter((x) => x.shared).length,
     }),
-    setTeamServer: async (enabled) => {
+    shareService: async (sid, shared) => {
       await wait(500);
-      if (enabled && !embedServer.hasToken) throw { code: "no_key", message: "ยังไม่ได้ใส่ token ของเซิร์ฟเวอร์ embedding" };
-      settings = { ...settings, teamServer: enabled };
-      if (enabled) setTimeout(() => services.forEach((s, i) => emit("team-sync", { serviceId: s.id, uploaded: i === 0 ? 3 : 0, deleted: 0, unchanged: 4, error: null })), 800);
-      return { enabled, info: { model: "bge-m3", dim: 1024, documents: 136, chunks: 1840, chats: 12 }, error: null, machine: "DESKTOP-MOCK" };
+      const sv = services.find((x) => x.id === sid);
+      if (!sv) throw { code: "not_found", message: "ไม่พบ service นี้" };
+      if (shared && !embedServer.hasToken) throw { code: "not_owner", message: "เครื่องนี้ไม่ใช่เจ้าของเซิร์ฟเวอร์ — แชร์หรือสร้างคีย์ได้เฉพาะเครื่องที่ตั้งค่าด้วยลิงก์ตั้งค่าของผู้ดูแล" };
+      sv.shared = shared;
+      emit("services-changed", null);
+      if (shared) setTimeout(() => emit("team-sync", { serviceId: sid, uploaded: 3, deleted: 0, unchanged: 0, error: null }), 800);
+      return shared ? `docask://join?url=https%3A%2F%2Fmock.trycloudflare.com&service=${sid}&key=mockkey${Date.now()}&name=${encodeURIComponent(sv.name)}` : null;
     },
+    serviceInvite: async (sid) => `docask://join?url=https%3A%2F%2Fmock.trycloudflare.com&service=${sid}&key=mockkey0123456789&name=x`,
+    rotateServiceKey: async (sid) => { await wait(400); return `docask://join?url=https%3A%2F%2Fmock.trycloudflare.com&service=${sid}&key=mockkey${Date.now()}&name=x`; },
+    leaveService: async (sid) => { const i = services.findIndex((x) => x.id === sid); if (i >= 0) services.splice(i, 1); emit("services-changed", null); },
     teamSyncNow: async () => { setTimeout(() => emit("team-sync", { serviceId: services[0].id, uploaded: 1, deleted: 0, unchanged: 6, error: null }), 600); },
     connectPending: async () => null,
     connectPaste: async (link) => {
@@ -457,7 +464,7 @@ export function createMockBackend(): Backend {
       const p = new URLSearchParams(m?.[1] ?? "");
       const url = p.get("url") ?? "";
       if (!m || !url.startsWith("https://") || (p.get("token") ?? "").length < 16) throw { code: "invalid_link", message: "ลิงก์ตั้งค่าไม่ถูกต้อง — ขอลิงก์ใหม่จากผู้ดูแลเซิร์ฟเวอร์" };
-      const info = { host: new URL(url).host, url };
+      const info = { kind: "connect" as const, host: new URL(url).host, url, serviceName: null };
       pendingLink = { url, token: p.get("token")! };
       emit("connect-link", info);
       return info;
@@ -465,10 +472,10 @@ export function createMockBackend(): Backend {
     connectApply: async () => {
       await wait(800);
       if (!pendingLink) throw { code: "invalid", message: "ไม่มีลิงก์ที่รอเชื่อมต่อ — กดลิงก์อีกครั้ง" };
-      embedServer = { ...embedServer, url: pendingLink.url, hasToken: true, tokenLast4: pendingLink.token.slice(-4) };
+      embedServer = { ...embedServer, url: pendingLink.url, hasToken: true, owner: true, tokenLast4: pendingLink.token.slice(-4) };
       pendingLink = null;
-      settings = { ...settings, embeddingModel: "server:bge-m3", teamServer: true };
-      return { team: { enabled: true, info: { model: "bge-m3", dim: 1024, documents: 136, chunks: 1840, chats: 12 }, error: null, machine: "DESKTOP-MOCK" }, teamError: null };
+      settings = { ...settings, embeddingModel: "server:bge-m3" };
+      return { team: { owner: true, info: { model: "bge-m3", dim: 1024, documents: 136, chunks: 1840, chats: 0 }, error: null, machine: "DESKTOP-MOCK", sharedServices: 0 }, service: null };
     },
     connectDiscard: async () => { pendingLink = null; },
     reindexAll: async () => {},

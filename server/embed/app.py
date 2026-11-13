@@ -8,6 +8,7 @@ Runs at home (Mac mini) behind a tunnel. Every route except /health needs
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import secrets
@@ -147,10 +148,26 @@ def create_app(encoder: Encoder | None = None, token: str | None = None, store: 
 
         store = Store(DATABASE_URL, enc.dim, MODEL_ID)
 
+    def bearer(authorization: str | None) -> str:
+        return (authorization or "").removeprefix("Bearer ").strip()
+
+    def is_admin(given: str) -> bool:
+        return secrets.compare_digest(given.encode(), token.encode())
+
     def auth(authorization: str | None = Header(default=None)) -> None:
-        given = (authorization or "").removeprefix("Bearer ").strip()
-        if not secrets.compare_digest(given.encode(), token.encode()):
+        """The server token (the owner)."""
+        if not is_admin(bearer(authorization)):
             raise HTTPException(401, "invalid token")
+
+    def caller(authorization: str | None = Header(default=None)) -> Optional[str]:
+        """None for the owner, else the one service whose share key was sent."""
+        given = bearer(authorization)
+        if is_admin(given):
+            return None
+        sid = store.service_of_key(key_hash(given)) if store is not None and len(given) >= 16 else None
+        if sid is None:
+            raise HTTPException(401, "invalid token")
+        return sid
 
     @app.middleware("http")
     async def limit_body(request: Request, call_next):
@@ -174,11 +191,12 @@ def create_app(encoder: Encoder | None = None, token: str | None = None, store: 
     def health():
         return {"status": "ok", "model": MODEL_ID, "dim": enc.dim, "device": enc.device, "database": store is not None}
 
-    @app.get("/v1/models", dependencies=[Depends(auth)])
+    # a member with any service's share key may use the model (indexing and questions need it)
+    @app.get("/v1/models", dependencies=[Depends(caller)])
     def models():
         return {"object": "list", "data": [{"id": MODEL_ID, "object": "model", "owned_by": "docask"}]}
 
-    @app.post("/v1/embeddings", dependencies=[Depends(auth)])
+    @app.post("/v1/embeddings", dependencies=[Depends(caller)])
     def embeddings(req: EmbeddingRequest):
         texts = [req.input] if isinstance(req.input, str) else req.input
         if not texts:
@@ -200,13 +218,22 @@ def create_app(encoder: Encoder | None = None, token: str | None = None, store: 
         }
 
     if store is not None:
-        _store_routes(app, enc, store, auth)
+        _store_routes(app, enc, store, auth, caller)
     return app
 
 
-def _store_routes(app: FastAPI, enc: Encoder, store: Any, auth) -> None:
-    """The shared index and chats. All need the token."""
+def key_hash(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def _store_routes(app: FastAPI, enc: Encoder, store: Any, auth, caller) -> None:
+    """The shared index and chats. The owner (server token) may do everything; a share key
+    opens only its own service: its settings, documents and search."""
     dep = [Depends(auth)]
+
+    def allowed(who: Optional[str], sid: str) -> None:
+        if who is not None and who != sid:
+            raise HTTPException(403, "this share key is for another service")
 
     @app.get("/v1/store", dependencies=dep)
     def store_info():
@@ -220,30 +247,50 @@ def _store_routes(app: FastAPI, enc: Encoder, store: Any, auth) -> None:
     def put_service(sid: str, body: ServiceIn):
         return store.put_service(sid, body.data)
 
+    @app.get("/v1/services/{sid}")
+    def get_service(sid: str, who: Optional[str] = Depends(caller)):
+        allowed(who, sid)
+        return store.get_service(sid)
+
+    @app.post("/v1/services/{sid}/key", dependencies=dep)
+    def new_key(sid: str):
+        """A new share key for the service; the old one stops working. Shown once."""
+        key = secrets.token_urlsafe(32)
+        store.set_service_key(sid, key_hash(key))
+        log.info("new share key for a service")
+        return {"key": key}
+
     @app.delete("/v1/services/{sid}", dependencies=dep)
     def delete_service(sid: str, data: bool = False):
         store.delete_service(sid, data)
         return {"ok": True}
 
-    @app.get("/v1/services/{sid}/documents", dependencies=dep)
-    def documents(sid: str):
+    @app.get("/v1/services/{sid}/documents")
+    def documents(sid: str, who: Optional[str] = Depends(caller)):
+        allowed(who, sid)
         return store.documents(sid)
 
-    @app.put("/v1/services/{sid}/documents", dependencies=dep)
-    def put_document(sid: str, body: DocumentIn):
+    @app.put("/v1/services/{sid}/documents")
+    def put_document(sid: str, body: DocumentIn, who: Optional[str] = Depends(caller)):
+        allowed(who, sid)
         return store.put_document(sid, body.model_dump())
 
-    @app.delete("/v1/services/{sid}/documents", dependencies=dep)
-    def delete_documents(sid: str, path: Optional[str] = None):
+    @app.delete("/v1/services/{sid}/documents")
+    def delete_documents(sid: str, path: Optional[str] = None, who: Optional[str] = Depends(caller)):
+        allowed(who, sid)
+        if path is None and who is not None:
+            raise HTTPException(403, "only the owner may clear a whole service")
         return {"deleted": store.delete_document(sid, path)}
 
-    @app.patch("/v1/documents/{doc_id}", dependencies=dep)
-    def set_status(doc_id: int, body: StatusIn):
+    @app.patch("/v1/documents/{doc_id}")
+    def set_status(doc_id: int, body: StatusIn, who: Optional[str] = Depends(caller)):
+        allowed(who, store.service_of_document(doc_id))
         store.set_status(doc_id, body.status, body.message)
         return {"ok": True}
 
-    @app.post("/v1/documents/{doc_id}/chunks", dependencies=dep)
-    def add_chunks(doc_id: int, body: ChunksIn):
+    @app.post("/v1/documents/{doc_id}/chunks")
+    def add_chunks(doc_id: int, body: ChunksIn, who: Optional[str] = Depends(caller)):
+        allowed(who, store.service_of_document(doc_id))
         if len(body.chunks) > MAX_CHUNKS:
             raise HTTPException(413, f"at most {MAX_CHUNKS} chunks per request")
         given = [c.embedding for c in body.chunks]
@@ -259,8 +306,10 @@ def _store_routes(app: FastAPI, enc: Encoder, store: Any, auth) -> None:
         log.info("stored %d chunks (%d embedded) in %.2fs", len(body.chunks), len(todo), time.time() - t)
         return {"chunkCount": n}
 
-    @app.post("/v1/search", dependencies=dep)
-    def search(body: SearchIn):
+    @app.post("/v1/search")
+    def search(body: SearchIn, who: Optional[str] = Depends(caller)):
+        for sid in body.serviceIds:
+            allowed(who, sid)
         t = time.time()
         out: dict[int, dict] = {}
         for q in body.queries:

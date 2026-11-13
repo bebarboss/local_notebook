@@ -5,6 +5,7 @@ import type { Effort, KnowledgeInfo, Service } from "../lib/types";
 import { th } from "../i18n/th";
 import { formatBytes, useApp, visibleModels } from "../state";
 import { ConfirmDialog, Modal, Switch } from "./ui";
+import { SharePanel } from "./SharePanel";
 
 // All have white-text contrast >= 4.5:1
 export const SERVICE_COLORS = ["#1F4FD1", "#B45309", "#0F766E", "#7C3AED", "#BE123C", "#0E7490", "#4D7C0F", "#475569"];
@@ -110,6 +111,8 @@ export function ServiceEditor({ service, onClose }: { service: Service | null; o
             <FolderPlus size={16} strokeWidth={1.8} aria-hidden="true" /> เพิ่มโฟลเดอร์
           </button>
         </div>
+
+        {service && <SharePanel service={service} onLeft={() => onClose()} />}
 
         {service && (
           <div className="field">

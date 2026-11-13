@@ -1,20 +1,24 @@
-//! The team database on the embedding server (server/embed/db.py, PostgreSQL + pgvector).
+//! Sharing services through the team database on the server (server/embed/db.py,
+//! PostgreSQL + pgvector).
 //!
-//! Switched on in Settings ("ใช้ฐานข้อมูลของทีมบน server"):
-//! - a PC that has the files still indexes them here (vectors come from the server model), then
-//!   **syncs** each service up: new / changed documents with their vectors, deletions of the
-//!   documents this PC uploaded and no longer has. The same sync uploads an existing index.
-//! - every PC **searches** the server, so team members without the files can ask too;
-//!   if the server is down and this PC has a local index, it searches that instead.
-//! - services are shared: the ones on the server appear on every PC.
+//! - The **owner** (this PC has the server token, from a setup link) turns on "แชร์ service นี้":
+//!   the service is registered on the server, gets a **share key**, and its index is synced up.
+//!   "คัดลอกลิงก์เชิญ" gives `docask://join?…` with that key; "สร้างคีย์ใหม่" revokes old links.
+//! - A **member** clicks the invite: the service appears here (`shared`), its key goes to the
+//!   credential store. The key opens only that service — search it, add documents to it.
+//! - A shared service is searched on the server. A PC that has files for it indexes them here
+//!   (vectors from the server model), then syncs: new / changed documents go up with their
+//!   vectors; only documents this PC uploaded are removed when they disappear here.
+//!   If the server is down and this PC has a local index, it searches that instead.
+//! - Chats stay on each PC.
 //!
-//! Texts are never logged — only counts.
+//! Texts and keys are never logged — only counts.
 
+use crate::commands::AppState;
 use crate::embed::{ModelId, Source};
-use crate::embed_server::api;
+use crate::embed_server::{api, api_as, credential_for, is_owner, server_url};
 use crate::errors::{AppError, AppResult};
 use crate::services::Service;
-use crate::commands::AppState;
 use crate::store::{Hit, VectorStore};
 use parking_lot::Mutex;
 use reqwest::Method;
@@ -89,12 +93,15 @@ pub fn machine() -> String {
     std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "pc".into())
 }
 
-pub fn enabled(app: &AppHandle) -> bool {
-    app.state::<AppState>().settings.lock().team_server
-}
-
+/// Totals over the whole database — the owner only.
 pub async fn info() -> AppResult<StoreInfo> {
     api(Method::GET, "/v1/store", None, SHORT).await
+}
+
+/// The model the server's database uses (from /health: no credential needed).
+async fn server_model() -> AppResult<String> {
+    let h = crate::embed_server::health(&server_url()?).await?;
+    Ok(h.model)
 }
 
 /// Vectors made here can go up only if they come from the server's model.
@@ -115,29 +122,160 @@ pub fn compatible(src: &Source, server_model: &str) -> AppResult<()> {
 }
 
 /// The settings a team shares (not folders: those are paths on one PC).
-fn shared(s: &Service) -> serde_json::Value {
+fn shared_settings(s: &Service) -> serde_json::Value {
     json!({ "name": s.name, "code": s.code, "color": s.color, "model": s.model, "effort": s.effort,
             "topK": s.top_k, "systemPrompt": s.system_prompt })
 }
 
-/// Services on the server that this PC does not have yet become local services (no folders).
-pub async fn pull_services(app: &AppHandle) -> AppResult<usize> {
-    let remote: Vec<RemoteService> = api(Method::GET, "/v1/services", None, SHORT).await?;
-    let state = app.state::<AppState>();
-    let mut added = 0;
-    for r in remote {
-        let d = &r.data;
-        let text = |k: &str| d.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        let top_k = d.get("topK").and_then(|v| v.as_u64()).unwrap_or(5) as u32;
-        if state.services.lock().adopt(&r.id, &text("name"), &text("code"), &text("color"), &text("model"), &text("effort"), top_k, &text("systemPrompt"))? {
-            added += 1;
-        }
-    }
-    if added > 0 {
-        let _ = app.emit("services-changed", ());
-    }
-    Ok(added)
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
+
+pub fn invite_link(url: &str, service_id: &str, key: &str, name: &str) -> String {
+    format!("docask://join?url={}&service={}&key={}&name={}", urlencode(url), urlencode(service_id), urlencode(key), urlencode(name))
+}
+
+// ------------------------------------------------------------------ owner
+
+fn require_owner() -> AppResult<()> {
+    if is_owner() {
+        Ok(())
+    } else {
+        Err(AppError::new("not_owner", "เครื่องนี้ไม่ใช่เจ้าของเซิร์ฟเวอร์ — แชร์หรือสร้างคีย์ได้เฉพาะเครื่องที่ตั้งค่าด้วยลิงก์ตั้งค่าของผู้ดูแล"))
+    }
+}
+
+async fn new_key(service_id: &str) -> AppResult<String> {
+    #[derive(Deserialize)]
+    struct K {
+        key: String,
+    }
+    let k: K = api(Method::POST, &format!("/v1/services/{service_id}/key"), None, SHORT).await?;
+    crate::secrets::set_service_key(service_id, &k.key)?;
+    Ok(k.key)
+}
+
+/// "แชร์ service นี้": register it on the server, make its share key, sync its index up.
+pub async fn share(app: &AppHandle, service_id: &str) -> AppResult<String> {
+    require_owner()?;
+    let state = app.state::<AppState>();
+    let svc = state.services.lock().get(service_id)?;
+    compatible(&state.embedding_source()?, &server_model().await?)?;
+    let _: serde_json::Value = api(Method::PUT, &format!("/v1/services/{service_id}"), Some(&json!({ "data": shared_settings(&svc) })), SHORT).await?;
+    let key = match crate::secrets::get_service_key(service_id)? {
+        Some(k) => k,
+        None => new_key(service_id).await?,
+    };
+    state.services.lock().set_shared(service_id, true)?;
+    let _ = app.emit("services-changed", ());
+    crate::diag::log(format!("[{}] shared on the team database", svc.code));
+    spawn_sync(app, vec![service_id.to_string()]);
+    Ok(invite_link(&server_url()?, service_id, &key, &svc.name))
+}
+
+/// The invite link of a shared service (a key is made if it has none yet).
+pub async fn invite(app: &AppHandle, service_id: &str) -> AppResult<String> {
+    let svc = app.state::<AppState>().services.lock().get(service_id)?;
+    let key = match crate::secrets::get_service_key(service_id)? {
+        Some(k) => k,
+        None => {
+            require_owner()?;
+            new_key(service_id).await?
+        }
+    };
+    Ok(invite_link(&server_url()?, service_id, &key, &svc.name))
+}
+
+/// "สร้างคีย์ใหม่": old invite links stop working at once.
+pub async fn rotate(app: &AppHandle, service_id: &str) -> AppResult<String> {
+    require_owner()?;
+    let svc = app.state::<AppState>().services.lock().get(service_id)?;
+    let key = new_key(service_id).await?;
+    crate::diag::log(format!("[{}] new share key", svc.code));
+    Ok(invite_link(&server_url()?, service_id, &key, &svc.name))
+}
+
+/// Stop sharing on this PC (searches go back to the local index). The server keeps its copy
+/// unless `delete` — then the owner removes the service and its documents there too.
+pub async fn unshare(app: &AppHandle, service_id: &str, delete: bool) -> AppResult<()> {
+    if delete {
+        require_owner()?;
+        let _: serde_json::Value = api(Method::DELETE, &format!("/v1/services/{service_id}?data=true"), None, SHORT).await?;
+        crate::secrets::delete_service_key(service_id)?;
+    }
+    app.state::<AppState>().services.lock().set_shared(service_id, false)?;
+    let _ = app.emit("services-changed", ());
+    Ok(())
+}
+
+// ------------------------------------------------------------------ member
+
+/// Accept an invite: the service appears here, its key goes to the credential store, and the
+/// server becomes this PC's embedding server.
+pub async fn join(app: &AppHandle, url: &str, service_id: &str, key: &str) -> AppResult<Service> {
+    let state = app.state::<AppState>();
+    let health = crate::embed_server::health(url).await?;
+    // the invite's server becomes this PC's server (an owner keeps its own URL)
+    let mut cfg = crate::embed_server::ServerConfig::load();
+    if cfg.url.trim().is_empty() || !is_owner() {
+        cfg.url = url.to_string();
+    }
+    if !is_owner() && cfg.member_service.is_none() {
+        cfg.member_service = Some(service_id.to_string());
+    }
+    cfg.save()?;
+    let r: RemoteService = api_as(key, Method::GET, &format!("/v1/services/{service_id}"), None, SHORT).await?;
+    crate::secrets::set_service_key(service_id, key)?;
+    let d = &r.data;
+    let text = |k: &str| d.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let top_k = d.get("topK").and_then(|v| v.as_u64()).unwrap_or(5) as u32;
+    let added = state.services.lock().adopt(&r.id, &text("name"), &text("code"), &text("color"), &text("model"), &text("effort"), top_k, &text("systemPrompt"))?;
+    if !added {
+        state.services.lock().set_shared(&r.id, true)?;
+    }
+    // questions must be embedded with the database's model
+    if !matches!(state.embedding_source()?, Source::Server(ref m) if *m == health.model) {
+        let s = {
+            let mut cur = state.settings.lock();
+            cur.embedding_model = format!("{}{}", crate::embed_server::PREFIX, health.model);
+            cur.clone()
+        };
+        s.save()?;
+        state.embedder.unload();
+    }
+    crate::diag::log("joined a shared service");
+    let _ = app.emit("services-changed", ());
+    let joined = state.services.lock().get(&r.id);
+    joined
+}
+
+/// Leave a joined service: it disappears from this PC, its key is forgotten. The team keeps it.
+pub fn leave(app: &AppHandle, service_id: &str) -> AppResult<()> {
+    let state = app.state::<AppState>();
+    state.services.lock().forget(service_id)?;
+    crate::secrets::delete_service_key(service_id)?;
+    let mut cfg = crate::embed_server::ServerConfig::load();
+    if cfg.member_service.as_deref() == Some(service_id) {
+        // another joined service's key can carry the embeddings
+        cfg.member_service = state
+            .services
+            .lock()
+            .list()
+            .into_iter()
+            .find(|s| s.shared && matches!(crate::secrets::get_service_key(&s.id), Ok(Some(_))))
+            .map(|s| s.id);
+        cfg.save()?;
+    }
+    let _ = app.emit("services-changed", ());
+    Ok(())
+}
+
+// ------------------------------------------------------------------ sync
 
 /// Upload what changed in one service's local index; delete what this PC removed.
 pub async fn sync_service(app: &AppHandle, service_id: &str) -> AppResult<SyncReport> {
@@ -158,14 +296,15 @@ pub async fn sync_service(app: &AppHandle, service_id: &str) -> AppResult<SyncRe
 async fn sync_inner(app: &AppHandle, sid: &str) -> AppResult<SyncReport> {
     let state = app.state::<AppState>();
     let svc = state.services.lock().get(sid)?;
-    let src = state.embedding_source()?;
-    let server = info().await?;
-    compatible(&src, &server.model)?;
-    let _: serde_json::Value = api(Method::PUT, &format!("/v1/services/{sid}"), Some(&json!({ "data": shared(&svc) })), SHORT).await?;
+    let cred = credential_for(sid)?;
+    compatible(&state.embedding_source()?, &server_model().await?)?;
+    if is_owner() {
+        let _: serde_json::Value = api(Method::PUT, &format!("/v1/services/{sid}"), Some(&json!({ "data": shared_settings(&svc) })), SHORT).await?;
+    }
 
     let store = state.stores.get(sid)?;
     let local: Vec<_> = store.lock().list_documents()?.into_iter().filter(|d| d.status == "ready").collect();
-    let remote: Vec<RemoteDoc> = api(Method::GET, &format!("/v1/services/{sid}/documents"), None, SHORT).await?;
+    let remote: Vec<RemoteDoc> = api_as(&cred, Method::GET, &format!("/v1/services/{sid}/documents"), None, SHORT).await?;
     let by_path: HashMap<&str, &RemoteDoc> = remote.iter().map(|d| (d.path.as_str(), d)).collect();
     let me = machine();
     let mut report = SyncReport { service_id: sid.into(), ..Default::default() };
@@ -181,7 +320,8 @@ async fn sync_inner(app: &AppHandle, sid: &str) -> AppResult<SyncReport> {
         if chunks.is_empty() {
             continue;
         }
-        let doc: RemoteDoc = api(
+        let doc: RemoteDoc = api_as(
+            &cred,
             Method::PUT,
             &format!("/v1/services/{sid}/documents"),
             Some(&json!({ "path": d.path, "hash": d.hash, "mtime": d.mtime, "bytes": d.bytes, "status": "indexing", "indexedBy": me })),
@@ -191,9 +331,9 @@ async fn sync_inner(app: &AppHandle, sid: &str) -> AppResult<SyncReport> {
         for (i, part) in chunks.chunks(BATCH).enumerate() {
             let items: Vec<_> = part.iter().map(|(page, ord, text, v)| json!({ "ord": ord, "page": page, "text": text, "embedding": v })).collect();
             let _: serde_json::Value =
-                api(Method::POST, &format!("/v1/documents/{}/chunks", doc.id), Some(&json!({ "replace": i == 0, "chunks": items })), LONG).await?;
+                api_as(&cred, Method::POST, &format!("/v1/documents/{}/chunks", doc.id), Some(&json!({ "replace": i == 0, "chunks": items })), LONG).await?;
         }
-        let _: serde_json::Value = api(Method::PATCH, &format!("/v1/documents/{}", doc.id), Some(&json!({ "status": "ready" })), SHORT).await?;
+        let _: serde_json::Value = api_as(&cred, Method::PATCH, &format!("/v1/documents/{}", doc.id), Some(&json!({ "status": "ready" })), SHORT).await?;
         report.uploaded += 1;
     }
 
@@ -201,23 +341,14 @@ async fn sync_inner(app: &AppHandle, sid: &str) -> AppResult<SyncReport> {
     let here: HashSet<&str> = local.iter().map(|d| d.path.as_str()).collect();
     for r in remote.iter().filter(|r| r.indexed_by == me && !here.contains(r.path.as_str())) {
         let path = urlencode(&r.path);
-        let _: serde_json::Value = api(Method::DELETE, &format!("/v1/services/{sid}/documents?path={path}"), None, SHORT).await?;
+        let _: serde_json::Value = api_as(&cred, Method::DELETE, &format!("/v1/services/{sid}/documents?path={path}"), None, SHORT).await?;
         report.deleted += 1;
     }
     crate::diag::log(format!("[{}] team sync: {} up, {} deleted, {} unchanged", svc.code, report.uploaded, report.deleted, report.unchanged));
     Ok(report)
 }
 
-fn urlencode(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
-}
-
-/// Sync in the background and tell the UI ("team-sync"); used after indexing and by the button.
+/// Sync in the background and tell the UI ("team-sync"); after indexing and from the button.
 pub fn spawn_sync(app: &AppHandle, service_ids: Vec<String>) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -234,30 +365,57 @@ pub fn spawn_sync(app: &AppHandle, service_ids: Vec<String>) {
     });
 }
 
-/// After an index job: push it up when the team database is on.
+/// Every shared service that has files on this PC.
+pub fn sync_all(app: &AppHandle) {
+    let ids = app.state::<AppState>().services.lock().list().into_iter().filter(|s| s.shared && (!s.folders.is_empty() || !s.files.is_empty())).map(|s| s.id).collect();
+    spawn_sync(app, ids);
+}
+
+/// After an index job: push a shared service up.
 pub fn after_index(app: &AppHandle, service_id: &str) {
-    if enabled(app) {
+    if app.state::<AppState>().services.lock().get(service_id).is_ok_and(|s| s.shared) {
         spawn_sync(app, vec![service_id.to_string()]);
     }
 }
 
-/// Search the team database. Hits come back with their service from `targets`.
+/// v0.13.0 had one switch for everything: its services with files become shared services.
+pub fn migrate_global_switch(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if !state.settings.lock().team_server {
+        return;
+    }
+    for s in state.services.lock().list() {
+        if !s.folders.is_empty() || !s.files.is_empty() {
+            let _ = state.services.lock().set_shared(&s.id, true);
+        }
+    }
+    let s = {
+        let mut cur = state.settings.lock();
+        cur.team_server = false;
+        cur.clone()
+    };
+    let _ = s.save();
+}
+
+// ------------------------------------------------------------------ search
+
+/// Search shared services on the server, each with its own credential.
 pub async fn search(targets: &[Service], queries: &[String], k: usize, threshold: f32, hybrid: bool) -> AppResult<Vec<(Service, Hit)>> {
     #[derive(Deserialize)]
     struct Found {
         hits: Vec<RemoteHit>,
     }
-    let ids: Vec<&str> = targets.iter().map(|s| s.id.as_str()).collect();
-    let body = json!({ "serviceIds": ids, "queries": queries.iter().take(4).collect::<Vec<_>>(), "k": k.clamp(1, 60), "threshold": threshold, "hybrid": hybrid });
-    let found: Found = api(Method::POST, "/v1/search", Some(&body), Duration::from_secs(30)).await?;
-    Ok(found
-        .hits
-        .into_iter()
-        .filter_map(|h| {
-            let s = targets.iter().find(|s| s.id == h.service_id)?.clone();
-            Some((s, Hit { chunk_id: h.chunk_id, score: h.score, fused: h.fused, keyword: h.keyword, doc_path: h.doc_path, page: h.page, ord: h.ord, text: h.text }))
-        })
-        .collect())
+    let mut out = Vec::new();
+    for s in targets {
+        let cred = credential_for(&s.id)?;
+        let body = json!({ "serviceIds": [s.id], "queries": queries.iter().take(4).collect::<Vec<_>>(), "k": k.clamp(1, 60), "threshold": threshold, "hybrid": hybrid });
+        let found: Found = api_as(&cred, Method::POST, "/v1/search", Some(&body), Duration::from_secs(30)).await?;
+        out.extend(found.hits.into_iter().filter(|h| h.service_id == s.id).map(|h| {
+            (s.clone(), Hit { chunk_id: h.chunk_id, score: h.score, fused: h.fused, keyword: h.keyword, doc_path: h.doc_path, page: h.page, ord: h.ord, text: h.text })
+        }));
+    }
+    out.sort_by(|a, b| b.1.fused.total_cmp(&a.1.fused).then(b.1.score.total_cmp(&a.1.score)));
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -280,13 +438,20 @@ mod tests {
     }
 
     #[test]
+    fn invite_links_round_trip() {
+        let l = invite_link("https://abc.trycloudflare.com", "a1b2c3", "Key_-0123456789abcdefXYZ", "HR · นโยบาย");
+        let j = crate::connect::parse_join(&l).unwrap();
+        assert_eq!((j.url.as_str(), j.service.as_str(), j.key.as_str(), j.name.as_str()), ("https://abc.trycloudflare.com", "a1b2c3", "Key_-0123456789abcdefXYZ", "HR · นโยบาย"));
+    }
+
+    #[test]
     fn shared_settings_leave_folders_out() {
         let s = Service {
             id: "hr".into(), name: "HR".into(), code: "HR".into(), color: "#1F4FD1".into(), folders: vec!["C:\\x".into()],
             files: vec![], excluded: vec![], model: "godev1".into(), effort: "medium".into(), top_k: 8,
-            system_prompt: "p".into(), knowledge_dir: String::new(), created_at: 0, updated_at: 0,
+            system_prompt: "p".into(), knowledge_dir: String::new(), shared: true, created_at: 0, updated_at: 0,
         };
-        let v = shared(&s);
+        let v = shared_settings(&s);
         assert_eq!(v["topK"], 8);
         assert!(v.get("folders").is_none());
     }

@@ -130,12 +130,13 @@ URL ของ tunnel จะเปลี่ยน ให้ใส่ URL ให�
   ```
 - เครื่องที่อัปเดตจากเวอร์ชันก่อน: เพิ่ม `POSTGRES_PASSWORD` ใน `.env` ก่อน (`docker compose` จะไม่ยอมเริ่มถ้าไม่มี)
 
-API (ทุกตัวต้องมี token — แอป DocAsk เป็นคนเรียก):
+API (แอป DocAsk เป็นคนเรียก) — **token ของเซิร์ฟเวอร์** ทำได้ทุกอย่าง · **คีย์แชร์ของ service** (จากลิงก์เชิญในแอป) เปิดได้เฉพาะ service นั้น: อ่านตั้งค่า, รายการ/เพิ่ม/ลบเอกสารทีละไฟล์, ค้น และ `/v1/embeddings` · สร้างคีย์ ลบ service ดู service อื่น ดูยอดรวม และแชต = เจ้าของเท่านั้น
 
 | | |
 |---|---|
 | `GET /v1/store` | จำนวนเอกสาร / ท่อน / แชต |
 | `GET/PUT/DELETE /v1/services[/{id}]` | ตั้งค่า service ที่ใช้ร่วมกัน (เก็บเป็น JSON) |
+| `POST /v1/services/{id}/key` | **คีย์แชร์**ใหม่ของ service (token เจ้าของเท่านั้น) — คีย์เดิมใช้ไม่ได้ทันที · เก็บแค่ SHA-256 |
 | `GET/PUT/DELETE /v1/services/{id}/documents` | รายการเอกสาร / ลงทะเบียน / ลบ (`?path=`) |
 | `POST /v1/documents/{id}/chunks` | ส่งท่อน (≤ 64 ต่อครั้ง) — เซิร์ฟเวอร์ทำ embedding เอง หรือรับ vector ที่ทำไว้แล้ว · `replace: true` ล้างท่อนเก่า |
 | `PATCH /v1/documents/{id}` | สถานะ (indexing / ready / error) |

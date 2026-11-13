@@ -100,3 +100,32 @@ pub fn server_token_status() -> (bool, Option<String>) {
         _ => (false, None),
     }
 }
+
+// ------------------------------------------------- share keys (one per shared service)
+
+const SERVICE_KEY: &str = "DocAsk/Service key";
+
+fn service_entry(service_id: &str) -> AppResult<keyring::Entry> {
+    Ok(keyring::Entry::new(SERVICE_KEY, service_id)?)
+}
+
+pub fn set_service_key(service_id: &str, key: &str) -> AppResult<()> {
+    validate_server_token(key)?;
+    service_entry(service_id)?.set_password(key.trim())?;
+    Ok(())
+}
+
+pub fn get_service_key(service_id: &str) -> AppResult<Option<String>> {
+    match service_entry(service_id)?.get_password() {
+        Ok(k) => Ok(Some(k)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn delete_service_key(service_id: &str) -> AppResult<()> {
+    match service_entry(service_id)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}

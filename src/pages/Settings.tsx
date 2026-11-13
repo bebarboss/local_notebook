@@ -321,6 +321,8 @@ function EmbeddingSection() {
   const app = useApp();
   const [st, setSt] = useState<EmbeddingStatus | null>(null);
   const model = LOCAL_MODEL;
+  // on the server, downloading / picking a local model would switch away from it
+  const onServer = app.settings.embeddingModel.startsWith("server:");
   const [dl, setDl] = useState<DownloadProgress | null>(null);
   const [confirmReindex, setConfirmReindex] = useState(false);
   const load = () => api.embeddingStatus().then(setSt);
@@ -345,6 +347,7 @@ function EmbeddingSection() {
             {st?.path && <span className="d mono" style={{ wordBreak: "break-all" }}>{st.path}</span>}
           </div>
         </div>
+        {!onServer && (<>
         <div className="list-row">
           <div className="l">
             <span className="t">(ก) ดาวน์โหลด bge-m3 จาก Hugging Face</span>
@@ -366,6 +369,7 @@ function EmbeddingSection() {
             try { await app.updateSettings({ embeddingModel: model }); setSt(await api.useEmbeddingFolder(model, f)); app.toast("ใช้โมเดลจากโฟลเดอร์แล้ว"); } catch (e) { app.toast((e as { message: string }).message); }
           }}><FolderOpen size={16} strokeWidth={1.8} aria-hidden="true" />เลือกโฟลเดอร์</button>
         </div>
+        </>)}
         <EmbedServerRow onChanged={setSt} />
         <TeamRow />
         <IndexLoadRow />
@@ -663,7 +667,7 @@ function PasteLink() {
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         <label className="sr-only" htmlFor="connect-link">ลิงก์ตั้งค่าจากผู้ดูแลเซิร์ฟเวอร์</label>
         <input id="connect-link" className="input mono" type="password" autoComplete="off" spellCheck={false} style={{ width: 360 }}
-          placeholder="วางลิงก์ตั้งค่า docask://connect?… (ถ้ากดลิงก์แล้วไม่เปิดแอป)" value={link} onChange={(e) => setLink(e.target.value)} />
+          placeholder="วางลิงก์ตั้งค่า / ลิงก์เชิญ docask://… (ถ้ากดลิงก์แล้วไม่เปิดแอป)" value={link} onChange={(e) => setLink(e.target.value)} />
         <button className="btn" disabled={!link.trim()} onClick={async () => {
           setError(null);
           try { await api.connectPaste(link.trim()); setLink(""); } catch (e) { setError((e as { message: string }).message); }
@@ -674,14 +678,12 @@ function PasteLink() {
   );
 }
 
-/** "ใช้ฐานข้อมูลของทีมบน server": search the server's database, sync local indexes up */
+/** The team database: who this PC is (owner / member), what is shared, links, sync. */
 function TeamRow() {
   const app = useApp();
   const [st, setSt] = useState<TeamStatus | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const load = () => api.teamStatus().then(setSt).catch(() => {});
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [app.services.length]);
   useEffect(() => {
     const off = api.on("team-sync", (r) => {
       const name = app.services.find((s) => s.id === r.serviceId)?.name ?? r.serviceId;
@@ -692,46 +694,29 @@ function TeamRow() {
     return () => { off.then((f) => f()); };
   }, [app]);
 
-  const on = app.settings.teamServer;
-  const toggle = async (v: boolean) => {
-    setBusy(true);
-    setError(null);
-    try {
-      setSt(await api.setTeamServer(v));
-      await app.updateSettings({ teamServer: v });
-      await app.refreshServices();
-      app.toast(v ? "เปิดใช้ฐานข้อมูลของทีมแล้ว · กำลังซิงก์ index ขึ้น server" : "ปิดฐานข้อมูลของทีมแล้ว · ค้นจาก index ในเครื่อง");
-    } catch (e) {
-      setError((e as { message: string }).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <div className="list-row" style={{ alignItems: "flex-start" }}>
       <div className="l" style={{ gap: 6 }}>
-        <span className="t">ใช้ฐานข้อมูลของทีมบน server</span>
+        <span className="t">ใช้งานร่วมกันกับทีม</span>
         <span className="d">
-          ค้นเอกสารจากฐานข้อมูลบนเซิร์ฟเวอร์ (ใช้ร่วมกันทั้งทีม — เครื่องที่ไม่มีไฟล์ก็ถามได้) · เครื่องที่มีไฟล์ทำ index ตามปกติแล้วส่งขึ้นให้เอง ·
-          ใช้ URL + token เดียวกับเซิร์ฟเวอร์ embedding ด้านบน · ถ้า server ล่ม เครื่องที่มี index จะค้นในเครื่องแทน
+          แชร์ทีละ service: เจ้าของเปิด "แชร์ service นี้" ในหน้าแก้ไข service แล้วส่ง <b>ลิงก์เชิญ</b> ให้ทีม ·
+          คนที่กดลิงก์เชิญเห็นเฉพาะ service นั้น ถามและเพิ่มเอกสารได้ · แชตเป็นของแต่ละคน
         </span>
-        {st?.info && (
+        {st && (
           <span className="d">
-            บน server: <span className="mono">{st.info.documents.toLocaleString()}</span> เอกสาร ·{" "}
-            <span className="mono">{st.info.chunks.toLocaleString()}</span> ท่อน · โมเดล {st.info.model} · เครื่องนี้ชื่อ <span className="mono">{st.machine}</span>
+            เครื่องนี้: <b>{st.owner ? "เจ้าของเซิร์ฟเวอร์" : "สมาชิก (เข้าร่วมด้วยลิงก์เชิญ)"}</b> · ชื่อ <span className="mono">{st.machine}</span> ·
+            service ที่แชร์อยู่ {st.sharedServices}
+            {st.info && <> · บน server {st.info.documents.toLocaleString()} เอกสาร / {st.info.chunks.toLocaleString()} ท่อน</>}
           </span>
         )}
-        {!st?.info && st?.error && <span className="d" style={{ color: "var(--warn-text)" }}>ยังต่อฐานข้อมูลไม่ได้: {st.error}</span>}
-        {error && <span className="d" style={{ color: "var(--warn-text)" }} role="alert">{error}</span>}
-        {on && (
-          <button className="btn" style={{ alignSelf: "flex-start" }} disabled={busy} onClick={async () => {
-            try { await api.teamSyncNow(); app.toast("กำลังซิงก์ทุก service ขึ้น server…"); } catch (e) { app.toast((e as { message: string }).message); }
+        {st?.error && <span className="d" style={{ color: "var(--warn-text)" }}>ยังต่อฐานข้อมูลไม่ได้: {st.error}</span>}
+        {!!st?.sharedServices && (
+          <button className="btn" style={{ alignSelf: "flex-start" }} onClick={async () => {
+            try { await api.teamSyncNow(); app.toast("กำลังซิงก์ service ที่แชร์ขึ้น server…"); } catch (e) { app.toast((e as { message: string }).message); }
           }}>ซิงก์ตอนนี้</button>
         )}
         <PasteLink />
       </div>
-      <Switch checked={on} disabled={busy || (!on && !st?.info)} label="ใช้ฐานข้อมูลของทีมบน server" onChange={toggle} />
     </div>
   );
 }
@@ -745,6 +730,7 @@ function EmbedServerRow({ onChanged }: { onChanged: (s: EmbeddingStatus) => void
   const [test, setTest] = useState<{ result?: EmbedServerTest; error?: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  const [leave, setLeave] = useState(false);
   useEffect(() => {
     api.embedServerInfo().then((i) => { setInfo(i); setUrl(i.url); }).catch(() => {});
   }, []);
@@ -775,27 +761,13 @@ function EmbedServerRow({ onChanged }: { onChanged: (s: EmbeddingStatus) => void
           เช่น Docker บน Mac mini ที่บ้าน (โฟลเดอร์ server/embed ใน repo) · ข้อความทุกท่อนของเอกสารถูกส่งไปเครื่องนั้นตอนทำ index (และคำถามตอนค้นหา) ·
           ต่อผ่าน ngrok หรือ Tailscale · token เก็บใน Windows Credential Manager · ถ้าเครื่องนั้นปิด จะใช้โมเดลในเครื่องสำรอง (ถ้ามี)
         </span>
-        {info?.builtin && (
+        {info?.url && (
           <span className="d">
-            <span className="ok-text">ตั้งค่ามากับโปรแกรมแล้ว</span>
-            {info.tokenLocked ? " · กดทดสอบได้เลย · ถ้า URL ของเซิร์ฟเวอร์เปลี่ยน ใส่ URL ใหม่แล้วกด บันทึกและทดสอบ"
-              : info.hasToken ? " · กดทดสอบได้เลย" : " · ใส่ token ครั้งเดียว (ขอจากเจ้าของเซิร์ฟเวอร์) แล้วกด บันทึกและทดสอบ"}
+            <span className="mono" style={{ wordBreak: "break-all" }}>{info.url}</span>
+            {info.hasToken ? ` · token ····${info.tokenLast4 ?? ""}` : " · ยังไม่มี token"}
           </span>
         )}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-          <label className="sr-only" htmlFor="es-url">URL ของเซิร์ฟเวอร์ embedding</label>
-          <input id="es-url" className="input mono" placeholder="https://mac-mini.xxxx.ts.net" value={url} onChange={(e) => setUrl(e.target.value)} style={{ width: 300 }} spellCheck={false} autoComplete="off" />
-          {info?.tokenLocked ? (
-            <span className="d" title="token ฝังมากับโปรแกรม เปลี่ยนได้แค่ URL">token มากับโปรแกรม ····{info.tokenLast4}</span>
-          ) : (
-            <>
-              <label className="sr-only" htmlFor="es-token">Token</label>
-              <input id="es-token" className="input mono" type="password" autoComplete="off" spellCheck={false} style={{ width: 230 }}
-                placeholder={info?.hasToken ? `มีแล้ว ····${info.tokenLast4 ?? ""}` : "token จาก .env ของเซิร์ฟเวอร์"}
-                title={info?.hasToken ? "ใส่ token ใหม่เพื่อเปลี่ยน · เว้นว่างไว้ = ใช้ token เดิม" : undefined}
-                value={token} onChange={(e) => setToken(e.target.value)} />
-            </>
-          )}
           <button className="btn" disabled={busy || !url.trim() || (!info?.hasToken && !token.trim())} onClick={saveAndTest}>
             {busy ? "กำลังทดสอบ…" : dirty ? "บันทึกและทดสอบ" : "ทดสอบ"}
           </button>
@@ -803,6 +775,19 @@ function EmbedServerRow({ onChanged }: { onChanged: (s: EmbeddingStatus) => void
             <button className="btn btn-primary" disabled={busy || r.model === current} onClick={() => setConfirm(true)}>ใช้เซิร์ฟเวอร์นี้</button>
           )}
         </div>
+        {/* normally a setup link fills these in; by hand only when the tunnel URL changed etc. */}
+        <details open={!info?.url || undefined}>
+          <summary className="d" style={{ cursor: "pointer" }}>ตั้งค่าเอง (ขั้นสูง) — ปกติใช้ลิงก์ตั้งค่าจากผู้ดูแลเซิร์ฟเวอร์แทน</summary>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
+            <label className="sr-only" htmlFor="es-url">URL ของเซิร์ฟเวอร์ embedding</label>
+            <input id="es-url" className="input mono" placeholder="https://xxxx.trycloudflare.com" value={url} onChange={(e) => setUrl(e.target.value)} style={{ width: 300 }} spellCheck={false} autoComplete="off" />
+            <label className="sr-only" htmlFor="es-token">Token</label>
+            <input id="es-token" className="input mono" type="password" autoComplete="off" spellCheck={false} style={{ width: 230 }}
+              placeholder={info?.hasToken ? `มีแล้ว ····${info.tokenLast4 ?? ""}` : "token จาก .env ของเซิร์ฟเวอร์"}
+              title={info?.hasToken ? "ใส่ token ใหม่เพื่อเปลี่ยน · เว้นว่างไว้ = ใช้ token เดิม" : undefined}
+              value={token} onChange={(e) => setToken(e.target.value)} />
+          </div>
+        </details>
         {test?.error && <span className="d" style={{ color: "var(--warn-text)" }} role="alert">ใช้ไม่ได้: {test.error}</span>}
         {r && <FallbackLine r={r} onDownloaded={saveAndTest} />}
         {r && (
@@ -812,13 +797,37 @@ function EmbedServerRow({ onChanged }: { onChanged: (s: EmbeddingStatus) => void
             {r.similar - r.unrelated < 0.1 && <span style={{ color: "var(--warn-text)" }}> · แยกความหมายภาษาไทยได้ไม่ดี</span>}
           </span>
         )}
-        {current && <span className="d">กำลังใช้ <span className="mono">{current}</span> บนเซิร์ฟเวอร์ · จะกลับไปใช้โมเดลในเครื่อง กดดาวน์โหลดหรือเลือกโฟลเดอร์ด้านบน</span>}
+        {current && (
+          <span className="d" style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            กำลังใช้ <span className="mono">{current}</span> บนเซิร์ฟเวอร์
+            <button className="btn btn-ghost" disabled={busy} onClick={() => setLeave(true)}>เลิกใช้เซิร์ฟเวอร์</button>
+          </span>
+        )}
         {!current && info?.url && (
           <button className="btn btn-ghost" style={{ alignSelf: "flex-start" }} onClick={async () => {
             try { const i = await api.forgetEmbedServer(); setInfo(i); setUrl(i.url); setTest(null); app.toast(i.builtin ? "กลับไปใช้ค่าที่มากับโปรแกรมแล้ว" : "ลบ URL และ token ของเซิร์ฟเวอร์แล้ว"); } catch (e) { app.toast((e as { message: string }).message); }
           }}>{info.builtin ? "กลับไปใช้ URL ที่มากับโปรแกรม" : "ลบ URL และ token"}</button>
         )}
       </div>
+      {leave && (
+        <ConfirmDialog title="เลิกใช้เซิร์ฟเวอร์?"
+          body="กลับไปทำ embedding ด้วย bge-m3 ในเครื่องนี้ และปิดฐานข้อมูลของทีม · ต้องดาวน์โหลด bge-m3 (~570 MB) ถ้ายังไม่มี และทำ embedding ใหม่ทุก service ในเครื่อง"
+          confirmLabel="เลิกใช้เซิร์ฟเวอร์"
+          onCancel={() => setLeave(false)}
+          onConfirm={async () => {
+            setLeave(false);
+            setBusy(true);
+            try {
+              await app.updateSettings({ embeddingModel: LOCAL_MODEL, teamServer: false });
+              onChanged(await api.embeddingStatus());
+              app.toast("กลับไปใช้โมเดลในเครื่องแล้ว — ถ้ายังไม่มีไฟล์โมเดล กดดาวน์โหลดด้านบน");
+            } catch (e) {
+              app.toast((e as { message: string }).message);
+            } finally {
+              setBusy(false);
+            }
+          }} />
+      )}
       {confirm && r && (
         <ConfirmDialog title={`ใช้ ${r.model} บนเซิร์ฟเวอร์?`}
           body="ข้อความทุกท่อนของทุก service จะถูกส่งไปเซิร์ฟเวอร์เพื่อทำ embedding ใหม่ทั้งหมด (vector เดิมใช้ต่อไม่ได้) · ถ้าเครื่องที่บ้านปิดหรือ Tailscale หลุด จะค้นเอกสารไม่ได้"
@@ -878,7 +887,7 @@ function KeepImagesRow() {
         <span className="t">แสดงรูปจากเอกสาร</span>
         <span className="d">
           เก็บรูปใน PDF / Word / PowerPoint และหน้าสแกนไว้ในเครื่อง แล้วแสดงเมื่อเปิดแหล่งอ้างอิง ·
-          index ใหญ่ขึ้นราว 50–150 KB ต่อรูป · รูปไม่ถูกส่งไป Gateway · เปิด/ปิดแล้วจะ index ใหม่ทั้งหมด
+          index ใหญ่ขึ้นราว 50–150 KB ต่อรูป · รูปไม่ถูกส่งไป Gateway และไม่ขึ้นฐานข้อมูลของทีม (เห็นเฉพาะเครื่องที่ทำ index) · เปิด/ปิดแล้วจะ index ใหม่ทั้งหมด
         </span>
       </div>
       <Switch

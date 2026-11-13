@@ -41,6 +41,9 @@ pub fn recently_down() -> bool {
 #[serde(rename_all = "camelCase", default)]
 pub struct ServerConfig {
     pub url: String,
+    /// a member without the server token uses this service's share key for embeddings
+    #[serde(default)]
+    pub member_service: Option<String>,
 }
 
 impl ServerConfig {
@@ -85,10 +88,42 @@ fn url() -> String {
     }
 }
 
-/// The token typed in Settings (credential store), else one built into an older release.
+/// The server token (credential store), else one built into an older release.
 /// Since the server holds the team's documents, releases no longer build a token in.
-fn token() -> AppResult<Option<String>> {
+fn admin_token() -> AppResult<Option<String>> {
     Ok(crate::secrets::get_server_token()?.or_else(builtin_token))
+}
+
+/// This PC is the owner: it has the server token (may share services and make keys).
+pub fn is_owner() -> bool {
+    matches!(admin_token(), Ok(Some(_)))
+}
+
+/// What to send for embeddings: the server token, else a member's share key.
+fn token() -> AppResult<Option<String>> {
+    if let Some(t) = admin_token()? {
+        return Ok(Some(t));
+    }
+    match ServerConfig::load().member_service {
+        Some(sid) => crate::secrets::get_service_key(&sid),
+        None => Ok(None),
+    }
+}
+
+/// The credential for one service's data: its share key, else the server token.
+pub fn credential_for(service_id: &str) -> AppResult<String> {
+    if let Some(k) = crate::secrets::get_service_key(service_id)? {
+        return Ok(k);
+    }
+    admin_token()?.ok_or_else(|| AppError::new("no_key", "ไม่มีคีย์ของ service นี้ — ขอลิงก์เชิญใหม่จากเจ้าของ service"))
+}
+
+pub fn server_url() -> AppResult<String> {
+    let u = url();
+    if u.trim().is_empty() {
+        return Err(AppError::new("no_server", "ยังไม่ได้ตั้งเซิร์ฟเวอร์ — ใช้ลิงก์ตั้งค่าหรือลิงก์เชิญจากทีม"));
+    }
+    Ok(u)
 }
 
 /// Nothing is locked any more: a typed token always wins.
@@ -106,11 +141,13 @@ pub struct ServerInfo {
     pub builtin: bool,
     /// the token is built in: Settings shows no token field
     pub token_locked: bool,
+    /// has the server token (may share services); else a member using a share key
+    pub owner: bool,
 }
 
 pub fn info() -> ServerInfo {
     let tok = token().ok().flatten();
-    ServerInfo { url: url(), has_token: tok.is_some(), token_last4: tok.as_deref().map(crate::redact::last4), builtin: builtin(), token_locked: token_locked() }
+    ServerInfo { url: url(), has_token: tok.is_some(), token_last4: tok.as_deref().map(crate::redact::last4), builtin: builtin(), token_locked: token_locked(), owner: is_owner() }
 }
 
 /// What `/health` says (no token needed).
@@ -253,7 +290,8 @@ fn api_error(base: &str, status: u16, body: &str) -> AppError {
         .and_then(|v| v.pointer("/error/message").and_then(|m| m.as_str()).map(str::to_string))
         .unwrap_or_else(|| format!("HTTP {status}"));
     let mut e = match status {
-        401 => AppError::new("http_401", "token ของเซิร์ฟเวอร์ไม่ถูกต้อง — ใส่ใหม่ที่ ตั้งค่า › Embedding และ Index"),
+        401 => AppError::new("http_401", "token หรือคีย์ของ service ใช้ไม่ได้แล้ว (อาจถูกสร้างใหม่) — ขอลิงก์ใหม่จากเจ้าของ service"),
+        403 => AppError::new("http_403", "คีย์นี้ใช้กับ service นี้ไม่ได้ — ขอลิงก์เชิญใหม่จากเจ้าของ service"),
         404 if msg.contains("Not Found") => AppError::new("no_database", "เซิร์ฟเวอร์ยังไม่มีฐานข้อมูล — อัปเดตเซิร์ฟเวอร์และตั้ง POSTGRES_PASSWORD (server/embed/README.md)"),
         502..=504 | 530 => unreachable(base),
         _ => AppError::new("server", format!("เซิร์ฟเวอร์ตอบ {status}: {msg}")),
@@ -262,10 +300,16 @@ fn api_error(base: &str, status: u16, body: &str) -> AppError {
     e
 }
 
-/// One JSON call to the server with the token. Never logs the body.
+/// One JSON call to the server with the server token. Never logs the body.
 pub async fn api<T: DeserializeOwned>(method: reqwest::Method, path: &str, body: Option<&serde_json::Value>, timeout: Duration) -> AppResult<T> {
-    let (base, token) = target()?;
-    let mut req = CLIENT.request(method, format!("{base}{path}")).bearer_auth(&token).timeout(timeout);
+    let token = admin_token()?.ok_or_else(|| AppError::new("not_owner", "ต้องใช้ token ของเซิร์ฟเวอร์ (เจ้าของ) — เครื่องนี้เข้าร่วมด้วยลิงก์เชิญเท่านั้น"))?;
+    api_as(&token, method, path, body, timeout).await
+}
+
+/// The same with a given credential (a service's share key).
+pub async fn api_as<T: DeserializeOwned>(token: &str, method: reqwest::Method, path: &str, body: Option<&serde_json::Value>, timeout: Duration) -> AppResult<T> {
+    let base = server_url()?;
+    let mut req = CLIENT.request(method, format!("{base}{path}")).bearer_auth(token).timeout(timeout);
     if let Some(b) = body {
         req = req.json(b);
     }

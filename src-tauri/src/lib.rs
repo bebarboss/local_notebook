@@ -53,6 +53,7 @@ pub fn run() {
             init_resources(app.handle());
             diag::log(format!("app start v{}", env!("CARGO_PKG_VERSION")));
             connect::register_scheme();
+            team::migrate_global_switch(app.handle());
             // started by clicking a docask:// setup link
             if let Some(link) = connect::from_args(std::env::args()) {
                 if let Err(e) = connect::receive(app.handle(), &link) {
@@ -149,7 +150,10 @@ pub fn run() {
             commands::use_embed_server,
             commands::forget_embed_server,
             commands::team_status,
-            commands::set_team_server,
+            commands::share_service,
+            commands::service_invite,
+            commands::rotate_service_key,
+            commands::leave_service,
             commands::team_sync_now,
             commands::connect_pending,
             commands::connect_paste,

@@ -152,7 +152,11 @@ export interface Backend {
   useEmbedServer(model: string): Promise<EmbeddingStatus>;
   forgetEmbedServer(): Promise<EmbedServerInfo>;
   teamStatus(): Promise<TeamStatus>;
-  setTeamServer(enabled: boolean): Promise<TeamStatus>;
+  /** on → the invite link; off → back to this PC's index (`del`: owner removes it from the server) */
+  shareService(serviceId: string, shared: boolean, del?: boolean): Promise<string | null>;
+  serviceInvite(serviceId: string): Promise<string>;
+  rotateServiceKey(serviceId: string): Promise<string>;
+  leaveService(serviceId: string): Promise<void>;
   teamSyncNow(): Promise<void>;
   connectPending(): Promise<ConnectLinkInfo | null>;
   /** a setup link pasted by hand; the token stays in Rust */
@@ -264,7 +268,10 @@ function createTauriBackend(): Backend {
     useEmbedServer: (model) => call("use_embed_server", { model }),
     forgetEmbedServer: () => call("forget_embed_server"),
     teamStatus: () => call("team_status"),
-    setTeamServer: (enabled) => call("set_team_server", { enabled }),
+    shareService: (serviceId, shared, del) => call("share_service", { serviceId, shared, delete: del ?? false }),
+    serviceInvite: (serviceId) => call("service_invite", { serviceId }),
+    rotateServiceKey: (serviceId) => call("rotate_service_key", { serviceId }),
+    leaveService: (serviceId) => call("leave_service", { serviceId }),
     teamSyncNow: () => call("team_sync_now"),
     connectPending: () => call("connect_pending"),
     connectPaste: (link) => call("connect_paste", { link }),

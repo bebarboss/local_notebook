@@ -29,6 +29,9 @@ pub struct Service {
     /// always one of `folders`, so the notes are indexed like any document
     #[serde(default)]
     pub knowledge_dir: String,
+    /// lives in the team database on the server: searched there, local files synced up
+    #[serde(default)]
+    pub shared: bool,
     #[serde(default)]
     pub created_at: i64,
     #[serde(default)]
@@ -150,7 +153,7 @@ impl ServiceRegistry {
             effort,
             top_k: n.top_k.clamp(1, 30),
             system_prompt: n.system_prompt.trim().to_string(),
-            knowledge_dir: String::new(),
+            knowledge_dir: String::new(), shared: false,
             created_at: now,
             updated_at: now,
         };
@@ -172,10 +175,26 @@ impl ServiceRegistry {
         self.items.push(Service {
             id: id.to_string(), name, code, color, folders: vec![], files: vec![], excluded: vec![],
             model: model.to_string(), effort, top_k: top_k.clamp(1, 30), system_prompt: system_prompt.to_string(),
-            knowledge_dir: String::new(), created_at: now, updated_at: now,
+            knowledge_dir: String::new(), shared: true, created_at: now, updated_at: now,
         });
         self.save()?;
         Ok(true)
+    }
+
+    /// Mark a service as shared on the team database (or not).
+    pub fn set_shared(&mut self, id: &str, shared: bool) -> AppResult<Service> {
+        let cur = self.items.iter_mut().find(|x| x.id == id).ok_or_else(|| AppError::new("not_found", "ไม่พบ service นี้"))?;
+        cur.shared = shared;
+        cur.updated_at = now_ms();
+        let out = cur.clone();
+        self.save()?;
+        Ok(out)
+    }
+
+    /// Forget a service on this PC only (leaving a shared one) — the server keeps it.
+    pub fn forget(&mut self, id: &str) -> AppResult<()> {
+        self.items.retain(|s| s.id != id);
+        self.save()
     }
 
     pub fn update(&mut self, s: Service) -> AppResult<Service> {

@@ -135,6 +135,9 @@ class Store:
     def migrate(self) -> None:
         with self.pool.connection() as c:
             c.execute(_schema(self.dim))
+            # v2: a share key per service (SHA-256 of it; the key itself is never stored)
+            c.execute("ALTER TABLE services ADD COLUMN IF NOT EXISTS key_hash TEXT")
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS services_key ON services(key_hash) WHERE key_hash IS NOT NULL")
             # pg_trgm only speeds up keyword search (LIKE works without it)
             try:
                 with c.transaction():
@@ -175,6 +178,31 @@ class Store:
                 (sid, Jsonb(data), t),
             )
         return {"id": sid, "data": data, "updatedAt": t}
+
+    def get_service(self, sid: str) -> dict:
+        with self.pool.connection() as c:
+            r = c.execute("SELECT id, data, updated_at FROM services WHERE id=%s", (sid,)).fetchone()
+        if r is None:
+            raise StoreError(404, "no such service")
+        return {"id": r[0], "data": r[1], "updatedAt": r[2]}
+
+    def set_service_key(self, sid: str, key_hash: str) -> None:
+        with self.pool.connection() as c:
+            n = c.execute("UPDATE services SET key_hash=%s WHERE id=%s", (key_hash, sid)).rowcount
+        if not n:
+            raise StoreError(404, "no such service")
+
+    def service_of_key(self, key_hash: str) -> str | None:
+        with self.pool.connection() as c:
+            r = c.execute("SELECT id FROM services WHERE key_hash=%s", (key_hash,)).fetchone()
+        return r[0] if r else None
+
+    def service_of_document(self, doc_id: int) -> str:
+        with self.pool.connection() as c:
+            r = c.execute("SELECT service_id FROM documents WHERE id=%s", (doc_id,)).fetchone()
+        if r is None:
+            raise StoreError(404, "no such document")
+        return r[0]
 
     def delete_service(self, sid: str, with_data: bool) -> None:
         with self.pool.connection() as c, c.transaction():
