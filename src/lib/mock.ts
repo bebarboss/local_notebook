@@ -342,8 +342,11 @@ export function createMockBackend(): Backend {
         const base = req.allServices ? sources.map((s) => ({ ...s })) : sources;
         const ranked = settings.rerank && reranker.ready ? base.map((s, i) => ({ ...s, rerankScore: 0.97 - i * 0.21 })) : base;
         const srcs = settings.hybrid ? ranked.map((s, i) => (i === 0 ? { ...s, keyword: true } : s)) : ranked;
+        // like the app: a short question after an answer is searched together with the last question
+        const prevQ = messages[cid].filter((m) => m.role === "user").slice(-2, -1)[0]?.content;
+        const searchQuery = prevQ && req.question.trim().length < 60 ? `${prevQ} ${req.question.trim()}` : undefined;
         await wait(400);
-        emit("chat-sources", { requestId, chatId: cid, sources: srcs });
+        emit("chat-sources", { requestId, chatId: cid, sources: srcs, searchQuery });
         let out = "";
         const parts = text.match(/.{1,6}/gsu) ?? [];
         for (const p of parts) {
@@ -352,7 +355,7 @@ export function createMockBackend(): Backend {
           out += p;
           emit("chat-delta", { requestId, chatId: cid, delta: p });
         }
-        const msg: Message = { id: ++seq, chatId: cid, role: "assistant", content: out, model: req.model, reasoningEffort: req.effort, sources: srcs, elapsedMs: now() - started, error: st.stopped ? "หยุดโดยผู้ใช้" : null, createdAt: now() };
+        const msg: Message = { id: ++seq, chatId: cid, role: "assistant", content: out, model: req.model, reasoningEffort: req.effort, sources: srcs, elapsedMs: now() - started, error: st.stopped ? "หยุดโดยผู้ใช้" : null, createdAt: now(), searchQuery };
         messages[cid].push(msg);
         const c = chats.find((x) => x.id === cid);
         if (c) c.updatedAt = now();

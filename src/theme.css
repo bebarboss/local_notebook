@@ -264,6 +264,8 @@ code { font-family: var(--mono); font-size: 12.5px; background: var(--code); col
 .ai-text ul, .ai-text ol { margin: 0 0 12px; padding-left: 22px; }
 .ai-text pre { background: var(--code); padding: 10px 12px; border-radius: 10px; overflow-x: auto; font-size: 13px; }
 .ai-text pre code { background: none; padding: 0; }
+.searched-as { display: flex; align-items: flex-start; gap: 6px; margin: 0 0 8px; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.searched-as svg { flex: none; margin-top: 3px; }
 .md-table { margin: 0 0 12px; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; max-width: 100%; }
 .md-table:focus-visible { outline: 2px solid var(--accent, #3B6FE0); outline-offset: 2px; }
 .md-table table { border-collapse: collapse; width: 100%; font-size: 0.93em; line-height: 1.6; }

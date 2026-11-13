@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BookMarked, Copy, Check, RotateCcw } from "lucide-react";
+import { BookMarked, Copy, Check, RotateCcw, Search } from "lucide-react";
 import type { Message, Source } from "../lib/types";
 import { th } from "../i18n/th";
 import { initials, useApp } from "../state";
@@ -10,6 +10,19 @@ export interface StreamingState {
   content: string;
   sources: Source[];
   error: string | null;
+  /** a follow-up question was searched with this */
+  searchQuery?: string;
+}
+
+/** "ค้นด้วย: …" — how a follow-up question was understood for the search */
+function SearchedAs({ query }: { query?: string }) {
+  if (!query) return null;
+  return (
+    <div className="searched-as" title="คำถามต่อเนื่อง: แอปเขียนคำถามใหม่ให้ครบความหมายจากบทสนทนาก่อนค้นเอกสาร">
+      <Search size={12} strokeWidth={2} aria-hidden="true" />
+      <span>ค้นด้วย: {query}</span>
+    </div>
+  );
 }
 
 export function MessageList({
@@ -41,6 +54,7 @@ export function MessageList({
       )}
       {streaming && (
         <div className="ai-msg" aria-busy={!streaming.error}>
+          <SearchedAs query={streaming.searchQuery} />
           {streaming.content ? (
             <Markdown text={streaming.content} sources={streaming.sources} trailing={<span className="caret" aria-hidden="true" />} />
           ) : !streaming.error ? (
@@ -88,6 +102,7 @@ function AiMsg({ msg, onRetry, retryDisabled, onSaveKnowledge }: { msg: Message;
       }}
     >
       {menu && <ContextMenu at={menu} onClose={() => setMenu(null)} onCopy={copy} onSaveKnowledge={onSaveKnowledge!} />}
+      <SearchedAs query={msg.searchQuery} />
       {msg.content && <Markdown text={msg.content} sources={msg.sources} />}
       {msg.error && <ErrorState message={msg.error} />}
       <div className="ai-meta">

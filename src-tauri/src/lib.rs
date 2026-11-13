@@ -13,6 +13,7 @@ pub mod embed_server;
 pub mod gateway_test;
 pub mod ingest;
 pub mod knowledge;
+pub mod followup;
 pub mod llm;
 pub mod redact;
 pub mod rerank;

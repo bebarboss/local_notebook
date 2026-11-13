@@ -112,6 +112,8 @@ export interface Message {
   elapsedMs: number | null;
   error: string | null;
   createdAt: number;
+  /** a follow-up question was searched with this standalone query */
+  searchQuery?: string;
 }
 
 export interface Chat {
@@ -302,6 +304,7 @@ export interface ChatSources {
   requestId: string;
   chatId: string;
   sources: Source[];
+  searchQuery?: string;
 }
 
 export interface ChatDone {

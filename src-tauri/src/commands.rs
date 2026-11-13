@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio_util::sync::CancellationToken;
 
@@ -640,8 +640,12 @@ struct Delta {
     delta: String,
 }
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct Sources {
     sources: Vec<SourceRef>,
+    /// a follow-up question was searched with this standalone query
+    #[serde(skip_serializing_if = "Option::is_none")]
+    search_query: Option<String>,
 }
 #[derive(Serialize, Clone)]
 struct Done {
@@ -669,7 +673,7 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
     let svc = state.services.lock().get(&req.service_id)?;
     let turns = state.settings.lock().history_turns;
 
-    let (chat, history, user_message) = {
+    let (chat, history, previous, user_message) = {
         let db = state.chats.lock();
         let chat = match &req.chat_id {
             Some(id) => {
@@ -683,11 +687,12 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
         };
         // history first (text only), then the new question
         let history = db.recent_turns(&chat.id, turns)?;
+        let previous = db.last_answer(&chat.id)?;
         let um = db.add_message(NewMessage {
             chat_id: &chat.id, role: "user", content: &question, model: None, reasoning_effort: None,
-            sources: &[], elapsed_ms: None, error: None,
+            sources: &[], elapsed_ms: None, error: None, search_query: None,
         })?;
-        (chat, history, um)
+        (chat, history, previous, um)
     };
 
     let request_id = req
@@ -698,7 +703,7 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
     let token = CancellationToken::new();
     state.streams.lock().insert(request_id.clone(), token.clone());
 
-    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, model, effort: req.effort, all: req.all_services, question, history, key, token };
+    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, model, effort: req.effort, all: req.all_services, question, history, previous, search_query: None, key, token };
     tauri::async_runtime::spawn(job.run());
 
     Ok(AskStarted { request_id, chat_id: chat.id, user_message })
@@ -721,6 +726,9 @@ struct AskJob {
     all: bool,
     question: String,
     history: Vec<(String, String)>,
+    /// the last good answer and its sources, for follow-up questions
+    previous: Option<(String, Vec<SourceRef>)>,
+    search_query: Option<String>,
     key: String,
     token: CancellationToken,
 }
@@ -744,6 +752,7 @@ impl AskJob {
             sources,
             elapsed_ms: Some(elapsed),
             error,
+            search_query: self.search_query.as_deref(),
         });
         saved.unwrap_or_else(|e| Message {
             id: -now_ms(),
@@ -756,6 +765,7 @@ impl AskJob {
             elapsed_ms: Some(elapsed),
             error: Some(error.map(str::to_string).unwrap_or_else(|| format!("บันทึกประวัติไม่สำเร็จ: {}", e.message))),
             created_at: now_ms(),
+            search_query: self.search_query.clone(),
         })
     }
 
@@ -767,11 +777,46 @@ impl AskJob {
         self.emit("chat-error", Failed { error: e });
     }
 
-    async fn run(self) {
+    /// A follow-up question rewritten into a standalone search query (falls back to the
+    /// previous question + this one when the model is slow or fails).
+    async fn search_query(&self) -> String {
+        let messages = crate::followup::rewrite_prompt(&self.history, &self.question);
+        let req = llm::Request { url: &self.model.url, key: &self.key, model: &self.model.id, effort: None, max_tokens: self.model.max_output_tokens.min(400), messages: &messages };
+        let reply = tokio::select! {
+            r = llm::complete_within(&req, Duration::from_secs(10)) => r,
+            _ = self.token.cancelled() => return crate::followup::fallback(&self.history, &self.question),
+        };
+        match reply.map(|r| crate::followup::clean_rewrite(&r)) {
+            Ok(Some(q)) => q,
+            Ok(None) => crate::followup::fallback(&self.history, &self.question),
+            Err(e) => {
+                // the code only — the question and chat are never logged
+                log::warn!("follow-up rewrite failed ({}), using the previous question", e.code);
+                crate::followup::fallback(&self.history, &self.question)
+            }
+        }
+    }
+
+    async fn run(mut self) {
         let started = Instant::now();
         let elapsed = || started.elapsed().as_millis() as i64;
 
-        let sources = match retrieve(&self.app, &self.svc, self.all, &self.question).await {
+        // a follow-up ("แล้วตรวจยังไง") is searched as a standalone query, together with the
+        // passages the previous answer cited; the answer still uses the user's own words
+        let mut queries = vec![self.question.clone()];
+        let mut carried = Vec::new();
+        if crate::followup::is_follow_up(&self.question, !self.history.is_empty()) {
+            let q = self.search_query().await;
+            if q.trim() != self.question.trim() {
+                queries.insert(0, q.clone());
+                self.search_query = Some(q);
+            }
+            if let Some((answer, prev)) = &self.previous {
+                carried = crate::followup::carried(answer, prev);
+            }
+        }
+
+        let sources = match retrieve(&self.app, &self.svc, self.all, &queries, &carried).await {
             Ok(s) => s,
             Err(e) => {
                 self.fail(e, &[], elapsed());
@@ -779,7 +824,7 @@ impl AskJob {
                 return;
             }
         };
-        self.emit("chat-sources", Sources { sources: sources.clone() });
+        self.emit("chat-sources", Sources { sources: sources.clone(), search_query: self.search_query.clone() });
 
         let messages = build_prompt(&self.svc, &sources, &self.history, &self.question, self.all);
         let effort = (self.model.reasoning_effort_format == "chat-completions"
@@ -811,7 +856,10 @@ impl AskJob {
 }
 
 /// Embed the question locally and search the service's index (or all services).
-async fn retrieve(app: &AppHandle, svc: &Service, all: bool, question: &str) -> AppResult<Vec<SourceRef>> {
+/// `queries[0]` is the main query (reranks and labels); later ones only add candidates.
+/// `carried`: passages cited by the previous answer, re-ranked along with the new ones.
+async fn retrieve(app: &AppHandle, svc: &Service, all: bool, queries: &[String], carried: &[SourceRef]) -> AppResult<Vec<SourceRef>> {
+    let question = queries.first().map(String::as_str).unwrap_or_default();
     let state = app.state::<AppState>();
     let src = state.embedding_source()?;
     let mut threshold = state.settings.lock().threshold;
@@ -820,9 +868,13 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, question: &str) -> 
         // ≈ 0.3–0.5) — keep the cut-off from hiding good passages; top-k still limits
         threshold = threshold.min(0.15);
     }
-    let (qv, notice) = state.embedder.clone().embed_query_from(src, question.to_string()).await?;
-    if let Some(n) = notice {
-        let _ = app.emit("embed-fallback", n);
+    let mut vectors = Vec::with_capacity(queries.len());
+    for q in queries {
+        let (qv, notice) = state.embedder.clone().embed_query_from(src.clone(), q.clone()).await?;
+        if let Some(n) = notice {
+            let _ = app.emit("embed-fallback", n);
+        }
+        vectors.push((q, qv));
     }
 
     let targets: Vec<Service> = if all { state.services.lock().list() } else { vec![svc.clone()] };
@@ -830,18 +882,39 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, question: &str) -> 
     let rerank = state.settings.lock().rerank && crate::rerank::Reranker::status().ready;
     let hybrid = state.settings.lock().hybrid;
     let want = if rerank { crate::rerank::candidates(k) } else { k };
-    let mut hits = Vec::new();
-    for s in targets {
+    let mut hits: Vec<(Service, crate::store::Hit)> = Vec::new();
+    for s in &targets {
         let store = state.stores.get(&s.id)?;
-        let found = if hybrid {
-            store.lock().hybrid_search(&qv, question, want, threshold)?
-        } else {
-            store.lock().search(&qv, want, threshold)?
-        };
-        hits.extend(found.into_iter().map(|h| (s.clone(), h)));
+        for (q, qv) in &vectors {
+            let found = if hybrid {
+                store.lock().hybrid_search(qv, q, want, threshold)?
+            } else {
+                store.lock().search(qv, want, threshold)?
+            };
+            for h in found {
+                // the same passage found by both queries: keep its better score
+                match hits.iter_mut().find(|(hs, x)| hs.id == s.id && x.chunk_id == h.chunk_id) {
+                    Some((_, x)) if h.fused > x.fused => *x = h,
+                    Some(_) => {}
+                    None => hits.push((s.clone(), h)),
+                }
+            }
+        }
     }
     hits.sort_by(|a, b| b.1.fused.total_cmp(&a.1.fused).then(b.1.score.total_cmp(&a.1.score)));
     hits.truncate(want);
+    // the previous answer's passages compete again (last without a reranker)
+    for c in carried {
+        let Some(s) = targets.iter().find(|s| s.id == c.service_id) else { continue };
+        let dup = hits.iter().any(|(hs, h)| hs.id == c.service_id && h.doc_path == c.doc_path && h.ord == c.ord);
+        if dup || !Path::new(&c.doc_path).exists() {
+            continue;
+        }
+        hits.push((s.clone(), crate::store::Hit {
+            chunk_id: -1, score: c.score, fused: 0.0, keyword: false,
+            doc_path: c.doc_path.clone(), page: c.page, ord: c.ord, text: c.text.clone(),
+        }));
+    }
 
     // second stage: the cross-encoder reads question + passage together
     let mut rr: Vec<Option<f32>> = vec![None; hits.len()];

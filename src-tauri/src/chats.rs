@@ -53,6 +53,9 @@ pub struct Message {
     pub elapsed_ms: Option<i64>,
     pub error: Option<String>,
     pub created_at: i64,
+    /// the standalone query a follow-up question was searched with
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_query: Option<String>,
 }
 
 pub struct NewMessage<'a> {
@@ -64,6 +67,7 @@ pub struct NewMessage<'a> {
     pub sources: &'a [SourceRef],
     pub elapsed_ms: Option<i64>,
     pub error: Option<&'a str>,
+    pub search_query: Option<&'a str>,
 }
 
 pub struct ChatDb {
@@ -120,6 +124,13 @@ impl ChatDb {
              );
              CREATE INDEX IF NOT EXISTS messages_chat ON messages(chat_id, id);",
         )?;
+        // v0.12.4: the rewritten query of a follow-up question
+        let has: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name='search_query'")?
+            .exists([])?;
+        if !has {
+            conn.execute_batch("ALTER TABLE messages ADD COLUMN search_query TEXT;")?;
+        }
         Ok(Self { conn })
     }
 
@@ -203,9 +214,9 @@ impl ChatDb {
         let now = now_ms();
         let sources = serde_json::to_string(m.sources)?;
         self.conn.execute(
-            "INSERT INTO messages(chat_id,role,content,model,reasoning_effort,sources,elapsed_ms,error,created_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-            params![m.chat_id, m.role, m.content, m.model, m.reasoning_effort, sources, m.elapsed_ms, m.error, now],
+            "INSERT INTO messages(chat_id,role,content,model,reasoning_effort,sources,elapsed_ms,error,created_at,search_query)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![m.chat_id, m.role, m.content, m.model, m.reasoning_effort, sources, m.elapsed_ms, m.error, now, m.search_query],
         )?;
         let id = self.conn.last_insert_rowid();
         self.touch(m.chat_id)?;
@@ -220,12 +231,13 @@ impl ChatDb {
             elapsed_ms: m.elapsed_ms,
             error: m.error.map(Into::into),
             created_at: now,
+            search_query: m.search_query.map(Into::into),
         })
     }
 
     pub fn messages(&self, chat_id: &str) -> AppResult<Vec<Message>> {
         let mut st = self.conn.prepare(
-            "SELECT id,chat_id,role,content,model,reasoning_effort,sources,elapsed_ms,error,created_at
+            "SELECT id,chat_id,role,content,model,reasoning_effort,sources,elapsed_ms,error,created_at,search_query
              FROM messages WHERE chat_id=?1 ORDER BY id",
         )?;
         let rows = st.query_map([chat_id], |r| {
@@ -241,9 +253,20 @@ impl ChatDb {
                 elapsed_ms: r.get(7)?,
                 error: r.get(8)?,
                 created_at: r.get(9)?,
+                search_query: r.get(10)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The last answer that worked (text + its sources) — what a follow-up question builds on.
+    pub fn last_answer(&self, chat_id: &str) -> AppResult<Option<(String, Vec<SourceRef>)>> {
+        Ok(self
+            .messages(chat_id)?
+            .into_iter()
+            .rev()
+            .find(|m| m.role == "assistant" && m.error.is_none() && !m.content.trim().is_empty())
+            .map(|m| (m.content, m.sources)))
     }
 
     /// Last `turns` question/answer pairs (text only — no document chunks), oldest first.
@@ -278,7 +301,28 @@ mod tests {
     use super::*;
 
     fn msg<'a>(chat: &'a str, role: &'a str, content: &'a str, error: Option<&'a str>) -> NewMessage<'a> {
-        NewMessage { chat_id: chat, role, content, model: None, reasoning_effort: None, sources: &[], elapsed_ms: None, error }
+        NewMessage { chat_id: chat, role, content, model: None, reasoning_effort: None, sources: &[], elapsed_ms: None, error, search_query: None }
+    }
+
+    #[test]
+    fn old_databases_get_the_search_query_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chats (id TEXT PRIMARY KEY, service_id TEXT NOT NULL, title TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+             CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL,
+               model TEXT, reasoning_effort TEXT, sources TEXT NOT NULL DEFAULT '[]', elapsed_ms INTEGER, error TEXT, created_at INTEGER NOT NULL);
+             INSERT INTO chats VALUES('c','hr','t',0,0);
+             INSERT INTO messages(chat_id,role,content,created_at) VALUES('c','assistant','เก่า',0);",
+        )
+        .unwrap();
+        let db = ChatDb::init(conn).unwrap();
+        assert_eq!(db.messages("c").unwrap()[0].search_query, None);
+        let mut m = msg("c", "assistant", "ใหม่ [1]", None);
+        m.search_query = Some("คำค้นที่เขียนใหม่");
+        db.add_message(m).unwrap();
+        let all = db.messages("c").unwrap();
+        assert_eq!(all[1].search_query.as_deref(), Some("คำค้นที่เขียนใหม่"));
+        assert_eq!(db.last_answer("c").unwrap().unwrap().0, "ใหม่ [1]");
     }
 
     #[test]
