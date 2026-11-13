@@ -48,6 +48,8 @@ install() {
 </dict></plist>
 EOF
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+  # bootout returns before the old server has exited; bootstrapping too early fails with "5: Input/output error"
+  for _ in $(seq 1 30); do launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || break; sleep 1; done
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
   echo "started; first start loads the model (downloads ~2.3 GB if not cached). Check: $0 status"
 }
