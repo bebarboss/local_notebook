@@ -16,6 +16,7 @@ pub mod knowledge;
 pub mod followup;
 pub mod team;
 pub mod connect;
+pub mod memory;
 pub mod llm;
 pub mod redact;
 pub mod rerank;

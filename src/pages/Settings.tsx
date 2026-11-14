@@ -429,7 +429,7 @@ function HistorySection() {
     <section>
       <h2>ประวัติแชต</h2>
       <div className="list-card">
-        <NumberRow label="จำนวนรอบที่ส่งไปด้วย" desc="ส่งคำถาม/คำตอบ N รอบล่าสุดไปกับคำถามใหม่ (ไม่ส่งท่อนเอกสารของรอบเก่า)" value={settings.historyTurns} min={0} max={20} onSave={(v) => updateSettings({ historyTurns: v })} />
+        <NumberRow label="จำนวนรอบที่ส่งไปด้วย" desc="ส่งคำถาม/คำตอบ N รอบล่าสุดไปกับคำถามใหม่ (คำตอบเก่าถูกย่อให้สั้นเมื่อยาวเกิน) · รอบที่เก่ากว่านั้นถูกสรุปเป็นไม่กี่บรรทัดแล้วส่งไปแทน · 0 = ไม่ส่งประวัติและไม่สรุป" value={settings.historyTurns} min={0} max={20} onSave={(v) => updateSettings({ historyTurns: v })} />
         <div className="list-row">
           <div className="l"><span className="t">ลบแชตอัตโนมัติ</span><span className="d">ลบแชตที่ไม่ได้ใช้เกินระยะเวลาที่กำหนด</span></div>
           <div className="segmented" role="radiogroup" aria-label="ลบแชตอัตโนมัติ">

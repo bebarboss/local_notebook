@@ -673,7 +673,7 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
     let svc = state.services.lock().get(&req.service_id)?;
     let turns = state.settings.lock().history_turns;
 
-    let (chat, history, previous, user_message) = {
+    let (chat, history, summary, previous, user_message) = {
         let db = state.chats.lock();
         let chat = match &req.chat_id {
             Some(id) => {
@@ -686,13 +686,15 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
             None => db.create_chat(&svc.id, &question)?,
         };
         // history first (text only), then the new question
-        let history = db.recent_turns(&chat.id, turns)?;
+        let history = crate::memory::fit(&db.recent_turns(&chat.id, turns)?, crate::memory::HISTORY_BUDGET);
+        // history off (0 turns) = no memory of the chat at all
+        let summary = if turns > 0 { db.summary(&chat.id)? } else { None };
         let previous = db.last_answer(&chat.id)?;
         let um = db.add_message(NewMessage {
             chat_id: &chat.id, role: "user", content: &question, model: None, reasoning_effort: None,
             sources: &[], elapsed_ms: None, error: None, search_query: None,
         })?;
-        (chat, history, previous, um)
+        (chat, history, summary, previous, um)
     };
 
     let request_id = req
@@ -703,7 +705,7 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
     let token = CancellationToken::new();
     state.streams.lock().insert(request_id.clone(), token.clone());
 
-    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, model, effort: req.effort, all: req.all_services, question, history, previous, search_query: None, key, token };
+    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, model, effort: req.effort, all: req.all_services, question, history, summary, turns, previous, search_query: None, key, token };
     tauri::async_runtime::spawn(job.run());
 
     Ok(AskStarted { request_id, chat_id: chat.id, user_message })
@@ -726,6 +728,9 @@ struct AskJob {
     all: bool,
     question: String,
     history: Vec<(String, String)>,
+    /// summary of the turns before `history` (memory.rs)
+    summary: Option<String>,
+    turns: u32,
     /// the last good answer and its sources, for follow-up questions
     previous: Option<(String, Vec<SourceRef>)>,
     search_query: Option<String>,
@@ -826,7 +831,7 @@ impl AskJob {
         };
         self.emit("chat-sources", Sources { sources: sources.clone(), search_query: self.search_query.clone() });
 
-        let messages = build_prompt(&self.svc, &sources, &self.history, &self.question, self.all);
+        let messages = build_prompt(&self.svc, &sources, &self.history, self.summary.as_deref(), &self.question, self.all);
         let effort = (self.model.reasoning_effort_format == "chat-completions"
             && self.model.supports_reasoning_effort.iter().any(|e| e == &self.effort))
             .then_some(self.effort.as_str());
@@ -840,6 +845,7 @@ impl AskJob {
                 self.emit("chat-done", Done { message: m });
                 // after chat-done, so a UI re-render can never swallow the done event
                 set_status(&self.app, "ok", None);
+                self.summarize_later();
             }
             Ok(StreamEnd::Cancelled(text)) => {
                 let m = self.save(&text, &sources, elapsed(), Some("หยุดโดยผู้ใช้"));
@@ -852,6 +858,35 @@ impl AskJob {
 
     fn cleanup(&self) {
         self.app.state::<AppState>().streams.lock().remove(&self.request_id);
+    }
+
+    /// Turns that left the history window get folded into the chat's summary — in the
+    /// background, so no question waits for it. Failures only mean the summary stays as it was.
+    fn summarize_later(&self) {
+        if self.turns == 0 {
+            return;
+        }
+        let (app, chat_id, turns) = (self.app.clone(), self.chat_id.clone(), self.turns);
+        let (url, key, model) = (self.model.url.clone(), self.key.clone(), self.model.id.clone());
+        let max_tokens = self.model.max_output_tokens.min(1200);
+        tauri::async_runtime::spawn(async move {
+            let (previous, dropped) = match app.state::<AppState>().chats.lock().to_summarize(&chat_id, turns) {
+                Ok(x) => x,
+                Err(_) => return,
+            };
+            let Some(upto) = dropped.last().map(|(id, ..)| *id) else { return };
+            let turns_text: Vec<(String, String)> = dropped.into_iter().map(|(_, q, a)| (q, a)).collect();
+            let messages = crate::memory::summary_prompt(previous.as_deref(), &turns_text);
+            let req = llm::Request { url: &url, key: &key, model: &model, effort: None, max_tokens, messages: &messages };
+            match llm::complete_within(&req, Duration::from_secs(90)).await.map(|r| crate::memory::clean_summary(&r)) {
+                Ok(Some(s)) => {
+                    let _ = app.state::<AppState>().chats.lock().set_summary(&chat_id, &s, upto);
+                    log::info!("chat summary updated ({} turns folded in)", turns_text.len());
+                }
+                Ok(None) => log::warn!("chat summary: empty reply"),
+                Err(e) => log::warn!("chat summary failed ({})", e.code),
+            }
+        });
     }
 }
 
@@ -993,7 +1028,7 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, queries: &[String],
         .collect())
 }
 
-pub fn build_prompt(svc: &Service, sources: &[SourceRef], history: &[(String, String)], question: &str, all: bool) -> Vec<ChatMessage> {
+pub fn build_prompt(svc: &Service, sources: &[SourceRef], history: &[(String, String)], summary: Option<&str>, question: &str, all: bool) -> Vec<ChatMessage> {
     let mut system = String::from(
         "คุณคือผู้ช่วยตอบคำถามจากเอกสารภายในองค์กร\n\
          - ตอบเป็นภาษาเดียวกับคำถาม\n\
@@ -1017,6 +1052,9 @@ pub fn build_prompt(svc: &Service, sources: &[SourceRef], history: &[(String, St
     if !svc.system_prompt.trim().is_empty() {
         system.push_str("\n\nคำแนะนำเพิ่มเติมของ service นี้:\n");
         system.push_str(svc.system_prompt.trim());
+    }
+    if let Some(s) = summary {
+        system.push_str(&crate::memory::system_note(s));
     }
     let mut msgs = vec![ChatMessage::new("system", system)];
     for (q, a) in history {
@@ -1542,7 +1580,10 @@ mod tests {
         };
         let src = vec![SourceRef { n: 1, service_id: "hr".into(), service_name: "HR".into(), doc_path: "a.pdf".into(), file_name: "a.pdf".into(), page: Some(4), ord: 0, score: 0.9, rerank_score: None, keyword: false, knowledge: false, text: "ลา 10 วัน".into() }];
         let hist = vec![("q0".to_string(), "a0".to_string())];
-        let m = build_prompt(&svc, &src, &hist, "ลาได้กี่วัน", false);
+        let m = build_prompt(&svc, &src, &hist, None, "ลาได้กี่วัน", false);
+        assert!(!m[0].content.contains("สรุปบทสนทนาช่วงก่อนหน้า"));
+        let with = build_prompt(&svc, &src, &hist, Some("- รหัสพนักงาน 12345"), "ลาได้กี่วัน", false);
+        assert!(with[0].content.contains("สรุปบทสนทนาช่วงก่อนหน้า") && with[0].content.contains("รหัสพนักงาน 12345"));
         assert_eq!(m.len(), 4);
         assert!(m[0].content.contains("ตอบสั้น"));
         assert_eq!(m[1].content, "q0");
@@ -1551,7 +1592,7 @@ mod tests {
         let mut note = src[0].clone();
         note.file_name = "2026-11-12_OT-ไม่ขึ้น.knowledge.md".into();
         note.knowledge = true;
-        let m = build_prompt(&svc, &[note], &[], "OT ไม่ขึ้น", false);
+        let m = build_prompt(&svc, &[note], &[], None, "OT ไม่ขึ้น", false);
         assert!(m[1].content.contains("[1] บันทึกความรู้: OT ไม่ขึ้น\n"), "{}", m[1].content);
         assert!(m[0].content.contains("ให้ยึดเอกสาร"));
         // queries may be written from the schema, but must say so and come with checks

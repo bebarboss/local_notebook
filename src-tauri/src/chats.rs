@@ -70,6 +70,9 @@ pub struct NewMessage<'a> {
     pub search_query: Option<&'a str>,
 }
 
+/// (answer message id, question, answer)
+pub type Turn = (i64, String, String);
+
 pub struct ChatDb {
     conn: Connection,
 }
@@ -130,6 +133,11 @@ impl ChatDb {
             .exists([])?;
         if !has {
             conn.execute_batch("ALTER TABLE messages ADD COLUMN search_query TEXT;")?;
+        }
+        // v0.15: a summary of the turns that left the history window (memory.rs)
+        let has: bool = conn.prepare("SELECT 1 FROM pragma_table_info('chats') WHERE name='summary'")?.exists([])?;
+        if !has {
+            conn.execute_batch("ALTER TABLE chats ADD COLUMN summary TEXT; ALTER TABLE chats ADD COLUMN summary_upto INTEGER NOT NULL DEFAULT 0;")?;
         }
         Ok(Self { conn })
     }
@@ -269,30 +277,60 @@ impl ChatDb {
             .map(|m| (m.content, m.sources)))
     }
 
-    /// Last `turns` question/answer pairs (text only — no document chunks), oldest first.
+    /// Every good question/answer pair, oldest first, with the answer's message id.
     /// Failed or empty answers are skipped together with their question.
-    pub fn recent_turns(&self, chat_id: &str, turns: u32) -> AppResult<Vec<(String, String)>> {
-        if turns == 0 {
-            return Ok(vec![]);
-        }
-        let msgs = self.messages(chat_id)?;
-        let mut pairs: Vec<(String, String)> = Vec::new();
+    fn pairs(&self, chat_id: &str) -> AppResult<Vec<Turn>> {
+        let mut pairs = Vec::new();
         let mut pending_q: Option<String> = None;
-        for m in msgs {
+        for m in self.messages(chat_id)? {
             match m.role.as_str() {
                 "user" => pending_q = Some(m.content),
                 "assistant" => {
                     if let Some(q) = pending_q.take() {
                         if m.error.is_none() && !m.content.trim().is_empty() {
-                            pairs.push((q, m.content));
+                            pairs.push((m.id, q, m.content));
                         }
                     }
                 }
                 _ => {}
             }
         }
+        Ok(pairs)
+    }
+
+    /// Last `turns` question/answer pairs (text only — no document chunks), oldest first.
+    pub fn recent_turns(&self, chat_id: &str, turns: u32) -> AppResult<Vec<(String, String)>> {
+        if turns == 0 {
+            return Ok(vec![]);
+        }
+        let pairs = self.pairs(chat_id)?;
         let skip = pairs.len().saturating_sub(turns as usize);
-        Ok(pairs.into_iter().skip(skip).collect())
+        Ok(pairs.into_iter().skip(skip).map(|(_, q, a)| (q, a)).collect())
+    }
+
+    /// The summary of the turns before the history window (memory.rs).
+    pub fn summary(&self, chat_id: &str) -> AppResult<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT summary FROM chats WHERE id=?1", [chat_id], |r| r.get::<_, Option<String>>(0))
+            .optional()?
+            .flatten()
+            .filter(|s| !s.trim().is_empty()))
+    }
+
+    /// The current summary and the turns that left the `turns` window since it was written.
+    pub fn to_summarize(&self, chat_id: &str, turns: u32) -> AppResult<(Option<String>, Vec<Turn>)> {
+        let upto: i64 = self.conn.query_row("SELECT summary_upto FROM chats WHERE id=?1", [chat_id], |r| r.get(0)).optional()?.unwrap_or(0);
+        let pairs = self.pairs(chat_id)?;
+        let keep = pairs.len().saturating_sub(turns as usize);
+        let dropped = pairs.into_iter().take(keep).filter(|(id, ..)| *id > upto).collect();
+        Ok((self.summary(chat_id)?, dropped))
+    }
+
+    /// Save a summary that covers every answer up to message `upto`.
+    pub fn set_summary(&self, chat_id: &str, summary: &str, upto: i64) -> AppResult<()> {
+        self.conn.execute("UPDATE chats SET summary=?2, summary_upto=?3 WHERE id=?1", params![chat_id, summary, upto])?;
+        Ok(())
     }
 }
 
@@ -323,6 +361,28 @@ mod tests {
         let all = db.messages("c").unwrap();
         assert_eq!(all[1].search_query.as_deref(), Some("คำค้นที่เขียนใหม่"));
         assert_eq!(db.last_answer("c").unwrap().unwrap().0, "ใหม่ [1]");
+    }
+
+    #[test]
+    fn turns_leaving_the_window_are_summarized_once() {
+        let db = ChatDb::open_in_memory().unwrap();
+        let c = db.create_chat("hr", "q").unwrap();
+        for i in 0..5 {
+            db.add_message(msg(&c.id, "user", &format!("q{i}"), None)).unwrap();
+            db.add_message(msg(&c.id, "assistant", &format!("a{i}"), None)).unwrap();
+        }
+        let (prev, dropped) = db.to_summarize(&c.id, 3).unwrap();
+        assert!(prev.is_none());
+        assert_eq!(dropped.iter().map(|(_, q, _)| q.as_str()).collect::<Vec<_>>(), vec!["q0", "q1"]);
+        db.set_summary(&c.id, "- สรุป q0 q1", dropped.last().unwrap().0).unwrap();
+        let (prev, dropped) = db.to_summarize(&c.id, 3).unwrap();
+        assert_eq!(prev.as_deref(), Some("- สรุป q0 q1"));
+        assert!(dropped.is_empty(), "nothing new left the window");
+        db.add_message(msg(&c.id, "user", "q5", None)).unwrap();
+        db.add_message(msg(&c.id, "assistant", "a5", None)).unwrap();
+        let (_, dropped) = db.to_summarize(&c.id, 3).unwrap();
+        assert_eq!(dropped.iter().map(|(_, q, _)| q.as_str()).collect::<Vec<_>>(), vec!["q2"], "only the newly dropped turn");
+        assert_eq!(db.summary(&c.id).unwrap().as_deref(), Some("- สรุป q0 q1"));
     }
 
     #[test]
