@@ -138,6 +138,16 @@ class Store:
             # v2: a share key per service (SHA-256 of it; the key itself is never stored)
             c.execute("ALTER TABLE services ADD COLUMN IF NOT EXISTS key_hash TEXT")
             c.execute("CREATE UNIQUE INDEX IF NOT EXISTS services_key ON services(key_hash) WHERE key_hash IS NOT NULL")
+            # v3: the original file (stored on disk by its SHA-256, see app.py) and the document's pictures
+            c.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS file_hash TEXT")
+            c.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS file_name TEXT")
+            c.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS file_size BIGINT")
+            c.execute("""CREATE TABLE IF NOT EXISTS images (
+                 id BIGSERIAL PRIMARY KEY,
+                 document_id BIGINT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                 page INTEGER, chunk_ord INTEGER, w INTEGER NOT NULL, h INTEGER NOT NULL,
+                 data BYTEA NOT NULL)""")
+            c.execute("CREATE INDEX IF NOT EXISTS images_doc ON images(document_id, page)")
             # pg_trgm only speeds up keyword search (LIKE works without it)
             try:
                 with c.transaction():
@@ -213,12 +223,13 @@ class Store:
 
     # ------------------------------------------------------------- documents
 
-    _DOC = "id, path, hash, mtime, bytes, status, message, chunk_count, indexed_by, updated_at"
+    _DOC = "id, path, hash, mtime, bytes, status, message, chunk_count, indexed_by, updated_at, file_hash, file_size"
 
     @staticmethod
     def _doc(r) -> dict:
         return {"id": r[0], "path": r[1], "hash": r[2], "mtime": r[3], "bytes": r[4], "status": r[5],
-                "message": r[6], "chunkCount": r[7], "indexedBy": r[8], "updatedAt": r[9]}
+                "message": r[6], "chunkCount": r[7], "indexedBy": r[8], "updatedAt": r[9],
+                "fileHash": r[10], "fileSize": r[11]}
 
     def documents(self, sid: str) -> list[dict]:
         with self.pool.connection() as c:
@@ -264,11 +275,72 @@ class Store:
             ).fetchone()[0]
         return n
 
-    def delete_document(self, sid: str, path: str | None) -> int:
-        with self.pool.connection() as c:
+    def delete_document(self, sid: str, path: str | None) -> tuple[int, list[str]]:
+        """Delete documents; returns (count, file hashes no document uses any more)."""
+        with self.pool.connection() as c, c.transaction():
             if path is None:
-                return c.execute("DELETE FROM documents WHERE service_id=%s", (sid,)).rowcount
-            return c.execute("DELETE FROM documents WHERE service_id=%s AND path=%s", (sid, path)).rowcount
+                rows = c.execute("DELETE FROM documents WHERE service_id=%s RETURNING file_hash", (sid,)).fetchall()
+            else:
+                rows = c.execute("DELETE FROM documents WHERE service_id=%s AND path=%s RETURNING file_hash", (sid, path)).fetchall()
+            hashes = {r[0] for r in rows if r[0]}
+            unused = [h for h in hashes if c.execute("SELECT 1 FROM documents WHERE file_hash=%s LIMIT 1", (h,)).fetchone() is None]
+        return len(rows), unused
+
+    def set_file(self, doc_id: int, file_hash: str, name: str, size: int) -> str | None:
+        """Record the document's file; returns the previous hash when no document uses it any more."""
+        with self.pool.connection() as c, c.transaction():
+            r = c.execute("SELECT file_hash FROM documents WHERE id=%s FOR UPDATE", (doc_id,)).fetchone()
+            if r is None:
+                raise StoreError(404, "no such document")
+            c.execute("UPDATE documents SET file_hash=%s, file_name=%s, file_size=%s WHERE id=%s", (file_hash, name, size, doc_id))
+            old = r[0]
+            if old and old != file_hash and c.execute("SELECT 1 FROM documents WHERE file_hash=%s LIMIT 1", (old,)).fetchone() is None:
+                return old
+        return None
+
+    def file_of(self, sid: str, path: str) -> tuple[str, str]:
+        with self.pool.connection() as c:
+            r = c.execute("SELECT file_hash, file_name FROM documents WHERE service_id=%s AND path=%s", (sid, path)).fetchone()
+        if r is None or not r[0]:
+            raise StoreError(404, "the file of this document is not on the server")
+        return r[0], r[1] or "document"
+
+    def files(self, sid: str) -> list[dict]:
+        with self.pool.connection() as c:
+            rows = c.execute("SELECT path, file_hash, file_name, file_size FROM documents WHERE service_id=%s AND file_hash IS NOT NULL ORDER BY lower(path)", (sid,)).fetchall()
+        return [{"path": r[0], "fileHash": r[1], "fileName": r[2], "fileSize": r[3]} for r in rows]
+
+    def add_images(self, doc_id: int, images: list[dict], replace: bool) -> int:
+        with self.pool.connection() as c, c.transaction():
+            if c.execute("SELECT 1 FROM documents WHERE id=%s", (doc_id,)).fetchone() is None:
+                raise StoreError(404, "no such document")
+            if replace:
+                c.execute("DELETE FROM images WHERE document_id=%s", (doc_id,))
+            with c.cursor() as cur:
+                cur.executemany(
+                    "INSERT INTO images(document_id, page, chunk_ord, w, h, data) VALUES (%s, %s, %s, %s, %s, %s)",
+                    [(doc_id, i.get("page"), i.get("chunkOrd"), i["w"], i["h"], i["data"]) for i in images],
+                )
+            return c.execute("SELECT count(*) FROM images WHERE document_id=%s", (doc_id,)).fetchone()[0]
+
+    def images_for(self, sid: str, path: str, page: int | None, ord_: int) -> list[dict]:
+        """The same choice as the app's local index: the page's pictures, else the chunk's own."""
+        with self.pool.connection() as c:
+            rows = c.execute(
+                """SELECT i.id, i.w, i.h FROM images i JOIN documents d ON d.id = i.document_id
+                   WHERE d.service_id=%s AND d.path=%s AND ((%s::int IS NOT NULL AND i.page=%s::int)
+                     OR (%s::int IS NULL AND i.page IS NULL AND (i.chunk_ord=%s OR i.chunk_ord IS NULL)))
+                   ORDER BY i.id LIMIT 12""",
+                (sid, path, page, page, page, ord_),
+            ).fetchall()
+        return [{"id": r[0], "w": r[1], "h": r[2]} for r in rows]
+
+    def image(self, image_id: int) -> tuple[str, bytes]:
+        with self.pool.connection() as c:
+            r = c.execute("SELECT d.service_id, i.data FROM images i JOIN documents d ON d.id = i.document_id WHERE i.id=%s", (image_id,)).fetchone()
+        if r is None:
+            raise StoreError(404, "no such picture")
+        return r[0], bytes(r[1])
 
     # ---------------------------------------------------------------- search
 

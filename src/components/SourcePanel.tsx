@@ -39,7 +39,7 @@ export function SourcePanel({ source, onClose }: { source: Source; onClose: () =
         <button
           className="btn btn-lg"
           onClick={async () => {
-            try { await api.openSource(source.docPath); } catch (e) { toast((e as { message: string }).message); }
+            try { await api.openSource(source.docPath, source.serviceId); } catch (e) { toast((e as { message: string }).message); }
           }}
         >
           <ExternalLink size={16} strokeWidth={1.8} aria-hidden="true" />{th.openSource}

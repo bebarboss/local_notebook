@@ -16,7 +16,7 @@
 
 use crate::commands::AppState;
 use crate::embed::{ModelId, Source};
-use crate::embed_server::{api, api_as, credential_for, is_owner, server_url};
+use crate::embed_server::{api, api_as, api_get_bytes, api_put_bytes, credential_for, is_owner, server_url};
 use crate::errors::{AppError, AppResult};
 use crate::services::Service;
 use crate::store::{Hit, VectorStore};
@@ -30,6 +30,11 @@ use tauri::{AppHandle, Emitter, Manager};
 
 /// Chunks per upload request (the server takes up to 64).
 const BATCH: usize = 64;
+/// Pictures per upload request (the server takes up to 32).
+const IMAGE_BATCH: usize = 16;
+/// Original files larger than this stay on the PC that has them (the tunnel takes ≤ 100 MB).
+pub const MAX_FILE: u64 = 50 * 1024 * 1024;
+const FILE_TIMEOUT: Duration = Duration::from_secs(600);
 const SHORT: Duration = Duration::from_secs(20);
 const LONG: Duration = Duration::from_secs(120);
 
@@ -55,6 +60,9 @@ struct RemoteDoc {
     status: String,
     chunk_count: i64,
     indexed_by: String,
+    /// SHA-256 of the original file on the server (None: not uploaded)
+    #[serde(default)]
+    file_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,6 +93,9 @@ pub struct SyncReport {
     pub uploaded: usize,
     pub deleted: usize,
     pub unchanged: usize,
+    /// original files uploaded / too large to upload
+    pub files: usize,
+    pub too_large: usize,
     pub error: Option<String>,
 }
 
@@ -310,11 +321,18 @@ async fn sync_inner(app: &AppHandle, sid: &str) -> AppResult<SyncReport> {
     let mut report = SyncReport { service_id: sid.into(), ..Default::default() };
 
     for d in &local {
-        if let Some(r) = by_path.get(d.path.as_str()) {
-            if r.hash == d.hash && r.status == "ready" && r.chunk_count == d.chunk_count {
-                report.unchanged += 1;
-                continue;
-            }
+        let remote_doc = by_path.get(d.path.as_str());
+        let same_index = remote_doc.is_some_and(|r| r.hash == d.hash && r.status == "ready" && r.chunk_count == d.chunk_count);
+        let has_file = remote_doc.is_some_and(|r| r.file_hash.as_deref() == Some(d.hash.as_str()));
+        if same_index && has_file {
+            report.unchanged += 1;
+            continue;
+        }
+        if same_index {
+            // an index from before files were uploaded: send the file and pictures only
+            let id = remote_doc.map(|r| r.id).unwrap_or_default();
+            upload_extras(&cred, &store, d.id, id, &d.path, &mut report).await?;
+            continue;
         }
         let chunks = store.lock().export_chunks(d.id)?;
         if chunks.is_empty() {
@@ -334,6 +352,7 @@ async fn sync_inner(app: &AppHandle, sid: &str) -> AppResult<SyncReport> {
                 api_as(&cred, Method::POST, &format!("/v1/documents/{}/chunks", doc.id), Some(&json!({ "replace": i == 0, "chunks": items })), LONG).await?;
         }
         let _: serde_json::Value = api_as(&cred, Method::PATCH, &format!("/v1/documents/{}", doc.id), Some(&json!({ "status": "ready" })), SHORT).await?;
+        upload_extras(&cred, &store, d.id, doc.id, &d.path, &mut report).await?;
         report.uploaded += 1;
     }
 
@@ -346,6 +365,119 @@ async fn sync_inner(app: &AppHandle, sid: &str) -> AppResult<SyncReport> {
     }
     crate::diag::log(format!("[{}] team sync: {} up, {} deleted, {} unchanged", svc.code, report.uploaded, report.deleted, report.unchanged));
     Ok(report)
+}
+
+/// The document's kept pictures and its original file (≤ MAX_FILE).
+async fn upload_extras(
+    cred: &str,
+    store: &std::sync::Arc<Mutex<crate::store::SqliteStore>>,
+    local_id: i64,
+    remote_id: i64,
+    path: &str,
+    report: &mut SyncReport,
+) -> AppResult<()> {
+    use base64::Engine;
+    let images = store.lock().export_images(local_id)?;
+    for (i, part) in images.chunks(IMAGE_BATCH).enumerate() {
+        let items: Vec<_> = part
+            .iter()
+            .map(|(page, ord, w, h, data)| json!({ "page": page, "chunkOrd": ord, "w": w, "h": h, "data": base64::engine::general_purpose::STANDARD.encode(data) }))
+            .collect();
+        let _: serde_json::Value = api_as(cred, Method::POST, &format!("/v1/documents/{remote_id}/images"), Some(&json!({ "replace": i == 0, "images": items })), LONG).await?;
+    }
+    let p = std::path::Path::new(path);
+    let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    if size == 0 {
+        return Ok(());
+    }
+    if size > MAX_FILE {
+        report.too_large += 1;
+        return Ok(());
+    }
+    let bytes = std::fs::read(p)?;
+    let name = urlencode(&p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "document".into()));
+    api_put_bytes(cred, &format!("/v1/documents/{remote_id}/file?name={name}"), bytes, FILE_TIMEOUT).await?;
+    report.files += 1;
+    Ok(())
+}
+
+// ------------------------------------------------------------------ originals on demand
+
+/// The file name part of a path written on any PC (`C:\x\a.pdf` or `/x/a.pdf`).
+pub fn file_name_of(path: &str) -> String {
+    let n = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    let n: String = n.chars().filter(|c| !c.is_control() && !r#"<>:"/\|?*"#.contains(*c)).collect();
+    if n.trim().is_empty() { "document".into() } else { n }
+}
+
+/// Fetch a shared document's original into this PC's cache (to open it). The cache is per
+/// document path, so a newer upload replaces the older copy.
+pub async fn fetch_original(service_id: &str, doc_path: &str) -> AppResult<std::path::PathBuf> {
+    use sha2::{Digest, Sha256};
+    let cred = credential_for(service_id)?;
+    let bytes = api_get_bytes(&cred, &format!("/v1/services/{service_id}/file?path={}", urlencode(doc_path)), FILE_TIMEOUT).await?;
+    let tag = hex::encode(&Sha256::digest(format!("{service_id}\n{doc_path}").as_bytes())[..8]);
+    let dir = crate::config::data_dir().join("cache").join("files").join(tag);
+    std::fs::create_dir_all(&dir)?;
+    let file = dir.join(file_name_of(doc_path));
+    std::fs::write(&file, bytes)?;
+    Ok(file)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteFile {
+    path: String,
+    file_name: Option<String>,
+}
+
+/// "ดาวน์โหลดเอกสารทั้งหมด": every original of a shared service into `dest`.
+pub async fn download_all(service_id: &str, dest: &std::path::Path) -> AppResult<usize> {
+    let cred = credential_for(service_id)?;
+    let files: Vec<RemoteFile> = api_as(&cred, Method::GET, &format!("/v1/services/{service_id}/files"), None, SHORT).await?;
+    std::fs::create_dir_all(dest)?;
+    let mut used: HashSet<String> = HashSet::new();
+    let mut n = 0;
+    for f in files {
+        let bytes = api_get_bytes(&cred, &format!("/v1/services/{service_id}/file?path={}", urlencode(&f.path)), FILE_TIMEOUT).await?;
+        let base = file_name_of(f.file_name.as_deref().unwrap_or(&f.path));
+        // two documents with the same name from different folders: a (2), (3) …
+        let mut name = base.clone();
+        let mut i = 2;
+        while used.contains(&name.to_lowercase()) || dest.join(&name).exists() {
+            let (stem, ext) = match base.rsplit_once('.') {
+                Some((s, e)) => (s.to_string(), format!(".{e}")),
+                None => (base.clone(), String::new()),
+            };
+            name = format!("{stem} ({i}){ext}");
+            i += 1;
+        }
+        used.insert(name.to_lowercase());
+        std::fs::write(dest.join(&name), bytes)?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Pictures of a shared document from the server. Ids are negative so `image_data` knows
+/// to fetch them there.
+pub async fn remote_images(service_id: &str, doc_path: &str, page: Option<u32>, ord: i64) -> AppResult<Vec<crate::store::ImageInfo>> {
+    let cred = credential_for(service_id)?;
+    let page_q = page.map(|p| format!("&page={p}")).unwrap_or_default();
+    let list: Vec<crate::store::ImageInfo> =
+        api_as(&cred, Method::GET, &format!("/v1/services/{service_id}/images?path={}&ord={ord}{page_q}", urlencode(doc_path)), None, SHORT).await?;
+    Ok(list.into_iter().map(|i| crate::store::ImageInfo { id: -i.id, ..i }).collect())
+}
+
+pub async fn remote_image(service_id: &str, id: i64) -> AppResult<Vec<u8>> {
+    use base64::Engine;
+    #[derive(Deserialize)]
+    struct D {
+        data: String,
+    }
+    let cred = credential_for(service_id)?;
+    let d: D = api_as(&cred, Method::GET, &format!("/v1/images/{id}"), None, SHORT).await?;
+    base64::engine::general_purpose::STANDARD.decode(d.data).map_err(|_| AppError::new("server", "รูปจากเซิร์ฟเวอร์อ่านไม่ได้"))
 }
 
 /// Sync in the background and tell the UI ("team-sync"); after indexing and from the button.
@@ -438,6 +570,14 @@ mod tests {
     fn paths_are_encoded_for_the_query_string() {
         assert_eq!(urlencode("C:\\docs\\ใบลา v2.pdf"), "C%3A%5Cdocs%5C%E0%B9%83%E0%B8%9A%E0%B8%A5%E0%B8%B2%20v2.pdf");
         assert_eq!(urlencode("a-b_c.d~"), "a-b_c.d~");
+    }
+
+    #[test]
+    fn file_names_from_any_pc() {
+        assert_eq!(file_name_of("C:\\docs\\ใบลา.pdf"), "ใบลา.pdf");
+        assert_eq!(file_name_of("/Users/a/b.xlsx"), "b.xlsx");
+        assert_eq!(file_name_of("C:\\x\\"), "document");
+        assert_eq!(file_name_of("a:b?.pdf"), "ab.pdf");
     }
 
     #[test]

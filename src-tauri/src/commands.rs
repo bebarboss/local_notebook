@@ -437,18 +437,32 @@ pub fn restore_document(app: AppHandle, state: S<'_>, service_id: String, path: 
 
 /// Pictures kept from the document around a cited chunk.
 #[tauri::command]
-pub fn source_images(state: S<'_>, service_id: String, doc_path: String, page: Option<u32>, ord: i64) -> AppResult<Vec<crate::store::ImageInfo>> {
-    let store = state.stores.get(&service_id)?;
-    let imgs = store.lock().images_for(&doc_path, page, ord)?;
-    Ok(imgs)
+pub async fn source_images(app: AppHandle, service_id: String, doc_path: String, page: Option<u32>, ord: i64) -> AppResult<Vec<crate::store::ImageInfo>> {
+    let state = app.state::<AppState>();
+    let local = {
+        let store = state.stores.get(&service_id)?;
+        let imgs = store.lock().images_for(&doc_path, page, ord)?;
+        imgs
+    };
+    // a shared document indexed on another PC: its pictures are on the server
+    let shared = state.services.lock().get(&service_id).is_ok_and(|s| s.shared);
+    if local.is_empty() && shared {
+        return crate::team::remote_images(&service_id, &doc_path, page, ord).await.or_else(|_| Ok(vec![]));
+    }
+    Ok(local)
 }
 
 /// One kept picture as a `data:image/jpeg;base64,…` URL (CSP allows `img-src data:`).
 #[tauri::command]
-pub fn image_data(state: S<'_>, service_id: String, id: i64) -> AppResult<String> {
+pub async fn image_data(app: AppHandle, service_id: String, id: i64) -> AppResult<String> {
     use base64::Engine;
-    let store = state.stores.get(&service_id)?;
-    let bytes = store.lock().image_data(id)?.ok_or_else(|| AppError::new("not_found", "ไม่พบรูปนี้ (อาจถูก index ใหม่แล้ว)"))?;
+    let bytes = if id < 0 {
+        crate::team::remote_image(&service_id, -id).await?
+    } else {
+        let store = app.state::<AppState>().stores.get(&service_id)?;
+        let b = store.lock().image_data(id)?;
+        b.ok_or_else(|| AppError::new("not_found", "ไม่พบรูปนี้ (อาจถูก index ใหม่แล้ว)"))?
+    };
     Ok(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
@@ -1081,10 +1095,19 @@ pub fn build_prompt(svc: &Service, sources: &[SourceRef], history: &[(String, St
 }
 
 #[tauri::command]
-pub fn open_source_file(path: String) -> AppResult<()> {
-    let p = PathBuf::from(&path);
+pub async fn open_source_file(app: AppHandle, path: String, service_id: Option<String>) -> AppResult<()> {
+    let mut p = PathBuf::from(&path);
     if !p.is_file() || !is_supported(&p) {
-        return Err(AppError::new("not_found", "ไม่พบไฟล์ต้นฉบับ (อาจถูกย้ายหรือลบ)"));
+        // a shared document whose file is on another PC: fetch the original from the server
+        let shared = service_id.as_deref().and_then(|sid| app.state::<AppState>().services.lock().get(sid).ok()).filter(|s| s.shared);
+        match shared {
+            Some(s) => {
+                p = crate::team::fetch_original(&s.id, &path)
+                    .await
+                    .map_err(|e| if e.status == Some(404) { AppError::new("not_found", "ไฟล์ต้นฉบับยังไม่อยู่บนเซิร์ฟเวอร์ (เครื่องที่มีไฟล์ยังไม่ได้ซิงก์ หรือไฟล์ใหญ่เกิน 50 MB)") } else { e })?;
+            }
+            None => return Err(AppError::new("not_found", "ไม่พบไฟล์ต้นฉบับ (อาจถูกย้ายหรือลบ)")),
+        }
     }
     #[cfg(windows)]
     let r = std::process::Command::new("explorer").arg(&p).spawn();
@@ -1385,6 +1408,12 @@ pub async fn rotate_service_key(app: AppHandle, service_id: String) -> AppResult
 #[tauri::command]
 pub fn leave_service(app: AppHandle, service_id: String) -> AppResult<()> {
     crate::team::leave(&app, &service_id)
+}
+
+/// "ดาวน์โหลดเอกสารทั้งหมด" of a shared service into a folder the user picked.
+#[tauri::command]
+pub async fn download_service_files(service_id: String, dest: String) -> AppResult<usize> {
+    crate::team::download_all(&service_id, Path::new(&dest)).await
 }
 
 /// "ซิงก์ตอนนี้": push every shared service that has files on this PC.

@@ -41,7 +41,8 @@ class TopicEncoder:
 
 
 @pytest.fixture()
-def client():
+def client(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "FILES_DIR", str(tmp_path / "files"))
     import psycopg
 
     from db import Store
@@ -169,6 +170,49 @@ def test_share_keys_open_one_service_only(client):
     assert new != key
     assert c.get("/v1/services/hr", headers=K).status_code == 401
     assert c.get("/v1/services/hr", headers={"Authorization": f"Bearer {new}"}).status_code == 200
+
+
+def test_original_files_and_pictures(client):
+    import base64
+    import hashlib
+
+    c, _ = client
+    c.put("/v1/services/hr", json={"data": {"name": "HR"}}, headers=H)
+    did = doc(c, "hr", "C:/docs/ใบลา.pdf", [{"ord": 0, "page": 1, "text": "ลา 10 วัน"}])
+    key = c.post("/v1/services/hr/key", headers=H).json()["key"]
+    K = {"Authorization": f"Bearer {key}"}
+
+    body = b"%PDF-1.4 leave policy"
+    r = c.put(f"/v1/documents/{did}/file", params={"name": "ใบลา.pdf"}, content=body, headers=K).json()
+    assert r["fileHash"] == hashlib.sha256(body).hexdigest()
+    d = c.get("/v1/services/hr/documents", headers=K).json()[0]
+    assert d["fileHash"] == r["fileHash"] and d["fileSize"] == len(body)
+    got = c.get("/v1/services/hr/file", params={"path": "C:/docs/ใบลา.pdf"}, headers=K)
+    assert got.status_code == 200 and got.content == body
+    assert "attachment" in got.headers["content-disposition"]
+    assert [f["fileName"] for f in c.get("/v1/services/hr/files", headers=K).json()] == ["ใบลา.pdf"]
+    assert c.get("/v1/services/hr/file", params={"path": "nope.pdf"}, headers=K).status_code == 404
+
+    # pictures: the page's own, readable with the key
+    png = base64.b64encode(b"PNG fake bytes").decode()
+    n = c.post(f"/v1/documents/{did}/images", json={"replace": True, "images": [{"page": 1, "w": 10, "h": 5, "data": png}, {"page": 2, "w": 1, "h": 1, "data": png}]}, headers=K).json()
+    assert n["images"] == 2
+    imgs = c.get("/v1/services/hr/images", params={"path": "C:/docs/ใบลา.pdf", "page": 1, "ord": 0}, headers=K).json()
+    assert [(i["w"], i["h"]) for i in imgs] == [(10, 5)]
+    assert c.get(f"/v1/images/{imgs[0]['id']}", headers=K).json()["data"] == png
+    assert c.post(f"/v1/documents/{did}/images", json={"images": [{"w": 1, "h": 1, "data": "not base64!"}]}, headers=K).status_code == 400
+
+    # another service's key cannot read them
+    c.put("/v1/services/pos", json={"data": {"name": "POS"}}, headers=H)
+    other = {"Authorization": "Bearer " + c.post("/v1/services/pos/key", headers=H).json()["key"]}
+    assert c.get("/v1/services/hr/file", params={"path": "C:/docs/ใบลา.pdf"}, headers=other).status_code == 403
+    assert c.get(f"/v1/images/{imgs[0]['id']}", headers=other).status_code == 403
+
+    # deleting the document removes its file from disk (no other document uses it)
+    blob = server._blob(r["fileHash"])
+    assert os.path.exists(blob)
+    c.delete("/v1/services/hr/documents", params={"path": "C:/docs/ใบลา.pdf"}, headers=K)
+    assert not os.path.exists(blob)
 
 
 def test_model_mismatch_refuses_to_start(client):

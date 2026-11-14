@@ -8,6 +8,7 @@ Runs at home (Mac mini) behind a tunnel. Every route except /health needs
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import os
@@ -17,7 +18,7 @@ import time
 from typing import Any, Literal, Optional, Union
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 MODEL_NAME = os.environ.get("EMBED_MODEL", "BAAI/bge-m3")
@@ -33,6 +34,10 @@ MAX_INPUTS = 64
 MAX_CHARS = 32_000
 MAX_BODY = 16 * 1024 * 1024
 MAX_CHUNKS = 64
+# original files of shared documents: FILES_DIR/<sha256[:2]>/<sha256>
+FILES_DIR = os.environ.get("FILES_DIR") or os.path.join(os.path.expanduser("~"), ".docask-embed", "files")
+MAX_FILE = int(os.environ.get("EMBED_MAX_FILE_MB", "50")) * 1024 * 1024
+MAX_IMAGES = 32
 MAX_QUERIES = 4
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 
@@ -112,6 +117,19 @@ class ChunksIn(BaseModel):
     chunks: list[ChunkIn]
 
 
+class ImageIn(BaseModel):
+    page: Optional[int] = None
+    chunkOrd: Optional[int] = None
+    w: int = Field(ge=1, le=20000)
+    h: int = Field(ge=1, le=20000)
+    data: str = Field(max_length=4_000_000)
+
+
+class ImagesIn(BaseModel):
+    replace: bool = False
+    images: list[ImageIn]
+
+
 class SearchIn(BaseModel):
     serviceIds: list[str] = Field(min_length=1)
     queries: list[str] = Field(min_length=1, max_length=MAX_QUERIES)
@@ -172,7 +190,8 @@ def create_app(encoder: Encoder | None = None, token: str | None = None, store: 
     @app.middleware("http")
     async def limit_body(request: Request, call_next):
         size = request.headers.get("content-length")
-        if size and size.isdigit() and int(size) > MAX_BODY:
+        limit = MAX_FILE if request.url.path.endswith("/file") and request.method == "PUT" else MAX_BODY
+        if size and size.isdigit() and int(size) > limit:
             return JSONResponse({"error": {"message": "request too large"}}, status_code=413)
         return await call_next(request)
 
@@ -220,6 +239,19 @@ def create_app(encoder: Encoder | None = None, token: str | None = None, store: 
     if store is not None:
         _store_routes(app, enc, store, auth, caller)
     return app
+
+
+def _blob(h: str) -> str:
+    if len(h) != 64 or any(c not in "0123456789abcdef" for c in h):
+        raise HTTPException(400, "bad file hash")
+    return os.path.join(FILES_DIR, h[:2], h)
+
+
+def _remove_blob(h: str) -> None:
+    try:
+        os.remove(_blob(h))
+    except (FileNotFoundError, HTTPException):
+        pass
 
 
 def key_hash(key: str) -> str:
@@ -280,7 +312,71 @@ def _store_routes(app: FastAPI, enc: Encoder, store: Any, auth, caller) -> None:
         allowed(who, sid)
         if path is None and who is not None:
             raise HTTPException(403, "only the owner may clear a whole service")
-        return {"deleted": store.delete_document(sid, path)}
+        n, unused = store.delete_document(sid, path)
+        for h in unused:
+            _remove_blob(h)
+        return {"deleted": n}
+
+    @app.put("/v1/documents/{doc_id}/file")
+    async def put_file(doc_id: int, request: Request, name: str = Query(min_length=1, max_length=255), who: Optional[str] = Depends(caller)):
+        """The original file of a document (raw body). Stored once per content (SHA-256)."""
+        allowed(who, store.service_of_document(doc_id))
+        body = await request.body()
+        if len(body) > MAX_FILE:
+            raise HTTPException(413, "file too large")
+        h = hashlib.sha256(body).hexdigest()
+        path = _blob(h)
+        if not os.path.exists(path):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f"{path}.{secrets.token_hex(4)}.tmp"
+            with open(tmp, "wb") as f:
+                f.write(body)
+            os.replace(tmp, path)
+        safe = os.path.basename(name.replace("\\", "/")) or "document"
+        old = store.set_file(doc_id, h, safe, len(body))
+        if old:
+            _remove_blob(old)
+        log.info("stored a file (%d KB)", len(body) // 1024)
+        return {"fileHash": h, "size": len(body)}
+
+    @app.get("/v1/services/{sid}/file")
+    def get_file(sid: str, path: str, who: Optional[str] = Depends(caller)):
+        allowed(who, sid)
+        h, name = store.file_of(sid, path)
+        blob = _blob(h)
+        if not os.path.exists(blob):
+            raise HTTPException(404, "the file of this document is missing on the server")
+        return FileResponse(blob, filename=name, media_type="application/octet-stream")
+
+    @app.get("/v1/services/{sid}/files")
+    def list_files(sid: str, who: Optional[str] = Depends(caller)):
+        allowed(who, sid)
+        return store.files(sid)
+
+    @app.post("/v1/documents/{doc_id}/images")
+    def add_images(doc_id: int, body: ImagesIn, who: Optional[str] = Depends(caller)):
+        allowed(who, store.service_of_document(doc_id))
+        if len(body.images) > MAX_IMAGES:
+            raise HTTPException(413, f"at most {MAX_IMAGES} pictures per request")
+        imgs = []
+        for i in body.images:
+            try:
+                data = base64.b64decode(i.data, validate=True)
+            except ValueError:
+                raise HTTPException(400, "picture data must be base64") from None
+            imgs.append({"page": i.page, "chunkOrd": i.chunkOrd, "w": i.w, "h": i.h, "data": data})
+        return {"images": store.add_images(doc_id, imgs, body.replace)}
+
+    @app.get("/v1/services/{sid}/images")
+    def images(sid: str, path: str, page: Optional[int] = None, ord: int = 0, who: Optional[str] = Depends(caller)):
+        allowed(who, sid)
+        return store.images_for(sid, path, page, ord)
+
+    @app.get("/v1/images/{image_id}")
+    def image(image_id: int, who: Optional[str] = Depends(caller)):
+        sid, data = store.image(image_id)
+        allowed(who, sid)
+        return {"data": base64.b64encode(data).decode()}
 
     @app.patch("/v1/documents/{doc_id}")
     def set_status(doc_id: int, body: StatusIn, who: Optional[str] = Depends(caller)):

@@ -369,6 +369,7 @@ export function createMockBackend(): Backend {
     },
     stop: async (rid) => { const s = streams.get(rid); if (s) s.stopped = true; },
     openSource: async () => {},
+    downloadServiceFiles: async () => { await wait(900); return 7; },
     knowledgeInfo: async (sid) => ({ dir: services.find((x) => x.id === sid)?.knowledgeDir || "C:\\Users\\me\\Documents\\DocAsk ความรู้\\" + (services.find((x) => x.id === sid)?.name ?? ""), notes: notes[sid] ?? 0 }),
     draftKnowledge: async () => {
       await wait(1200);
@@ -451,13 +452,13 @@ export function createMockBackend(): Backend {
       if (shared && !embedServer.hasToken) throw { code: "not_owner", message: "เครื่องนี้ไม่ใช่เจ้าของเซิร์ฟเวอร์ — แชร์หรือสร้างคีย์ได้เฉพาะเครื่องที่ตั้งค่าด้วยลิงก์ตั้งค่าของผู้ดูแล" };
       sv.shared = shared;
       emit("services-changed", null);
-      if (shared) setTimeout(() => emit("team-sync", { serviceId: sid, uploaded: 3, deleted: 0, unchanged: 0, error: null }), 800);
+      if (shared) setTimeout(() => emit("team-sync", { serviceId: sid, uploaded: 3, deleted: 0, unchanged: 0, files: 3, tooLarge: 0, error: null }), 800);
       return shared ? `docask://join?url=https%3A%2F%2Fmock.trycloudflare.com&service=${sid}&key=mockkey${Date.now()}&name=${encodeURIComponent(sv.name)}` : null;
     },
     serviceInvite: async (sid) => `docask://join?url=https%3A%2F%2Fmock.trycloudflare.com&service=${sid}&key=mockkey0123456789&name=x`,
     rotateServiceKey: async (sid) => { await wait(400); return `docask://join?url=https%3A%2F%2Fmock.trycloudflare.com&service=${sid}&key=mockkey${Date.now()}&name=x`; },
     leaveService: async (sid) => { const i = services.findIndex((x) => x.id === sid); if (i >= 0) services.splice(i, 1); emit("services-changed", null); },
-    teamSyncNow: async () => { setTimeout(() => emit("team-sync", { serviceId: services[0].id, uploaded: 1, deleted: 0, unchanged: 6, error: null }), 600); },
+    teamSyncNow: async () => { setTimeout(() => emit("team-sync", { serviceId: services[0].id, uploaded: 1, deleted: 0, unchanged: 6, files: 1, tooLarge: 0, error: null }), 600); },
     connectPending: async () => null,
     connectPaste: async (link) => {
       const m = /^docask:\/\/connect\/?\?(.*)$/.exec(link.trim());

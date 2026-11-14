@@ -688,7 +688,7 @@ function TeamRow() {
     const off = api.on("team-sync", (r) => {
       const name = app.services.find((s) => s.id === r.serviceId)?.name ?? r.serviceId;
       if (r.error) app.toast(`ซิงก์ ${name} ไม่สำเร็จ: ${r.error}`);
-      else if (r.uploaded || r.deleted) app.toast(`ซิงก์ ${name} ขึ้น server แล้ว · ส่ง ${r.uploaded} ไฟล์${r.deleted ? ` · ลบ ${r.deleted}` : ""}`);
+      else if (r.uploaded || r.deleted || r.files) app.toast(`ซิงก์ ${name} ขึ้น server แล้ว · ส่ง ${r.uploaded} เอกสาร${r.files ? ` (ต้นฉบับ ${r.files} ไฟล์)` : ""}${r.deleted ? ` · ลบ ${r.deleted}` : ""}${r.tooLarge ? ` · ${r.tooLarge} ไฟล์ใหญ่เกิน 50 MB ไม่ได้ส่งต้นฉบับ` : ""}`);
       load();
     });
     return () => { off.then((f) => f()); };

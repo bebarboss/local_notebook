@@ -4,9 +4,10 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     HF_HOME=/models \
-    HF_HUB_DISABLE_TELEMETRY=1
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    FILES_DIR=/data/files
 
-RUN useradd --create-home --uid 10001 app && mkdir /models && chown app /models
+RUN useradd --create-home --uid 10001 app && mkdir -p /models /data/files && chown app /models /data/files
 WORKDIR /srv
 
 COPY requirements.txt .

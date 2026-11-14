@@ -131,7 +131,10 @@ export interface Backend {
   deleteAllChats(): Promise<void>;
   ask(req: AskRequest): Promise<AskStarted>;
   stop(requestId: string): Promise<void>;
-  openSource(path: string): Promise<void>;
+  /** a shared document whose file is on another PC is fetched from the server first */
+  openSource(path: string, serviceId?: string): Promise<void>;
+  /** every original of a shared service into a folder → how many */
+  downloadServiceFiles(serviceId: string, dest: string): Promise<number>;
   // knowledge notes
   knowledgeInfo(serviceId: string): Promise<KnowledgeInfo>;
   /** model writes notes from the chat (up to message `upto`); nothing saved yet */
@@ -251,7 +254,8 @@ function createTauriBackend(): Backend {
     deleteAllChats: () => call("delete_all_chats"),
     ask: (req) => call("ask", { req }),
     stop: (requestId) => call("stop_generation", { requestId }),
-    openSource: (path) => call("open_source_file", { path }),
+    openSource: (path, serviceId) => call("open_source_file", { path, serviceId: serviceId ?? null }),
+    downloadServiceFiles: (serviceId, dest) => call("download_service_files", { serviceId, dest }),
     knowledgeInfo: (serviceId) => call("knowledge_info", { serviceId }),
     draftKnowledge: (chatId, upto) => call("draft_knowledge", { chatId, upto }),
     saveKnowledge: (serviceId, chatId, date, notes) => call("save_knowledge", { serviceId, chatId, date, notes }),

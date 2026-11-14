@@ -157,6 +157,7 @@ pub fn run() {
             commands::rotate_service_key,
             commands::leave_service,
             commands::team_sync_now,
+            commands::download_service_files,
             commands::connect_pending,
             commands::connect_paste,
             commands::connect_apply,

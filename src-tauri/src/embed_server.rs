@@ -313,7 +313,29 @@ pub async fn api_as<T: DeserializeOwned>(token: &str, method: reqwest::Method, p
     if let Some(b) = body {
         req = req.json(b);
     }
-    let r = req.send().await.map_err(|e| if e.is_connect() || e.is_timeout() { unreachable(&base) } else { AppError::from(e) });
+    let r = checked(&base, req).await?;
+    r.json::<T>().await.map_err(|_| AppError::new("server", "เซิร์ฟเวอร์ตอบกลับในรูปแบบที่ไม่รู้จัก — อัปเดตเซิร์ฟเวอร์ (git pull)"))
+}
+
+/// Upload raw bytes (an original file).
+pub async fn api_put_bytes(token: &str, path: &str, bytes: Vec<u8>, timeout: Duration) -> AppResult<serde_json::Value> {
+    let base = server_url()?;
+    let req = CLIENT.put(format!("{base}{path}")).bearer_auth(token).timeout(timeout).header("content-type", "application/octet-stream").body(bytes);
+    let r = checked(&base, req).await?;
+    r.json().await.map_err(|_| AppError::new("server", "เซิร์ฟเวอร์ตอบกลับในรูปแบบที่ไม่รู้จัก — อัปเดตเซิร์ฟเวอร์ (git pull)"))
+}
+
+/// Download raw bytes (an original file).
+pub async fn api_get_bytes(token: &str, path: &str, timeout: Duration) -> AppResult<Vec<u8>> {
+    let base = server_url()?;
+    let req = CLIENT.get(format!("{base}{path}")).bearer_auth(token).timeout(timeout);
+    let r = checked(&base, req).await?;
+    Ok(r.bytes().await.map_err(AppError::from)?.to_vec())
+}
+
+/// Send; a non-2xx status becomes a readable error, and the server's up/down state is noted.
+async fn checked(base: &str, req: reqwest::RequestBuilder) -> AppResult<reqwest::Response> {
+    let r = req.send().await.map_err(|e| if e.is_connect() || e.is_timeout() { unreachable(base) } else { AppError::from(e) });
     let r = match r {
         Ok(r) => r,
         Err(e) => {
@@ -324,14 +346,14 @@ pub async fn api_as<T: DeserializeOwned>(token: &str, method: reqwest::Method, p
     let status = r.status().as_u16();
     if !(200..300).contains(&status) {
         let text = r.text().await.unwrap_or_default();
-        let e = api_error(&base, status, &text);
+        let e = api_error(base, status, &text);
         if is_down(&e) {
             *DOWN_AT.lock() = Some(Instant::now());
         }
         return Err(e);
     }
     *DOWN_AT.lock() = None;
-    r.json::<T>().await.map_err(|_| AppError::new("server", "เซิร์ฟเวอร์ตอบกลับในรูปแบบที่ไม่รู้จัก — อัปเดตเซิร์ฟเวอร์ (git pull)"))
+    Ok(r)
 }
 
 #[cfg(test)]

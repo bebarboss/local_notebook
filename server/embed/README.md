@@ -119,7 +119,11 @@ URL ของ tunnel จะเปลี่ยน ให้ใส่ URL ให�
 | container | หน้าที่ |
 |---|---|
 | `docask-db` | PostgreSQL 16 + pgvector — ตาราง `services`, `documents`, `chunks` (ข้อความ + vector 1024 มิติ, index HNSW), `chats`, `messages` |
-| `docask-backup` | `pg_dump` วันละครั้งลง `./backups/docask-YYYYMMDD-HHMM.dump` เก็บ 14 ไฟล์ล่าสุด |
+| `docask-backup` | `pg_dump` วันละครั้งลง `./backups/docask-YYYYMMDD-HHMM.dump` เก็บ 14 ไฟล์ล่าสุด · คัดลอกไฟล์ต้นฉบับใหม่ลง `./backups/files/` |
+
+**ไฟล์ต้นฉบับ** ของเอกสารที่แชร์: Docker = volume `files` (`/data/files`) · โหมดเร็ว = `~/.docask-embed/files`
+(ตั้งที่อื่นได้ด้วย `FILES_DIR`) · โหมดเร็ว container backup มองไม่เห็นโฟลเดอร์นี้ → ให้ Time Machine หรือคัดลอกเองเป็นระยะ ·
+ขนาดสูงสุดต่อไฟล์ `EMBED_MAX_FILE_MB` (ค่าเริ่มต้น 50 — tunnel ของ Cloudflare รับไม่เกิน 100 MB ต่อครั้ง)
 
 - ฐานข้อมูลเปิด port แค่ `127.0.0.1:5432` (บน Mac เท่านั้น) **ไม่ผ่าน tunnel** — แอปเข้าผ่าน API ของเซิร์ฟเวอร์ (ต้องมี token) อย่างเดียว
 - เซิร์ฟเวอร์สร้างตารางเองตอนเริ่ม · `/health` บอก `"database": true` เมื่อต่อได้
@@ -140,6 +144,9 @@ API (แอป DocAsk เป็นคนเรียก) — **token ของ�
 | `GET/PUT/DELETE /v1/services/{id}/documents` | รายการเอกสาร / ลงทะเบียน / ลบ (`?path=`) |
 | `POST /v1/documents/{id}/chunks` | ส่งท่อน (≤ 64 ต่อครั้ง) — เซิร์ฟเวอร์ทำ embedding เอง หรือรับ vector ที่ทำไว้แล้ว · `replace: true` ล้างท่อนเก่า |
 | `PATCH /v1/documents/{id}` | สถานะ (indexing / ready / error) |
+| `PUT /v1/documents/{id}/file?name=` | ไฟล์ต้นฉบับ (body = ไฟล์ ≤ 50 MB) เก็บบนดิสก์ตาม SHA-256 · ไฟล์เนื้อหาเดียวกันเก็บครั้งเดียว · ลบเอกสาร = ลบไฟล์ที่ไม่มีใครใช้แล้ว |
+| `GET /v1/services/{id}/file?path=`, `GET /v1/services/{id}/files` | ดาวน์โหลดต้นฉบับ (แอปโหลดเฉพาะไฟล์ที่กดเปิด) / รายการไฟล์ |
+| `POST /v1/documents/{id}/images`, `GET /v1/services/{id}/images`, `GET /v1/images/{id}` | รูปในเอกสาร (เก็บในฐานข้อมูล) |
 | `POST /v1/search` | `{serviceIds, queries[], k, threshold, hybrid}` → vector + keyword (trigram) รวมแบบ RRF |
 | `GET/PUT/DELETE /v1/chats[/{id}]`, `GET/POST /v1/chats/{id}/messages` | ประวัติแชต |
 

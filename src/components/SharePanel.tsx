@@ -1,7 +1,7 @@
 // "แชร์ service นี้": the owner shares a service on the team database and hands out invite
 // links; a member who joined with an invite can leave. Lives in the service editor.
 import { useEffect, useState } from "react";
-import { Copy, KeyRound, LogOut, Users } from "lucide-react";
+import { Copy, Download, KeyRound, LogOut, Users } from "lucide-react";
 import { api } from "../lib/api";
 import type { Service } from "../lib/types";
 import { useApp } from "../state";
@@ -57,7 +57,7 @@ export function SharePanel({ service: initial, onLeft }: { service: Service; onL
       {shared && owner && (
         <>
           <span className="field-hint">
-            <span className="ok-text">แชร์อยู่</span> · ค้นจากเซิร์ฟเวอร์ · เอกสารในโฟลเดอร์ของเครื่องนี้ถูกส่งขึ้นหลังทำ index ทุกครั้ง ·
+            <span className="ok-text">แชร์อยู่</span> · ค้นจากเซิร์ฟเวอร์ · เอกสาร (ข้อความ รูป และไฟล์ต้นฉบับ ≤ 50 MB) ถูกส่งขึ้นหลังทำ index ทุกครั้ง ·
             ใครมีลิงก์เชิญก็เข้า service นี้ได้ ส่งเฉพาะคนในทีม
           </span>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -67,6 +67,7 @@ export function SharePanel({ service: initial, onLeft }: { service: Service; onL
             <button type="button" className="btn" disabled={busy} onClick={() => setAsk("rotate")}>
               <KeyRound size={16} strokeWidth={1.8} aria-hidden="true" /> สร้างคีย์ใหม่
             </button>
+            <DownloadAll serviceId={service.id} busy={busy} run={run} />
             <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => setAsk("unshare")}>หยุดแชร์</button>
           </div>
         </>
@@ -74,11 +75,15 @@ export function SharePanel({ service: initial, onLeft }: { service: Service; onL
       {shared && !owner && (
         <>
           <span className="field-hint">
-            <span className="ok-text">เข้าร่วมจากทีม</span> · ค้นจากเซิร์ฟเวอร์ · เพิ่มโฟลเดอร์ด้านบนได้ เอกสารจะถูกส่งขึ้นให้ทั้งทีม · แชตของคุณอยู่ในเครื่องนี้
+            <span className="ok-text">เข้าร่วมจากทีม</span> · ค้นจากเซิร์ฟเวอร์ · เปิดไฟล์ต้นฉบับจากแหล่งอ้างอิงได้ (โหลดเฉพาะไฟล์ที่เปิด) ·
+            เพิ่มโฟลเดอร์ด้านบนได้ เอกสารจะถูกส่งขึ้นให้ทั้งทีม · แชตของคุณอยู่ในเครื่องนี้
           </span>
-          <button type="button" className="btn btn-ghost" style={{ alignSelf: "flex-start" }} disabled={busy} onClick={() => setAsk("leave")}>
-            <LogOut size={16} strokeWidth={1.8} aria-hidden="true" /> ออกจาก service
-          </button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <DownloadAll serviceId={service.id} busy={busy} run={run} />
+            <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => setAsk("leave")}>
+              <LogOut size={16} strokeWidth={1.8} aria-hidden="true" /> ออกจาก service
+            </button>
+          </div>
         </>
       )}
       {error && <span className="field-hint" style={{ color: "var(--warn-text)" }} role="alert">{error}</span>}
@@ -116,5 +121,23 @@ export function SharePanel({ service: initial, onLeft }: { service: Service; onL
           onConfirm={() => { setAsk(null); run(async () => { await api.leaveService(service.id); await app.refreshServices(); app.toast(`ออกจาก ${service.name} แล้ว`); onLeft(); }); }} />
       )}
     </div>
+  );
+}
+
+/** "ดาวน์โหลดเอกสารทั้งหมด": originals from the server into a folder the user picks (on demand only). */
+function DownloadAll({ serviceId, busy, run }: { serviceId: string; busy: boolean; run: (f: () => Promise<void>) => Promise<void> }) {
+  const app = useApp();
+  return (
+    <button type="button" className="btn" disabled={busy} title="ไฟล์ต้นฉบับของ service นี้จากเซิร์ฟเวอร์ — สำหรับอ่านตอนไม่มีเน็ต"
+      onClick={async () => {
+        const dest = await api.pickFolder();
+        if (!dest) return;
+        await run(async () => {
+          const n = await api.downloadServiceFiles(serviceId, dest);
+          app.toast(n ? `ดาวน์โหลดแล้ว ${n} ไฟล์ ไปที่ ${dest}` : "ยังไม่มีไฟล์ต้นฉบับบนเซิร์ฟเวอร์");
+        });
+      }}>
+      <Download size={16} strokeWidth={1.8} aria-hidden="true" /> ดาวน์โหลดเอกสารทั้งหมด
+    </button>
   );
 }

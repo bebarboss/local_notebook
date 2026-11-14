@@ -18,6 +18,7 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - hf-cache:/models
+      - files:/data/files
     mem_limit: 5g
     logging:
       driver: json-file
@@ -71,6 +72,8 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       - ./backups:/backups
+      # the original files (Docker mode); mac-native mode keeps them in ~/.docask-embed/files
+      - files:/files:ro
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -78,6 +81,8 @@ services:
           f=/backups/docask-$$(date +%Y%m%d-%H%M).dump
           pg_dump -h db -U docask -d docask -Fc -f "$$f.tmp" && mv "$$f.tmp" "$$f" && echo "backup $$f"
           ls -1t /backups/docask-*.dump 2>/dev/null | tail -n +15 | xargs -r rm -f
+          # files are named by content: copying new ones is enough
+          mkdir -p /backups/files && cp -Rn /files/. /backups/files/ 2>/dev/null && echo "files backed up"
           sleep 86400
         done
     logging:
@@ -87,3 +92,4 @@ services:
 volumes:
   hf-cache:
   pgdata:
+  files:

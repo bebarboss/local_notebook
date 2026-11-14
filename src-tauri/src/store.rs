@@ -43,7 +43,13 @@ pub struct NewImage {
     pub jpeg: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// (page, ord, text, vector)
+pub type ExportChunk = (Option<u32>, i64, String, Vec<f32>);
+
+/// (page, chunk ord, w, h, bytes)
+pub type ExportImage = (Option<u32>, Option<i64>, u32, u32, Vec<u8>);
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageInfo {
     pub id: i64,
@@ -190,9 +196,16 @@ impl SqliteStore {
     }
 
     /// (page, ord, text, vector) of one document, in order — what the team sync uploads.
-    pub fn export_chunks(&self, doc_id: i64) -> AppResult<Vec<(Option<u32>, i64, String, Vec<f32>)>> {
+    pub fn export_chunks(&self, doc_id: i64) -> AppResult<Vec<ExportChunk>> {
         let mut st = self.conn.prepare("SELECT page, ord, text, embedding FROM chunks WHERE doc_id=?1 ORDER BY ord, id")?;
         let rows = st.query_map([doc_id], |r| Ok((r.get::<_, Option<u32>>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, from_blob(&r.get::<_, Vec<u8>>(3)?))))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// (page, chunk ord, w, h, bytes) of one document's kept pictures — uploaded with it.
+    pub fn export_images(&self, doc_id: i64) -> AppResult<Vec<ExportImage>> {
+        let mut st = self.conn.prepare("SELECT page, chunk_ord, w, h, data FROM images WHERE doc_id=?1 ORDER BY id")?;
+        let rows = st.query_map([doc_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 

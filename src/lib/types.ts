@@ -291,6 +291,9 @@ export interface TeamSync {
   uploaded: number;
   deleted: number;
   unchanged: number;
+  /** original files uploaded / too large (> 50 MB) to upload */
+  files: number;
+  tooLarge: number;
   error: string | null;
 }
 
