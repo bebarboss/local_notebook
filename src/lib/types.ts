@@ -294,6 +294,8 @@ export interface TeamSync {
   /** original files uploaded / too large (> 50 MB) to upload */
   files: number;
   tooLarge: number;
+  /** not sent: the same content is already in the service (another PC / path) */
+  duplicates: { file: string; sameAs: string; from: string }[];
   error: string | null;
 }
 

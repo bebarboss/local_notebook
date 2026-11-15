@@ -542,6 +542,7 @@ const RERANK_MODEL = "mmarco-mMiniLMv2-L12" as const;
 function RerankRow() {
   const { settings, updateSettings, toast } = useApp();
   const [st, setSt] = useState<RerankStatus | null>(null);
+  const onServer = settings.embeddingModel.startsWith("server:");
   const [dl, setDl] = useState<DownloadProgress | null>(null);
   const load = () => api.rerankStatus().then(setSt).catch(() => {});
   useEffect(() => { load(); }, []);
@@ -560,15 +561,21 @@ function RerankRow() {
         <span className="t">จัดลำดับใหม่ (reranking)</span>
         <span className="d">
           ค้นด้วย vector ได้ท่อนที่ใกล้เคียง {Math.max(15, Math.min(30, settings.topK * 3))} ท่อน แล้วให้โมเดล reranker อ่านคำถามคู่กับแต่ละท่อนเพื่อเลือก top-k ที่ตรงที่สุด ·
-          แม่นขึ้นชัดเจนกับคำถามภาษาไทย แต่ใช้เวลาเพิ่มราว 1–2 วินาทีต่อคำถาม · ทำงานในเครื่อง
+          แม่นขึ้นชัดเจนกับคำถามภาษาไทย แต่ใช้เวลาเพิ่มราว 1–2 วินาทีต่อคำถาม
         </span>
+        {onServer && (
+          <span className="d">
+            <span className="ok-text">ใช้ reranker บนเซิร์ฟเวอร์</span> (bge-reranker-v2-m3 — แม่นกว่าตัวในเครื่อง) เพราะทำ embedding บนเซิร์ฟเวอร์อยู่ ·
+            ไม่ต้องดาวน์โหลด · ถ้าเซิร์ฟเวอร์ใช้ไม่ได้จะใช้ตัวในเครื่องแทน (ถ้ามี)
+          </span>
+        )}
         <span className="d">
           {st ? (st.ready
             ? <><span className="ok-text">พร้อมใช้งาน</span> · {st.model}{st.sizeBytes ? ` · ${formatBytes(st.sizeBytes)}` : ""}</>
             : <span style={{ color: "var(--warn-text)" }}>ยังไม่มีโมเดล reranker (~120 MB)</span>) : "…"}
         </span>
         {dl && <div style={{ marginTop: 6 }}><ProgressBar value={dl.total ? dl.downloaded / dl.total : 0} label="ดาวน์โหลดโมเดล reranker" /><span className="d">{dl.file} · {formatBytes(dl.downloaded)}{dl.total ? ` / ${formatBytes(dl.total)}` : ""}</span></div>}
-        {st && !st.ready && (
+        {st && !st.ready && !onServer && (
           <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
             <button className="btn" disabled={!!dl} onClick={() => api.downloadReranker().catch((e) => toast((e as { message: string }).message))}>
               <Download size={16} strokeWidth={1.8} aria-hidden="true" />ดาวน์โหลด
@@ -586,7 +593,7 @@ function RerankRow() {
         label="จัดลำดับใหม่ (reranking)"
         onChange={async (v) => {
           await updateSettings({ rerank: v });
-          toast(v ? (st?.ready ? "เปิด reranking แล้ว" : "เปิดแล้ว — ดาวน์โหลดโมเดลก่อนจึงจะทำงาน") : "ปิด reranking แล้ว");
+          toast(v ? (st?.ready || onServer ? "เปิด reranking แล้ว" : "เปิดแล้ว — ดาวน์โหลดโมเดลก่อนจึงจะทำงาน") : "ปิด reranking แล้ว");
         }}
       />
     </div>
@@ -689,6 +696,11 @@ function TeamRow() {
       const name = app.services.find((s) => s.id === r.serviceId)?.name ?? r.serviceId;
       if (r.error) app.toast(`ซิงก์ ${name} ไม่สำเร็จ: ${r.error}`);
       else if (r.uploaded || r.deleted || r.files) app.toast(`ซิงก์ ${name} ขึ้น server แล้ว · ส่ง ${r.uploaded} เอกสาร${r.files ? ` (ต้นฉบับ ${r.files} ไฟล์)` : ""}${r.deleted ? ` · ลบ ${r.deleted}` : ""}${r.tooLarge ? ` · ${r.tooLarge} ไฟล์ใหญ่เกิน 50 MB ไม่ได้ส่งต้นฉบับ` : ""}`);
+      if (r.duplicates.length) {
+        const d = r.duplicates[0];
+        const more = r.duplicates.length > 1 ? ` และอีก ${r.duplicates.length - 1} ไฟล์` : "";
+        setTimeout(() => app.toast(`${name}: ไม่ส่ง "${d.file}"${more} — มีในทีมแล้ว (${d.sameAs} จากเครื่อง ${d.from})`), r.uploaded || r.files ? 2800 : 0);
+      }
       load();
     });
     return () => { off.then((f) => f()); };

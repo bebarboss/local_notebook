@@ -342,6 +342,16 @@ class Store:
             raise StoreError(404, "no such picture")
         return r[0], bytes(r[1])
 
+    def chunks_at(self, sid: str, path: str, ords: list[int]) -> list[dict]:
+        """Chunks of one document by position (the neighbours of a hit)."""
+        with self.pool.connection() as c:
+            rows = c.execute(
+                """SELECT ch.ord, ch.page, ch.text FROM chunks ch JOIN documents d ON d.id = ch.document_id
+                   WHERE d.service_id=%s AND d.path=%s AND ch.ord = ANY(%s) ORDER BY ch.ord""",
+                (sid, path, ords),
+            ).fetchall()
+        return [{"ord": r[0], "page": r[1], "text": r[2]} for r in rows]
+
     # ---------------------------------------------------------------- search
 
     def search(self, service_ids: list[str], query: str, qv: list[float], k: int, threshold: float, hybrid: bool) -> list[dict]:

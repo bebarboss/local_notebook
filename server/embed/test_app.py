@@ -30,9 +30,18 @@ class FakeEncoder:
         return out
 
 
-def client(enc=None):
+class FakeReranker:
+    name = "BAAI/bge-reranker-v2-m3"
+
+    def score(self, query, docs):
+        # the more words shared with the query, the higher
+        q = set(query.split())
+        return [len(q & set(d.split())) / max(len(q), 1) for d in docs]
+
+
+def client(enc=None, reranker=None):
     enc = enc or FakeEncoder()
-    return TestClient(server.create_app(enc, TOKEN)), enc
+    return TestClient(server.create_app(enc, TOKEN, reranker=reranker or FakeReranker())), enc
 
 
 H = {"Authorization": f"Bearer {TOKEN}"}
@@ -83,3 +92,15 @@ def test_prefixes(monkeypatch):
     c.post("/v1/embeddings", json={"input": ["a"], "input_type": "query"}, headers=H)
     c.post("/v1/embeddings", json={"input": ["b"], "input_type": "passage"}, headers=H)
     assert enc.seen == [["query: a"], ["passage: b"]]
+
+
+def test_rerank():
+    c, _ = client()
+    assert c.get("/health").json()["rerank"] == "bge-reranker-v2-m3"
+    assert c.post("/v1/rerank", json={"query": "ลา พักร้อน", "documents": ["x"]}).status_code == 401
+    r = c.post("/v1/rerank", json={"query": "ลา พักร้อน", "documents": ["เงินเดือน", "ลา พักร้อน 10 วัน", "ลา กิจ"]}, headers=H)
+    assert r.status_code == 200
+    scores = [x["score"] for x in r.json()["results"]]
+    assert [x["index"] for x in r.json()["results"]] == [0, 1, 2]
+    assert scores[1] > scores[2] > scores[0]
+    assert c.post("/v1/rerank", json={"query": "q", "documents": ["d"] * 65}, headers=H).status_code == 422

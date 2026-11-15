@@ -281,6 +281,47 @@ async fn embed_at(base: &str, token: &str, model: &str, texts: &[String], kind: 
     Ok(out)
 }
 
+// ------------------------------------------------ the server's reranker (bge-reranker-v2-m3)
+
+/// The server answered "no reranker" — do not ask again for a while.
+static RERANK_MISSING: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Worth asking the server to rerank (configured, and it did not say it has none lately).
+pub fn rerank_available() -> bool {
+    configured() && !RERANK_MISSING.lock().is_some_and(|t| t.elapsed() < Duration::from_secs(600))
+}
+
+/// Relevance of each passage to the question, 0–1, in input order.
+pub async fn rerank(query: &str, docs: &[String]) -> AppResult<Vec<f32>> {
+    #[derive(Deserialize)]
+    struct R {
+        index: usize,
+        score: f32,
+    }
+    #[derive(Deserialize)]
+    struct Out {
+        results: Vec<R>,
+    }
+    let tok = token()?.ok_or_else(|| AppError::new("no_key", "ยังไม่ได้ตั้งเซิร์ฟเวอร์"))?;
+    let body = serde_json::json!({ "query": query, "documents": docs });
+    let out: Out = match api_as(&tok, reqwest::Method::POST, "/v1/rerank", Some(&body), Duration::from_secs(30)).await {
+        Ok(o) => o,
+        Err(e) => {
+            if e.status == Some(404) {
+                *RERANK_MISSING.lock() = Some(Instant::now());
+            }
+            return Err(e);
+        }
+    };
+    let mut scores = vec![0.0; docs.len()];
+    for r in out.results {
+        if let Some(s) = scores.get_mut(r.index) {
+            *s = r.score;
+        }
+    }
+    Ok(scores)
+}
+
 // ------------------------------------------------ the team database (server/embed/db.py)
 
 /// `{"error":{"message": …}}` from the server, else the status code.

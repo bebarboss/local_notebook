@@ -923,7 +923,11 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, queries: &[String],
     }
     let targets: Vec<Service> = if all { state.services.lock().list() } else { vec![svc.clone()] };
     let k = svc.top_k as usize;
-    let rerank = state.settings.lock().rerank && crate::rerank::Reranker::status().ready;
+    // the server's reranker (bge-reranker-v2-m3) when embeddings come from the server, else this PC's
+    let rerank_on = state.settings.lock().rerank;
+    let server_rerank = rerank_on && matches!(src, Source::Server(_)) && crate::embed_server::rerank_available();
+    let local_rerank = rerank_on && crate::rerank::Reranker::status().ready;
+    let rerank = server_rerank || local_rerank;
     let hybrid = state.settings.lock().hybrid;
     let want = if rerank { crate::rerank::candidates(k) } else { k };
     let mut hits: Vec<(Service, crate::store::Hit)> = Vec::new();
@@ -984,24 +988,41 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, queries: &[String],
             doc_path: c.doc_path.clone(), page: c.page, ord: c.ord, text: c.text.clone(),
         }));
     }
+    // the same text twice (the same file in two folders, a renamed copy) takes one place
+    {
+        let keep = crate::context::first_of_each(&hits.iter().map(|(_, h)| h.text.as_str()).collect::<Vec<_>>());
+        let mut slots: Vec<Option<_>> = hits.into_iter().map(Some).collect();
+        hits = keep.into_iter().map(|i| slots[i].take().expect("each index once")).collect();
+    }
 
     // second stage: the cross-encoder reads question + passage together
     let mut rr: Vec<Option<f32>> = vec![None; hits.len()];
     if rerank && hits.len() > 1 {
-        let reranker = state.reranker.clone();
-        let q = question.to_string();
         let texts: Vec<String> = hits.iter().map(|(_, h)| h.text.clone()).collect();
-        match tauri::async_runtime::spawn_blocking(move || reranker.score(&q, &texts)).await {
-            Ok(Ok(scores)) => {
-                let mut order: Vec<usize> = (0..hits.len()).collect();
-                order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
-                let mut slots: Vec<Option<_>> = hits.into_iter().map(Some).collect();
-                hits = order.iter().map(|&i| slots[i].take().expect("each index once")).collect();
-                rr = order.iter().map(|&i| Some(scores[i])).collect();
+        let mut scored: Option<Vec<f32>> = None;
+        if server_rerank {
+            match crate::embed_server::rerank(question, &texts).await {
+                Ok(s) if s.len() == texts.len() => scored = Some(s),
+                Ok(_) => log::warn!("server rerank: wrong number of scores"),
+                // reranking is an improvement, never a reason to fail the question
+                Err(e) => log::warn!("server rerank failed ({}), trying this PC's", e.code),
             }
-            // reranking is an improvement, never a reason to fail the question
-            Ok(Err(e)) => log::warn!("rerank failed, using vector order: {}", e.message),
-            Err(e) => log::warn!("rerank task failed: {e}"),
+        }
+        if scored.is_none() && local_rerank {
+            let reranker = state.reranker.clone();
+            let q = question.to_string();
+            match tauri::async_runtime::spawn_blocking(move || reranker.score(&q, &texts)).await {
+                Ok(Ok(s)) => scored = Some(s),
+                Ok(Err(e)) => log::warn!("rerank failed, using vector order: {}", e.message),
+                Err(e) => log::warn!("rerank task failed: {e}"),
+            }
+        }
+        if let Some(scores) = scored {
+            let mut order: Vec<usize> = (0..hits.len()).collect();
+            order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
+            let mut slots: Vec<Option<_>> = hits.into_iter().map(Some).collect();
+            hits = order.iter().map(|&i| slots[i].take().expect("each index once")).collect();
+            rr = order.iter().map(|&i| Some(scores[i])).collect();
         }
     }
     // a knowledge note that matches well goes first (at most 2), documents fill the rest
@@ -1021,6 +1042,43 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, queries: &[String],
     }
     hits.truncate(k);
     rr.truncate(k);
+
+    // the best hits get the chunk before and after them (a SQL statement or a procedure cut
+    // across two chunks reaches the model whole); a neighbour that is itself a hit is merged
+    let mut merged: std::collections::HashSet<(String, String, i64)> = std::collections::HashSet::new();
+    for i in 0..hits.len().min(crate::context::NEIGHBOUR_TOP) {
+        let (s, h) = &hits[i];
+        if crate::ingest::is_knowledge(&h.doc_path) || merged.contains(&(s.id.clone(), h.doc_path.clone(), h.ord)) {
+            continue;
+        }
+        let ords = [h.ord - 1, h.ord + 1];
+        let mut got = state.stores.get(&s.id).ok().and_then(|st| st.lock().chunk_texts_at(&h.doc_path, &ords).ok()).unwrap_or_default();
+        if got.is_empty() && s.shared {
+            got = crate::team::neighbours(&s.id, &h.doc_path, &ords).await.unwrap_or_default();
+        }
+        let before = got.iter().find(|(o, _)| *o == h.ord - 1).map(|(_, t)| t.as_str());
+        let after = got.iter().find(|(o, _)| *o == h.ord + 1).map(|(_, t)| t.as_str());
+        if before.is_none() && after.is_none() {
+            continue;
+        }
+        let widened = crate::context::widen(before, &h.text, after);
+        let (sid, path, ord) = (s.id.clone(), h.doc_path.clone(), h.ord);
+        if before.is_some() {
+            merged.insert((sid.clone(), path.clone(), ord - 1));
+        }
+        if after.is_some() {
+            merged.insert((sid.clone(), path.clone(), ord + 1));
+        }
+        hits[i].1.text = widened;
+    }
+    if !merged.is_empty() {
+        let keep: Vec<bool> = hits.iter().map(|(s, h)| !merged.contains(&(s.id.clone(), h.doc_path.clone(), h.ord))).collect();
+        let mut i = 0;
+        hits.retain(|_| { i += 1; keep[i - 1] });
+        let mut j = 0;
+        rr.retain(|_| { j += 1; keep[j - 1] });
+    }
+
     Ok(hits
         .into_iter()
         .zip(rr)

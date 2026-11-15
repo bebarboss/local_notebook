@@ -50,7 +50,7 @@ def client(tmp_path, monkeypatch):
     with psycopg.connect(URL, autocommit=True) as c:
         c.execute("DROP TABLE IF EXISTS messages, chats, chunks, documents, services, meta CASCADE")
     store = Store(URL, TopicEncoder.dim, "topic-test")
-    yield TestClient(server.create_app(TopicEncoder(), TOKEN, store)), store
+    yield TestClient(server.create_app(TopicEncoder(), TOKEN, store, reranker=False)), store
     store.close()
 
 
@@ -213,6 +213,14 @@ def test_original_files_and_pictures(client):
     assert os.path.exists(blob)
     c.delete("/v1/services/hr/documents", params={"path": "C:/docs/ใบลา.pdf"}, headers=K)
     assert not os.path.exists(blob)
+
+
+def test_neighbour_chunks(client):
+    c, _ = client
+    doc(c, "hr", "a.pdf", [{"ord": i, "page": 1, "text": f"ท่อน {i}"} for i in range(5)])
+    got = c.get("/v1/services/hr/chunks", params={"path": "a.pdf", "ords": "1,3,9"}, headers=H).json()
+    assert [(x["ord"], x["text"]) for x in got] == [(1, "ท่อน 1"), (3, "ท่อน 3")]
+    assert c.get("/v1/services/hr/chunks", params={"path": "a.pdf", "ords": "x"}, headers=H).status_code == 400
 
 
 def test_model_mismatch_refuses_to_start(client):

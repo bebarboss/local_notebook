@@ -19,7 +19,8 @@ services:
     volumes:
       - hf-cache:/models
       - files:/data/files
-    mem_limit: 5g
+    # bge-m3 + the reranker (bge-reranker-v2-m3) ≈ 5 GB; Docker Desktop needs ≥ 9 GB then
+    mem_limit: 7g
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }

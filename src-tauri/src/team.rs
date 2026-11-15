@@ -96,7 +96,31 @@ pub struct SyncReport {
     /// original files uploaded / too large to upload
     pub files: usize,
     pub too_large: usize,
+    /// files not sent because the same content is already in the service (from another PC or path)
+    pub duplicates: Vec<Duplicate>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Duplicate {
+    /// this PC's file
+    pub file: String,
+    /// the copy already shared: its file name and the PC that sent it
+    pub same_as: String,
+    pub from: String,
+}
+
+/// The shared document with the same content as a local file at another path, if any.
+/// `sent_here` holds contents this sync already sent (the same file twice on this PC).
+fn duplicate_of(path: &str, hash: &str, remote: &[RemoteDoc], sent_here: &HashMap<String, String>, me: &str) -> Option<Duplicate> {
+    if hash.is_empty() {
+        return None;
+    }
+    if let Some(r) = remote.iter().find(|r| r.path != path && r.hash == hash && r.status == "ready") {
+        return Some(Duplicate { file: file_name_of(path), same_as: file_name_of(&r.path), from: r.indexed_by.clone() });
+    }
+    sent_here.get(hash).filter(|p| p.as_str() != path).map(|p| Duplicate { file: file_name_of(path), same_as: file_name_of(p), from: me.to_string() })
 }
 
 /// This PC's name, recorded on the documents it uploads.
@@ -320,8 +344,18 @@ async fn sync_inner(app: &AppHandle, sid: &str) -> AppResult<SyncReport> {
     let me = machine();
     let mut report = SyncReport { service_id: sid.into(), ..Default::default() };
 
+    // content hash → path, for files this sync sends (the same file in two folders here)
+    let mut sent_here: HashMap<String, String> = HashMap::new();
     for d in &local {
         let remote_doc = by_path.get(d.path.as_str());
+        // the same content is already shared under another path / from another PC: do not
+        // index it twice (the team would get every passage twice)
+        if remote_doc.is_none() {
+            if let Some(dup) = duplicate_of(&d.path, &d.hash, &remote, &sent_here, &me) {
+                report.duplicates.push(dup);
+                continue;
+            }
+        }
         let same_index = remote_doc.is_some_and(|r| r.hash == d.hash && r.status == "ready" && r.chunk_count == d.chunk_count);
         let has_file = remote_doc.is_some_and(|r| r.file_hash.as_deref() == Some(d.hash.as_str()));
         if same_index && has_file {
@@ -353,6 +387,7 @@ async fn sync_inner(app: &AppHandle, sid: &str) -> AppResult<SyncReport> {
         }
         let _: serde_json::Value = api_as(&cred, Method::PATCH, &format!("/v1/documents/{}", doc.id), Some(&json!({ "status": "ready" })), SHORT).await?;
         upload_extras(&cred, &store, d.id, doc.id, &d.path, &mut report).await?;
+        sent_here.insert(d.hash.clone(), d.path.clone());
         report.uploaded += 1;
     }
 
@@ -363,7 +398,14 @@ async fn sync_inner(app: &AppHandle, sid: &str) -> AppResult<SyncReport> {
         let _: serde_json::Value = api_as(&cred, Method::DELETE, &format!("/v1/services/{sid}/documents?path={path}"), None, SHORT).await?;
         report.deleted += 1;
     }
-    crate::diag::log(format!("[{}] team sync: {} up, {} deleted, {} unchanged", svc.code, report.uploaded, report.deleted, report.unchanged));
+    crate::diag::log(format!(
+        "[{}] team sync: {} up, {} deleted, {} unchanged, {} duplicates skipped",
+        svc.code,
+        report.uploaded,
+        report.deleted,
+        report.unchanged,
+        report.duplicates.len()
+    ));
     Ok(report)
 }
 
@@ -480,6 +522,19 @@ pub async fn remote_image(service_id: &str, id: i64) -> AppResult<Vec<u8>> {
     base64::engine::general_purpose::STANDARD.decode(d.data).map_err(|_| AppError::new("server", "รูปจากเซิร์ฟเวอร์อ่านไม่ได้"))
 }
 
+/// (ord, text) of a shared document's chunks at the given positions.
+pub async fn neighbours(service_id: &str, doc_path: &str, ords: &[i64]) -> AppResult<Vec<(i64, String)>> {
+    #[derive(Deserialize)]
+    struct C {
+        ord: i64,
+        text: String,
+    }
+    let cred = credential_for(service_id)?;
+    let list = ords.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(",");
+    let got: Vec<C> = api_as(&cred, Method::GET, &format!("/v1/services/{service_id}/chunks?path={}&ords={list}", urlencode(doc_path)), None, SHORT).await?;
+    Ok(got.into_iter().map(|c| (c.ord, c.text)).collect())
+}
+
 /// Sync in the background and tell the UI ("team-sync"); after indexing and from the button.
 pub fn spawn_sync(app: &AppHandle, service_ids: Vec<String>) {
     let app = app.clone();
@@ -570,6 +625,25 @@ mod tests {
     fn paths_are_encoded_for_the_query_string() {
         assert_eq!(urlencode("C:\\docs\\ใบลา v2.pdf"), "C%3A%5Cdocs%5C%E0%B9%83%E0%B8%9A%E0%B8%A5%E0%B8%B2%20v2.pdf");
         assert_eq!(urlencode("a-b_c.d~"), "a-b_c.d~");
+    }
+
+    fn rdoc(path: &str, hash: &str, by: &str) -> RemoteDoc {
+        RemoteDoc { id: 1, path: path.into(), hash: hash.into(), status: "ready".into(), chunk_count: 3, indexed_by: by.into(), file_hash: None }
+    }
+
+    #[test]
+    fn same_content_elsewhere_is_a_duplicate() {
+        let remote = vec![rdoc("C:\\HR\\ระเบียบลา.pdf", "aaa", "PC-OWNER")];
+        let none = HashMap::new();
+        let d = duplicate_of("D:\\backup\\ระเบียบลา (1).pdf", "aaa", &remote, &none, "PC-ME").unwrap();
+        assert_eq!((d.file.as_str(), d.same_as.as_str(), d.from.as_str()), ("ระเบียบลา (1).pdf", "ระเบียบลา.pdf", "PC-OWNER"));
+        assert!(duplicate_of("C:\\HR\\ระเบียบลา.pdf", "aaa", &remote, &none, "PC-ME").is_none(), "the same path is an update, not a duplicate");
+        assert!(duplicate_of("x.pdf", "bbb", &remote, &none, "PC-ME").is_none(), "other content");
+        assert!(duplicate_of("x.pdf", "", &remote, &none, "PC-ME").is_none(), "no hash yet");
+        // the same file twice on this PC: the second one is skipped
+        let mut sent = HashMap::new();
+        sent.insert("ccc".to_string(), "C:\\a\\x.pdf".to_string());
+        assert_eq!(duplicate_of("C:\\b\\x.pdf", "ccc", &[], &sent, "PC-ME").unwrap().from, "PC-ME");
     }
 
     #[test]

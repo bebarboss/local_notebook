@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import math
 import os
 import secrets
 import threading
@@ -29,6 +30,10 @@ MODEL_REVISION = os.environ.get("EMBED_MODEL_REVISION") or None
 QUERY_PREFIX = os.environ.get("EMBED_QUERY_PREFIX", "")
 PASSAGE_PREFIX = os.environ.get("EMBED_PASSAGE_PREFIX", "")
 MAX_TOKENS = int(os.environ.get("EMBED_MAX_TOKENS", "2048"))
+# second-stage ranking: a cross-encoder reads question + passage together ("" = off)
+RERANK_MODEL = os.environ.get("EMBED_RERANK_MODEL", "BAAI/bge-reranker-v2-m3").strip()
+RERANK_MAX_TOKENS = int(os.environ.get("EMBED_RERANK_MAX_TOKENS", "512"))
+MAX_RERANK_DOCS = 64
 BATCH = int(os.environ.get("EMBED_BATCH", "16"))
 MAX_INPUTS = 64
 MAX_CHARS = 32_000
@@ -74,6 +79,34 @@ class Encoder:
         with self.lock:
             v = self.model.encode(texts, batch_size=BATCH, normalize_embeddings=True, convert_to_numpy=True)
         return v.tolist()
+
+
+class Reranker:
+    """The cross-encoder, loaded on first use (≈ 2.3 GB more memory). Scores are 0–1."""
+
+    def __init__(self, name: str, device: str | None):
+        self.name = name
+        self.device = device
+        self.model = None
+        self.lock = threading.Lock()
+
+    def score(self, query: str, docs: list[str]) -> list[float]:
+        with self.lock:
+            if self.model is None:
+                from sentence_transformers import CrossEncoder
+
+                t = time.time()
+                self.model = CrossEncoder(self.name, max_length=RERANK_MAX_TOKENS, device=self.device)
+                log.info("loaded reranker %s in %.0fs", self.name, time.time() - t)
+            import torch
+
+            raw = self.model.predict([(query, d) for d in docs], batch_size=BATCH, convert_to_numpy=True, activation_fct=torch.nn.Identity())
+        return [1.0 / (1.0 + math.exp(-float(x))) for x in raw]
+
+
+class RerankRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=MAX_CHARS)
+    documents: list[str] = Field(min_length=1, max_length=MAX_RERANK_DOCS)
 
 
 class EmbeddingRequest(BaseModel):
@@ -156,11 +189,15 @@ class MessageIn(BaseModel):
     createdAt: Optional[int] = None
 
 
-def create_app(encoder: Encoder | None = None, token: str | None = None, store: Any = None) -> FastAPI:
-    """`encoder`/`token`/`store` are injected by tests; the container builds them from env."""
+def create_app(encoder: Encoder | None = None, token: str | None = None, store: Any = None, reranker: Any = None) -> FastAPI:
+    """`encoder`/`token`/`store`/`reranker` are injected by tests; the container builds them from env."""
     app = FastAPI(title="DocAsk embedding server", docs_url=None, redoc_url=None, openapi_url=None)
     token = token or _token()
     enc = encoder or Encoder()
+    if reranker is None and RERANK_MODEL:
+        reranker = Reranker(RERANK_MODEL, os.environ.get("EMBED_DEVICE") or None)
+    if reranker is False:  # tests: no reranker
+        reranker = None
     if store is None and DATABASE_URL:
         from db import Store
 
@@ -208,7 +245,19 @@ def create_app(encoder: Encoder | None = None, token: str | None = None, store: 
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "model": MODEL_ID, "dim": enc.dim, "device": enc.device, "database": store is not None}
+        return {"status": "ok", "model": MODEL_ID, "dim": enc.dim, "device": enc.device, "database": store is not None,
+                "rerank": reranker.name.rsplit("/", 1)[-1] if reranker is not None else None}
+
+    @app.post("/v1/rerank", dependencies=[Depends(caller)])
+    def rerank(req: RerankRequest):
+        """Relevance of each document to the query, 0–1, in input order."""
+        if reranker is None:
+            raise HTTPException(404, "no reranker on this server (EMBED_RERANK_MODEL is empty)")
+        t = time.time()
+        scores = reranker.score(req.query[:MAX_CHARS], [d[:MAX_CHARS] for d in req.documents])
+        # counts only — never the text
+        log.info("reranked %d passages in %.2fs", len(req.documents), time.time() - t)
+        return {"model": reranker.name.rsplit("/", 1)[-1], "results": [{"index": i, "score": s} for i, s in enumerate(scores)]}
 
     # a member with any service's share key may use the model (indexing and questions need it)
     @app.get("/v1/models", dependencies=[Depends(caller)])
@@ -366,6 +415,16 @@ def _store_routes(app: FastAPI, enc: Encoder, store: Any, auth, caller) -> None:
                 raise HTTPException(400, "picture data must be base64") from None
             imgs.append({"page": i.page, "chunkOrd": i.chunkOrd, "w": i.w, "h": i.h, "data": data})
         return {"images": store.add_images(doc_id, imgs, body.replace)}
+
+    @app.get("/v1/services/{sid}/chunks")
+    def chunks_at(sid: str, path: str, ords: str = Query(max_length=200), who: Optional[str] = Depends(caller)):
+        """Chunks of a document by position, e.g. ords=4,6 — the neighbours of a hit."""
+        allowed(who, sid)
+        try:
+            wanted = [int(x) for x in ords.split(",") if x.strip()][:10]
+        except ValueError:
+            raise HTTPException(400, "ords must be numbers") from None
+        return store.chunks_at(sid, path, wanted)
 
     @app.get("/v1/services/{sid}/images")
     def images(sid: str, path: str, page: Optional[int] = None, ord: int = 0, who: Optional[str] = Depends(caller)):

@@ -147,6 +147,8 @@ API (แอป DocAsk เป็นคนเรียก) — **token ของ�
 | `PUT /v1/documents/{id}/file?name=` | ไฟล์ต้นฉบับ (body = ไฟล์ ≤ 50 MB) เก็บบนดิสก์ตาม SHA-256 · ไฟล์เนื้อหาเดียวกันเก็บครั้งเดียว · ลบเอกสาร = ลบไฟล์ที่ไม่มีใครใช้แล้ว |
 | `GET /v1/services/{id}/file?path=`, `GET /v1/services/{id}/files` | ดาวน์โหลดต้นฉบับ (แอปโหลดเฉพาะไฟล์ที่กดเปิด) / รายการไฟล์ |
 | `POST /v1/documents/{id}/images`, `GET /v1/services/{id}/images`, `GET /v1/images/{id}` | รูปในเอกสาร (เก็บในฐานข้อมูล) |
+| `POST /v1/rerank` | `{query, documents[≤64]}` → คะแนน 0–1 ต่อท่อน (bge-reranker-v2-m3) · token หรือคีย์แชร์ใดก็ได้ |
+| `GET /v1/services/{id}/chunks?path=&ords=` | ท่อนตามลำดับ (ท่อนข้างเคียงของผลค้น) |
 | `POST /v1/search` | `{serviceIds, queries[], k, threshold, hybrid}` → vector + keyword (trigram) รวมแบบ RRF |
 | `GET/PUT/DELETE /v1/chats[/{id}]`, `GET/POST /v1/chats/{id}/messages` | ประวัติแชต |
 
@@ -205,6 +207,8 @@ container มี `restart: unless-stopped` จึงกลับมาทำง�
 | `EMBED_QUERY_PREFIX` / `EMBED_PASSAGE_PREFIX` | ว่าง | สำหรับโมเดลตระกูล e5 ให้ใส่ `query: ` / `passage: ` |
 | `EMBED_MAX_TOKENS` | `2048` | ตัดข้อความที่ยาวกว่านี้ |
 | `EMBED_BATCH` | `16` | จำนวนข้อความต่อรอบ ลดลงถ้า RAM ไม่พอ |
+| `EMBED_RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | reranker (`/v1/rerank`) โหลดตอนใช้ครั้งแรก ใช้ RAM เพิ่มราว 2.3 GB · ว่าง = ปิด |
+| `EMBED_RERANK_MAX_TOKENS` | `512` | ความยาวคำถาม + ท่อนที่ reranker อ่าน |
 
 ## ทดสอบโค้ด (ไม่ต้องดาวน์โหลดโมเดล)
 

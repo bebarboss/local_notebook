@@ -209,6 +209,18 @@ impl SqliteStore {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// (ord, text) of a document's chunks at the given positions — the neighbours of a hit.
+    pub fn chunk_texts_at(&self, doc_path: &str, ords: &[i64]) -> AppResult<Vec<(i64, String)>> {
+        let mut out = Vec::new();
+        let mut st = self.conn.prepare("SELECT c.ord, c.text FROM chunks c JOIN documents d ON d.id=c.doc_id WHERE d.path=?1 AND c.ord=?2")?;
+        for o in ords {
+            if let Some(r) = st.query_row(params![doc_path, o], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))).optional()? {
+                out.push(r);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn get_chunk(&self, chunk_id: i64) -> AppResult<Option<Hit>> {
         Ok(self
             .conn
