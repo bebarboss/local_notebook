@@ -9,8 +9,8 @@
 
 use crate::llm::ChatMessage;
 
-/// Characters of history sent with a question (≈ 4–6k tokens of Thai).
-pub const HISTORY_BUDGET: usize = 16_000;
+/// Characters of history sent with a question (≈ 12–16k tokens of Thai) — room for 20 turns.
+pub const HISTORY_BUDGET: usize = 48_000;
 /// The newest turn is kept nearly whole; older answers are cut to this.
 const NEWEST_ANSWER: usize = 6_000;
 const OLDER_ANSWER: usize = 1_500;

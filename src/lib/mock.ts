@@ -96,7 +96,7 @@ export function createMockBackend(): Backend {
   };
 
   let settings: Settings = {
-    theme: "system", userName: "navaritrod", setupDone: false, historyTurns: 6, autoDeleteDays: 0,
+    theme: "system", userName: "navaritrod", setupDone: false, historyTurns: 20, autoDeleteDays: 0,
     topK: 5, threshold: 0.3, chunkSize: 1000, chunkOverlap: 150, embeddingModel: "bge-m3", teamServer: false, lastServiceId: "hr",
     updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true, rerank: true, hybrid: true, indexLoad: "normal", font: "looped", textSize: "m", startHidden: true,
   };

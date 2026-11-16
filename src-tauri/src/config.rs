@@ -92,7 +92,7 @@ impl Default for Settings {
             theme: "system".into(),
             user_name: std::env::var("USERNAME").unwrap_or_default(),
             setup_done: false,
-            history_turns: 6,
+            history_turns: 20,
             auto_delete_days: 0,
             top_k: 5,
             threshold: 0.3,

@@ -12,6 +12,7 @@ import SettingsPage from "./pages/Settings";
 import SetupPage from "./pages/Setup";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { ConnectDialog } from "./components/ConnectDialog";
+import { useTeamSyncToasts } from "./components/TeamPanel";
 import type { UpdateInfo } from "./lib/types";
 
 export default function App() {
@@ -22,6 +23,7 @@ export default function App() {
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [updateOpen, setUpdateOpen] = useState(false);
   const [updateDismissed, setUpdateDismissed] = useState(false);
+  useTeamSyncToasts();
 
   // check for a new version once at startup (silently ignore VPN/URL problems)
   useEffect(() => {

@@ -5,6 +5,7 @@ import type { Service } from "../lib/types";
 import { useApp } from "../state";
 import { ServiceCard } from "../components/ServiceCard";
 import { ServiceEditor } from "../components/ServiceEditor";
+import { TeamPanel } from "../components/TeamPanel";
 import { ConfirmDialog, SkeletonList } from "../components/ui";
 
 export default function ServicesPage() {
@@ -94,6 +95,8 @@ export default function ServicesPage() {
             </button>
           </div>
         )}
+
+        <TeamPanel />
 
         <div className="info-box" style={{ fontSize: 13, padding: "14px 16px" }}>
           แต่ละ service มีฐาน vector แยกไฟล์กัน ลบหรือส่งออกทีละ service ได้ (ส่งออกเป็น .zip พร้อมเอกสาร ผู้รับกด "นำเข้า service" แล้วถามได้ทันที) และคำถามใน service หนึ่งจะไม่ค้นเจอเอกสารของ service อื่น ยกเว้นเปิด "ค้นทุก service" ในช่องพิมพ์
