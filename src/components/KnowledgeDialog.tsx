@@ -1,13 +1,14 @@
 // "บันทึกเป็นความรู้": the model drafts notes (one per problem) from a chat; the user checks,
 // edits and picks which to keep. Saved notes go to the service's knowledge folder and are
 // indexed, so the next question about the same problem finds them first.
-import { useCallback, useEffect, useState } from "react";
+import { ProgressBar } from "./ProgressBar";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BookMarked, FolderOpen } from "lucide-react";
 import { api } from "../lib/api";
 import type { KnowledgeDraft, NewNote } from "../lib/types";
 import { th } from "../i18n/th";
 import { useApp } from "../state";
-import { ErrorState, Modal, Skeleton } from "./ui";
+import { ErrorState, Modal } from "./ui";
 
 interface Card extends NewNote {
   keep: boolean;
@@ -19,6 +20,16 @@ function today(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+/** A typical draft is ~3,000 characters (two short notes). */
+const EXPECTED_CHARS = 3000;
+
+/** Estimated progress: reading (no text yet) eases towards 35 %, writing fills up to 95 %. */
+export function draftProgress(seconds: number, written: number): number {
+  const reading = 0.35 * (1 - Math.exp(-seconds / 25));
+  if (written <= 0) return reading;
+  return Math.min(0.95, Math.max(reading, 0.35) + 0.6 * Math.min(1, written / EXPECTED_CHARS));
+}
+
 export function KnowledgeDialog({ chatId, serviceId, upto, onClose }: { chatId: string; serviceId: string; upto: number | null; onClose: () => void }) {
   const { toast, services } = useApp();
   const service = services.find((s) => s.id === serviceId);
@@ -27,17 +38,36 @@ export function KnowledgeDialog({ chatId, serviceId, upto, onClose }: { chatId: 
   const [saveError, setSaveError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [dir, setDir] = useState<string | null>(null);
+  const [written, setWritten] = useState(0);
+  const [seconds, setSeconds] = useState(0);
 
+  // a newer draft replaces an older one (retry, or React re-running effects): only the latest counts
+  const run = useRef(0);
   const draft = useCallback(async () => {
+    const mine = ++run.current;
     setError(null);
     setCards(null);
+    setWritten(0);
+    setSeconds(0);
     try {
       const d: KnowledgeDraft[] = await api.draftKnowledge(chatId, upto);
-      setCards(d.map((x) => ({ ...x, status: "fixed", keep: true })));
+      if (mine === run.current) setCards(d.map((x) => ({ ...x, status: "fixed", keep: true })));
     } catch (e) {
-      setError((e as { message: string }).message);
+      const err = e as { code?: string; message: string };
+      if (mine === run.current && err.code !== "cancelled") setError(err.message);
     }
   }, [chatId, upto]);
+
+  // progress while the model writes; closing the dialog stops the draft
+  useEffect(() => {
+    const off = api.on("knowledge-progress", setWritten);
+    return () => { off.then((f) => f()); api.cancelKnowledgeDraft().catch(() => {}); };
+  }, []);
+  useEffect(() => {
+    if (cards || error) return;
+    const t = setInterval(() => setSeconds((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [cards, error]);
 
   useEffect(() => {
     draft();
@@ -72,8 +102,13 @@ export function KnowledgeDialog({ chatId, serviceId, upto, onClose }: { chatId: 
       {error && <ErrorState message={error} onRetry={draft} />}
       {!cards && !error && (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }} aria-busy="true" aria-label="กำลังร่างบันทึก">
-          <span className="muted" style={{ fontSize: 13 }}>กำลังให้โมเดลเรียบเรียงบทสนทนา…</span>
-          <Skeleton h={38} /><Skeleton h={160} />
+          <span className="muted" style={{ fontSize: 13 }} aria-live="polite">
+            {written > 0 ? `โมเดลกำลังเขียนบันทึก… ${written.toLocaleString()} ตัวอักษร` : "กำลังให้โมเดลเรียบเรียงบทสนทนา… (โมเดลแบบคิดก่อนตอบอาจใช้เวลาสักครู่)"} · {seconds} วินาที
+          </span>
+          <ProgressBar value={draftProgress(seconds, written)} label="ความคืบหน้าการร่างบันทึก" />
+          <span className="muted" style={{ fontSize: 12 }}>
+            {written > 0 ? "ขั้นที่ 2/2 · เขียนบันทึก" : "ขั้นที่ 1/2 · อ่านบทสนทนา"} · ปิดหน้าต่างนี้ได้ทุกเมื่อ (หยุดร่างทันที)
+          </span>
         </div>
       )}
       {cards && cards.length > 1 && <span className="muted" style={{ fontSize: 13 }}>พบ {cards.length} เรื่อง — ติ๊กเฉพาะเรื่องที่จะเก็บ</span>}

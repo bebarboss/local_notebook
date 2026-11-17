@@ -371,6 +371,7 @@ export function createMockBackend(): Backend {
     openSource: async () => {},
     downloadServiceFiles: async () => { await wait(900); return 7; },
     knowledgeInfo: async (sid) => ({ dir: services.find((x) => x.id === sid)?.knowledgeDir || "C:\\Users\\me\\Documents\\DocAsk ความรู้\\" + (services.find((x) => x.id === sid)?.name ?? ""), notes: notes[sid] ?? 0 }),
+    cancelKnowledgeDraft: async () => {},
     draftKnowledge: async () => {
       await wait(1200);
       return [

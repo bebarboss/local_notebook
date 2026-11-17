@@ -102,6 +102,7 @@ pub fn run() {
             commands::get_autostart,
             commands::knowledge_info,
             commands::draft_knowledge,
+            commands::cancel_knowledge_draft,
             commands::save_knowledge,
             commands::open_knowledge_folder,
             commands::set_autostart,

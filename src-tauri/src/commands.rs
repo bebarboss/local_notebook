@@ -1186,6 +1186,18 @@ pub fn knowledge_info(state: S<'_>, service_id: String) -> AppResult<crate::know
     Ok(crate::knowledge::KnowledgeInfo { notes: crate::knowledge::count_notes(&dir), dir: dir.to_string_lossy().into_owned() })
 }
 
+const DRAFT_MAX_TOKENS: u64 = 12_000;
+const DRAFT_LIMIT: Duration = Duration::from_secs(240);
+/// The note draft in progress (one dialog at a time); closing the dialog cancels it.
+static DRAFT_CANCEL: Mutex<Option<CancellationToken>> = Mutex::new(None);
+
+#[tauri::command]
+pub fn cancel_knowledge_draft() {
+    if let Some(t) = DRAFT_CANCEL.lock().take() {
+        t.cancel();
+    }
+}
+
 /// Ask the model to write notes (one per problem) from a chat, up to message `upto`.
 /// Nothing is saved: the user checks and edits the drafts first.
 #[tauri::command]
@@ -1210,8 +1222,34 @@ pub async fn draft_knowledge(app: AppHandle, chat_id: String, upto: Option<i64>)
     }
     .ok_or_else(|| AppError::new("no_model", "ไม่มีโมเดลที่เปิดใช้ — ตรวจในหมวดโมเดล"))?;
     let messages = crate::knowledge::draft_prompt(&transcript);
-    let req = llm::Request { url: &model.url, key: &key, model: &model.id, effort: None, max_tokens: model.max_output_tokens, messages: &messages };
-    let reply = llm::complete_within(&req, std::time::Duration::from_secs(240)).await?;
+    // notes are short: a small output cap and low effort keep a thinking model from running on
+    let effort = (model.reasoning_effort_format == "chat-completions" && model.supports_reasoning_effort.iter().any(|e| e == "low")).then_some("low");
+    let req = llm::Request { url: &model.url, key: &key, model: &model.id, effort, max_tokens: model.max_output_tokens.min(DRAFT_MAX_TOKENS), messages: &messages };
+    // streamed: a long non-streamed reply hit the client's idle timeout and looked frozen;
+    // the dialog sees the text grow and can cancel (closing it cancels this)
+    let token = CancellationToken::new();
+    if let Some(old) = DRAFT_CANCEL.lock().replace(token.clone()) {
+        old.cancel();
+    }
+    let mut last_emit = Instant::now();
+    let mut chars = 0usize;
+    let streamed = tokio::time::timeout(DRAFT_LIMIT, llm::stream(&req, &token, |d| {
+        chars += d.chars().count();
+        if last_emit.elapsed() >= Duration::from_millis(400) {
+            last_emit = Instant::now();
+            let _ = app.emit("knowledge-progress", chars);
+        }
+    }))
+    .await;
+    let reply = match streamed {
+        Err(_) => {
+            token.cancel();
+            return Err(AppError::new("timeout", "โมเดลใช้เวลานานเกิน 4 นาที — ลองอีกครั้ง หรือเลือกเฉพาะช่วงแชตที่สั้นลง"));
+        }
+        Ok(Err(e)) => return Err(e),
+        Ok(Ok(StreamEnd::Cancelled(_))) => return Err(AppError::new("cancelled", "ยกเลิกแล้ว")),
+        Ok(Ok(StreamEnd::Finished(text))) => text,
+    };
     let drafts = crate::knowledge::parse_drafts(&reply, &chat.title);
     crate::diag::log(format!("[{}] knowledge draft: {} note(s) from {} chars", svc.code, drafts.len(), transcript.chars().count()));
     if drafts.is_empty() {

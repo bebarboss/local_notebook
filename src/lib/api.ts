@@ -64,6 +64,8 @@ export interface EventMap {
   "team-sync": TeamSync;
   "connect-link": ConnectLinkInfo;
   "connect-error": string;
+  /** characters of the knowledge draft written so far */
+  "knowledge-progress": number;
 }
 
 export type EventName = keyof EventMap;
@@ -139,6 +141,7 @@ export interface Backend {
   knowledgeInfo(serviceId: string): Promise<KnowledgeInfo>;
   /** model writes notes from the chat (up to message `upto`); nothing saved yet */
   draftKnowledge(chatId: string, upto: number | null): Promise<KnowledgeDraft[]>;
+  cancelKnowledgeDraft(): Promise<void>;
   saveKnowledge(serviceId: string, chatId: string | null, date: string, notes: NewNote[]): Promise<string[]>;
   openKnowledgeFolder(serviceId: string): Promise<void>;
   // embedding
@@ -258,6 +261,7 @@ function createTauriBackend(): Backend {
     downloadServiceFiles: (serviceId, dest) => call("download_service_files", { serviceId, dest }),
     knowledgeInfo: (serviceId) => call("knowledge_info", { serviceId }),
     draftKnowledge: (chatId, upto) => call("draft_knowledge", { chatId, upto }),
+    cancelKnowledgeDraft: () => call("cancel_knowledge_draft"),
     saveKnowledge: (serviceId, chatId, date, notes) => call("save_knowledge", { serviceId, chatId, date, notes }),
     openKnowledgeFolder: (serviceId) => call("open_knowledge_folder", { serviceId }),
     embeddingStatus: () => call("embedding_status"),
