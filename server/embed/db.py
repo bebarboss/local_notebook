@@ -17,7 +17,7 @@ from pgvector.psycopg import register_vector
 
 log = logging.getLogger("docask-embed")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 4
 RRF_K = 60.0
 MIN_KEYWORD_COVERAGE = 0.35
 MAX_QUERY_TRIGRAMS = 64
@@ -148,6 +148,8 @@ class Store:
                  page INTEGER, chunk_ord INTEGER, w INTEGER NOT NULL, h INTEGER NOT NULL,
                  data BYTEA NOT NULL)""")
             c.execute("CREATE INDEX IF NOT EXISTS images_doc ON images(document_id, page)")
+            # v4: hidden documents (knowledge notes merged into another) stay, out of every search
+            c.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT FALSE")
             # pg_trgm only speeds up keyword search (LIKE works without it)
             try:
                 with c.transaction():
@@ -223,13 +225,13 @@ class Store:
 
     # ------------------------------------------------------------- documents
 
-    _DOC = "id, path, hash, mtime, bytes, status, message, chunk_count, indexed_by, updated_at, file_hash, file_size"
+    _DOC = "id, path, hash, mtime, bytes, status, message, chunk_count, indexed_by, updated_at, file_hash, file_size, hidden"
 
     @staticmethod
     def _doc(r) -> dict:
         return {"id": r[0], "path": r[1], "hash": r[2], "mtime": r[3], "bytes": r[4], "status": r[5],
                 "message": r[6], "chunkCount": r[7], "indexedBy": r[8], "updatedAt": r[9],
-                "fileHash": r[10], "fileSize": r[11]}
+                "fileHash": r[10], "fileSize": r[11], "hidden": bool(r[12])}
 
     def documents(self, sid: str) -> list[dict]:
         with self.pool.connection() as c:
@@ -252,6 +254,12 @@ class Store:
     def set_status(self, doc_id: int, status: str, message: str | None) -> None:
         with self.pool.connection() as c:
             n = c.execute("UPDATE documents SET status=%s, message=%s, updated_at=%s WHERE id=%s", (status, message, now_ms(), doc_id)).rowcount
+        if not n:
+            raise StoreError(404, "no such document")
+
+    def set_hidden(self, doc_id: int, hidden: bool) -> None:
+        with self.pool.connection() as c:
+            n = c.execute("UPDATE documents SET hidden=%s, updated_at=%s WHERE id=%s", (hidden, now_ms(), doc_id)).rowcount
         if not n:
             raise StoreError(404, "no such document")
 
@@ -347,7 +355,7 @@ class Store:
         with self.pool.connection() as c:
             rows = c.execute(
                 """SELECT ch.ord, ch.page, ch.text FROM chunks ch JOIN documents d ON d.id = ch.document_id
-                   WHERE d.service_id=%s AND d.path=%s AND ch.ord = ANY(%s) ORDER BY ch.ord""",
+                   WHERE d.service_id=%s AND d.path=%s AND NOT d.hidden AND ch.ord = ANY(%s) ORDER BY ch.ord""",
                 (sid, path, ords),
             ).fetchall()
         return [{"ord": r[0], "page": r[1], "text": r[2]} for r in rows]
@@ -365,7 +373,7 @@ class Store:
             vec = c.execute(
                 """SELECT ch.id, 1 - (ch.embedding <=> %s) AS cos
                    FROM chunks ch JOIN documents d ON d.id = ch.document_id
-                   WHERE d.service_id = ANY(%s)
+                   WHERE d.service_id = ANY(%s) AND NOT d.hidden
                    ORDER BY ch.embedding <=> %s LIMIT %s""",
                 (v, service_ids, v, k),
             ).fetchall()
@@ -377,7 +385,7 @@ class Store:
                 rows = c.execute(
                     """SELECT ch.id, (SELECT count(*) FROM unnest(%s::text[]) p WHERE lower(ch.text) LIKE p) AS hit
                        FROM chunks ch JOIN documents d ON d.id = ch.document_id
-                       WHERE d.service_id = ANY(%s) AND lower(ch.text) LIKE ANY(%s::text[])
+                       WHERE d.service_id = ANY(%s) AND NOT d.hidden AND lower(ch.text) LIKE ANY(%s::text[])
                        ORDER BY hit DESC LIMIT %s""",
                     (pats, service_ids, pats, k * 3),
                 ).fetchall()
@@ -404,6 +412,24 @@ class Store:
                          "score": float(vcos if vcos is not None else cos), "fused": f, "keyword": keyword})
         hits.sort(key=lambda h: (-h["fused"], -h["score"]))
         return hits[:k]
+
+    def similar_notes(self, sid: str, pv: list[float], exclude_path: str, threshold: float, limit: int) -> list[dict]:
+        """Knowledge notes of a service whose first chunk is close to `pv` (a passage vector).
+        An exact scan over the notes' first chunks: a few hundred rows, and an HNSW search
+        filtered afterwards could miss them."""
+        import numpy as np
+
+        v = np.asarray(pv, dtype=np.float32)
+        with self.pool.connection() as c:
+            rows = c.execute(
+                """SELECT d.id, d.path, 1 - (ch.embedding <=> %s) AS cos
+                   FROM chunks ch JOIN documents d ON d.id = ch.document_id
+                   WHERE d.service_id = %s AND NOT d.hidden AND ch.ord = 0
+                     AND lower(d.path) LIKE '%%.knowledge.md' AND d.path <> %s
+                   ORDER BY cos DESC LIMIT %s""",
+                (v, sid, exclude_path, limit),
+            ).fetchall()
+        return [{"documentId": i, "path": p, "similarity": float(cos)} for i, p, cos in rows if cos >= threshold]
 
     # ----------------------------------------------------------------- chats
 

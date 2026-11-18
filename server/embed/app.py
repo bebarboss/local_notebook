@@ -171,6 +171,18 @@ class SearchIn(BaseModel):
     hybrid: bool = True
 
 
+class SimilarNotesIn(BaseModel):
+    """A knowledge note's first chunk, compared with the service's other notes."""
+    text: str = Field(min_length=1, max_length=20_000)
+    excludePath: str = Field("", max_length=2000)
+    threshold: float = Field(0.85, ge=0.0, le=1.0)
+    limit: int = Field(3, ge=1, le=20)
+
+
+class HiddenIn(BaseModel):
+    hidden: bool
+
+
 class ChatIn(BaseModel):
     serviceId: str
     title: str = Field(max_length=500)
@@ -442,6 +454,24 @@ def _store_routes(app: FastAPI, enc: Encoder, store: Any, auth, caller) -> None:
         allowed(who, store.service_of_document(doc_id))
         store.set_status(doc_id, body.status, body.message)
         return {"ok": True}
+
+    @app.put("/v1/documents/{doc_id}/hidden")
+    def set_hidden(doc_id: int, body: HiddenIn, who: Optional[str] = Depends(caller)):
+        """Hide a document (a knowledge note merged into another) instead of deleting it."""
+        allowed(who, store.service_of_document(doc_id))
+        store.set_hidden(doc_id, body.hidden)
+        return {"ok": True}
+
+    @app.post("/v1/services/{sid}/similar-notes")
+    def similar_notes(sid: str, body: SimilarNotesIn, who: Optional[str] = Depends(caller)):
+        """Knowledge notes like this one (passage against passage, so a similarity means the same
+        thing as on the PC)."""
+        allowed(who, sid)
+        pv = enc.encode([PASSAGE_PREFIX + body.text[:MAX_CHARS]])[0]
+        found = store.similar_notes(sid, pv, body.excludePath, body.threshold, body.limit)
+        # counts only — never the note or its name
+        log.info("similar notes: %d over %.2f", len(found), body.threshold)
+        return {"notes": found}
 
     @app.post("/v1/documents/{doc_id}/chunks")
     def add_chunks(doc_id: int, body: ChunksIn, who: Optional[str] = Depends(caller)):

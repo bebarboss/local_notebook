@@ -223,6 +223,39 @@ def test_neighbour_chunks(client):
     assert c.get("/v1/services/hr/chunks", params={"path": "a.pdf", "ords": "x"}, headers=H).status_code == 400
 
 
+def test_similar_notes_and_hidden_documents(client):
+    c, _ = client
+    c.put("/v1/services/hr", json={"data": {"name": "HR"}}, headers=H)
+    c.put("/v1/services/pos", json={"data": {"name": "POS"}}, headers=H)
+    leave = doc(c, "hr", "K/2026-11-01_ลา.knowledge.md", [{"ord": 0, "text": "ลา ลา ไม่อนุมัติ"}, {"ord": 1, "text": "ot"}])
+    doc(c, "hr", "K/2026-11-02_ot.knowledge.md", [{"ord": 0, "text": "ot ค้าง"}])
+    doc(c, "hr", "leave.pdf", [{"ord": 0, "text": "ลา ลา ไม่อนุมัติ"}])
+    doc(c, "pos", "K/x.knowledge.md", [{"ord": 0, "text": "ลา ลา ไม่อนุมัติ"}])
+    body = {"text": "ลา ลา อนุมัติ", "excludePath": "K/new.knowledge.md", "threshold": 0.8}
+
+    got = c.post("/v1/services/hr/similar-notes", json=body, headers=H).json()["notes"]
+    assert [n["path"] for n in got] == ["K/2026-11-01_ลา.knowledge.md"], "notes only, this service only, over the threshold"
+    assert got[0]["documentId"] == leave and got[0]["similarity"] > 0.8
+    assert c.post("/v1/services/hr/similar-notes", json={**body, "excludePath": "K/2026-11-01_ลา.knowledge.md"}, headers=H).json()["notes"] == []
+
+    key = c.post("/v1/services/hr/key", headers=H).json()["key"]
+    K = {"Authorization": f"Bearer {key}"}
+    assert c.post("/v1/services/pos/similar-notes", json=body, headers=K).status_code == 403
+    pos_doc = c.get("/v1/services/pos/documents", headers=H).json()[0]["id"]
+    assert c.put(f"/v1/documents/{pos_doc}/hidden", json={"hidden": True}, headers=K).status_code == 403
+
+    # hidden: kept, but out of every search
+    assert c.put(f"/v1/documents/{leave}/hidden", json={"hidden": True}, headers=K).status_code == 200
+    assert c.post("/v1/services/hr/similar-notes", json=body, headers=H).json()["notes"] == []
+    hits = c.post("/v1/search", json={"serviceIds": ["hr"], "queries": ["ลา"], "k": 10}, headers=H).json()["hits"]
+    assert "K/2026-11-01_ลา.knowledge.md" not in [h["docPath"] for h in hits]
+    assert c.get("/v1/services/hr/chunks", params={"path": "K/2026-11-01_ลา.knowledge.md", "ords": "1"}, headers=H).json() == []
+    docs = {d["path"]: d for d in c.get("/v1/services/hr/documents", headers=H).json()}
+    assert docs["K/2026-11-01_ลา.knowledge.md"]["hidden"] is True and docs["leave.pdf"]["hidden"] is False
+    c.put(f"/v1/documents/{leave}/hidden", json={"hidden": False}, headers=H)
+    assert len(c.post("/v1/services/hr/similar-notes", json=body, headers=H).json()["notes"]) == 1
+
+
 def test_model_mismatch_refuses_to_start(client):
     from db import Store
 

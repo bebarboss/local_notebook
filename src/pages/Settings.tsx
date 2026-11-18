@@ -413,6 +413,7 @@ function SearchSection() {
         <NumberRow label="Threshold" desc="ตัดท่อนที่คะแนนความเกี่ยวข้องต่ำกว่าค่านี้ (0–1)" value={settings.threshold} min={0} max={1} step={0.05} onSave={(v) => updateSettings({ threshold: v })} />
         <HybridRow />
         <RerankRow />
+        <KnowledgeDupRows />
         <NumberRow label="ขนาดท่อน (ตัวอักษร)" desc="เปลี่ยนแล้วจะ index ใหม่ทั้งหมดในรอบถัดไป" value={settings.chunkSize} min={300} max={4000} step={50} onSave={(v) => updateSettings({ chunkSize: v })} />
         <NumberRow label="Overlap (ตัวอักษร)" desc="ส่วนที่ซ้อนกันระหว่างท่อน · เปลี่ยนแล้วจะ index ใหม่ทั้งหมด" value={settings.chunkOverlap} min={0} max={1000} step={10} onSave={(v) => updateSettings({ chunkOverlap: v })} />
       </div>
@@ -596,6 +597,36 @@ function RerankRow() {
         }}
       />
     </div>
+  );
+}
+
+/** After a knowledge note is saved: look for a note of the same problem. */
+function KnowledgeDupRows() {
+  const { settings, updateSettings, toast } = useApp();
+  return (
+    <>
+      <div className="list-row">
+        <div className="l">
+          <span className="t">ตรวจบันทึกความรู้ซ้ำ</span>
+          <span className="d">
+            หลังบันทึกความรู้ใหม่ เทียบกับบันทึกเดิมใน service เดียวกัน (service ที่แชร์เทียบกับบันทึกบนเซิร์ฟเวอร์) ·
+            ถ้าเรื่องเดียวกันจะแจ้งเตือนให้เทียบและรวมได้ · ทำเบื้องหลัง ไม่ต้องรอ
+          </span>
+        </div>
+        <Switch
+          checked={settings.knowledgeDupCheck}
+          label="ตรวจบันทึกความรู้ซ้ำ"
+          onChange={async (v) => {
+            await updateSettings({ knowledgeDupCheck: v });
+            toast(v ? "เปิดการตรวจบันทึกซ้ำแล้ว" : "ปิดการตรวจบันทึกซ้ำแล้ว");
+          }}
+        />
+      </div>
+      {settings.knowledgeDupCheck && (
+        <NumberRow label="ความคล้ายที่นับว่าซ้ำ" desc="0.50–0.99 · ค่ามาก = แจ้งเฉพาะบันทึกที่เกือบเหมือนกัน · ค่าน้อย = แจ้งบ่อยขึ้น (เริ่มต้น 0.85)"
+          value={settings.knowledgeDupThreshold} min={0.5} max={0.99} step={0.01} onSave={(v) => updateSettings({ knowledgeDupThreshold: v })} />
+      )}
+    </>
   );
 }
 

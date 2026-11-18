@@ -63,6 +63,9 @@ struct RemoteDoc {
     /// SHA-256 of the original file on the server (None: not uploaded)
     #[serde(default)]
     file_hash: Option<String>,
+    /// hidden on the server (a knowledge note merged into another): kept, never re-deleted
+    #[serde(default)]
+    hidden: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -393,7 +396,8 @@ async fn sync_inner(app: &AppHandle, sid: &str) -> AppResult<SyncReport> {
 
     // only documents this PC uploaded: another PC's files are not ours to remove
     let here: HashSet<&str> = local.iter().map(|d| d.path.as_str()).collect();
-    for r in remote.iter().filter(|r| r.indexed_by == me && !here.contains(r.path.as_str())) {
+    // a hidden note was moved aside on purpose: it stays on the server (hidden), not deleted
+    for r in remote.iter().filter(|r| r.indexed_by == me && !r.hidden && !here.contains(r.path.as_str())) {
         let path = urlencode(&r.path);
         let _: serde_json::Value = api_as(&cred, Method::DELETE, &format!("/v1/services/{sid}/documents?path={path}"), None, SHORT).await?;
         report.deleted += 1;
@@ -522,6 +526,61 @@ pub async fn remote_image(service_id: &str, id: i64) -> AppResult<Vec<u8>> {
     base64::engine::general_purpose::STANDARD.decode(d.data).map_err(|_| AppError::new("server", "รูปจากเซิร์ฟเวอร์อ่านไม่ได้"))
 }
 
+// ------------------------------------------------ knowledge notes on the server
+
+/// How long the duplicate check may wait for the server (it is never worth a hang).
+const NOTE_CHECK: Duration = Duration::from_secs(10);
+
+/// Notes of a shared service like `head` (a note's first chunk), compared on the server
+/// passage against passage. `(path, similarity, document id)`, best first.
+pub async fn similar_notes(service_id: &str, head: &str, exclude_path: &str, threshold: f32) -> AppResult<Vec<(String, f32, i64)>> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct N {
+        document_id: i64,
+        path: String,
+        similarity: f32,
+    }
+    #[derive(Deserialize)]
+    struct Out {
+        notes: Vec<N>,
+    }
+    let cred = credential_for(service_id)?;
+    let body = json!({ "text": head, "excludePath": exclude_path, "threshold": threshold, "limit": crate::knowledge::MAX_SIMILAR });
+    let out: Out = api_as(&cred, Method::POST, &format!("/v1/services/{service_id}/similar-notes"), Some(&body), NOTE_CHECK).await?;
+    Ok(out.notes.into_iter().map(|n| (n.path, n.similarity, n.document_id)).collect())
+}
+
+/// The server's id of a document of a shared service (None: not uploaded).
+pub async fn document_id(service_id: &str, doc_path: &str) -> AppResult<Option<i64>> {
+    let cred = credential_for(service_id)?;
+    let docs: Vec<RemoteDoc> = api_as(&cred, Method::GET, &format!("/v1/services/{service_id}/documents"), None, SHORT).await?;
+    Ok(docs.into_iter().find(|d| d.path == doc_path).map(|d| d.id))
+}
+
+/// Hide (or show again) a document of a shared service — kept on the server, out of searches.
+pub async fn set_hidden(service_id: &str, document_id: i64, hidden: bool) -> AppResult<()> {
+    let cred = credential_for(service_id)?;
+    let _: serde_json::Value = api_as(&cred, Method::PUT, &format!("/v1/documents/{document_id}/hidden"), Some(&json!({ "hidden": hidden })), SHORT).await?;
+    Ok(())
+}
+
+/// The text of a note of a shared service that is not on this PC: its original file, else
+/// its first chunks joined.
+pub async fn note_text(service_id: &str, doc_path: &str) -> AppResult<String> {
+    if let Ok(f) = fetch_original(service_id, doc_path).await {
+        if let Ok(t) = std::fs::read_to_string(&f) {
+            return Ok(t);
+        }
+    }
+    let ords: Vec<i64> = (0..10).collect();
+    let parts = neighbours(service_id, doc_path, &ords).await?;
+    if parts.is_empty() {
+        return Err(AppError::new("not_found", "ไม่พบบันทึกนี้บนเซิร์ฟเวอร์"));
+    }
+    Ok(parts.iter().skip(1).fold(parts[0].1.clone(), |acc, (_, t)| crate::context::join_overlap(&acc, t)))
+}
+
 /// (ord, text) of a shared document's chunks at the given positions.
 pub async fn neighbours(service_id: &str, doc_path: &str, ords: &[i64]) -> AppResult<Vec<(i64, String)>> {
     #[derive(Deserialize)]
@@ -628,7 +687,7 @@ mod tests {
     }
 
     fn rdoc(path: &str, hash: &str, by: &str) -> RemoteDoc {
-        RemoteDoc { id: 1, path: path.into(), hash: hash.into(), status: "ready".into(), chunk_count: 3, indexed_by: by.into(), file_hash: None }
+        RemoteDoc { id: 1, path: path.into(), hash: hash.into(), status: "ready".into(), chunk_count: 3, indexed_by: by.into(), file_hash: None, hidden: false }
     }
 
     #[test]

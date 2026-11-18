@@ -144,6 +144,8 @@ API (แอป DocAsk เป็นคนเรียก) — **token ของ�
 | `GET/PUT/DELETE /v1/services/{id}/documents` | รายการเอกสาร / ลงทะเบียน / ลบ (`?path=`) |
 | `POST /v1/documents/{id}/chunks` | ส่งท่อน (≤ 64 ต่อครั้ง) — เซิร์ฟเวอร์ทำ embedding เอง หรือรับ vector ที่ทำไว้แล้ว · `replace: true` ล้างท่อนเก่า |
 | `PATCH /v1/documents/{id}` | สถานะ (indexing / ready / error) |
+| `PUT /v1/documents/{id}/hidden` | ซ่อน / เลิกซ่อนเอกสาร (บันทึกความรู้ที่ถูกรวมแล้ว) — เก็บไว้ แต่ไม่ขึ้นในการค้นใดๆ |
+| `POST /v1/services/{id}/similar-notes` | บันทึกความรู้ที่คล้ายบันทึกใหม่ (เทียบท่อนแรก passage กับ passage) · ใช้ตรวจบันทึกซ้ำ |
 | `PUT /v1/documents/{id}/file?name=` | ไฟล์ต้นฉบับ (body = ไฟล์ ≤ 50 MB) เก็บบนดิสก์ตาม SHA-256 · ไฟล์เนื้อหาเดียวกันเก็บครั้งเดียว · ลบเอกสาร = ลบไฟล์ที่ไม่มีใครใช้แล้ว |
 | `GET /v1/services/{id}/file?path=`, `GET /v1/services/{id}/files` | ดาวน์โหลดต้นฉบับ (แอปโหลดเฉพาะไฟล์ที่กดเปิด) / รายการไฟล์ |
 | `POST /v1/documents/{id}/images`, `GET /v1/services/{id}/images`, `GET /v1/images/{id}` | รูปในเอกสาร (เก็บในฐานข้อมูล) |

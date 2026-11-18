@@ -209,6 +209,21 @@ impl SqliteStore {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// (path, vector) of the first chunk of every knowledge note — what a new note is
+    /// compared with to find the same problem written down twice.
+    pub fn knowledge_heads(&self) -> AppResult<Vec<(String, Vec<f32>)>> {
+        let mut st = self.conn.prepare(
+            "SELECT d.path, c.embedding FROM chunks c JOIN documents d ON d.id = c.doc_id
+             WHERE c.ord = 0 AND lower(d.path) LIKE '%.knowledge.md'",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, from_blob(&r.get::<_, Vec<u8>>(1)?))))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// (ord, text) of a document's chunks at the given positions — the neighbours of a hit.
     pub fn chunk_texts_at(&self, doc_path: &str, ords: &[i64]) -> AppResult<Vec<(i64, String)>> {
         let mut out = Vec::new();
@@ -543,6 +558,21 @@ mod tests {
         assert_eq!(s.stats().unwrap().1, 2);
         s.delete_document("C:\\a.txt").unwrap();
         assert!(s.search(&v(&[1.0, 0.0]), 3, 0.0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn knowledge_heads_are_first_chunks_of_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = SqliteStore::open(&dir.path().join("index.db")).unwrap();
+        let chunk = |ord, x: f32| NewChunk { page: None, ord, text: "t".into(), embedding: v(&[x, 1.0]) };
+        let n = s.upsert_document("C:\\K\\a.Knowledge.md", "h", 1, 1, "indexing", None).unwrap();
+        s.replace_chunks(n, &[chunk(0, 1.0), chunk(1, 0.0)], &[]).unwrap();
+        let d = s.upsert_document("C:\\docs\\a.md", "h", 1, 1, "indexing", None).unwrap();
+        s.replace_chunks(d, &[chunk(0, 1.0)], &[]).unwrap();
+        let heads = s.knowledge_heads().unwrap();
+        assert_eq!(heads.len(), 1, "notes only, first chunk only");
+        assert_eq!(heads[0].0, "C:\\K\\a.Knowledge.md");
+        assert_eq!(heads[0].1, v(&[1.0, 1.0]));
     }
 
     #[test]

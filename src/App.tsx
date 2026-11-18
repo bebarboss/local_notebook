@@ -13,7 +13,8 @@ import SetupPage from "./pages/Setup";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { ConnectDialog } from "./components/ConnectDialog";
 import { useTeamSyncToasts } from "./components/TeamPanel";
-import type { UpdateInfo } from "./lib/types";
+import { KnowledgeCompareDialog } from "./components/KnowledgeCompareDialog";
+import type { KnowledgeDuplicate, SimilarNote, UpdateInfo } from "./lib/types";
 
 export default function App() {
   const app = useApp();
@@ -24,6 +25,14 @@ export default function App() {
   const [updateOpen, setUpdateOpen] = useState(false);
   const [updateDismissed, setUpdateDismissed] = useState(false);
   useTeamSyncToasts();
+  // "มีบันทึกเรื่องนี้อยู่แล้ว": stays until opened or dismissed
+  const [dups, setDups] = useState<KnowledgeDuplicate[]>([]);
+  const [comparing, setComparing] = useState<{ dup: KnowledgeDuplicate; other: SimilarNote } | null>(null);
+  useEffect(() => {
+    const off = api.on("knowledge-duplicate", (d) => setDups((xs) => [...xs.filter((x) => x.path !== d.path), d]));
+    return () => { off.then((f) => f()); };
+  }, []);
+  const dropDup = (path: string) => setDups((xs) => xs.filter((x) => x.path !== path));
 
   // check for a new version once at startup (silently ignore VPN/URL problems)
   useEffect(() => {
@@ -100,6 +109,33 @@ export default function App() {
         </div>
       )}
       {updateOpen && update && <UpdateDialog info={update} onClose={() => setUpdateOpen(false)} />}
+      {dups.length > 0 && (() => {
+        const d = dups[0];
+        const best = d.similar[0];
+        return (
+          <div className="banner info" role="status">
+            <span>
+              มีบันทึกเรื่องนี้อยู่แล้ว: <b>{best.title}</b> (คล้าย {Math.round(best.similarity * 100)}%{d.similar.length > 1 ? ` · และอีก ${d.similar.length - 1} บันทึก` : ""})
+              {dups.length > 1 ? ` · รออีก ${dups.length - 1} รายการ` : ""}
+            </span>
+            <button className="btn btn-primary" onClick={() => setComparing({ dup: d, other: best })}>ดูเทียบ</button>
+            <button className="icon-btn" aria-label="ปิดการแจ้งเตือนบันทึกซ้ำ" onClick={() => dropDup(d.path)}><X size={16} strokeWidth={1.8} /></button>
+          </div>
+        );
+      })()}
+      {comparing && (
+        <KnowledgeCompareDialog dup={comparing.dup} other={comparing.other} onClose={(done) => {
+          const { dup, other } = comparing;
+          setComparing(null);
+          if (!done) return;
+          // the next similar note of the same new note, if any (unless the new one was merged away)
+          setDups((xs) => xs.flatMap((x) => {
+            if (x.path !== dup.path) return [x];
+            const rest = x.similar.filter((s) => s.path !== other.path);
+            return rest.length ? [{ ...x, similar: rest }] : [];
+          }));
+        }} />
+      )}
       <ConnectDialog />
       <div className="app" style={{ flex: 1, minHeight: 0 }}>
         <Sidebar open={menuOpen} onNavigate={() => setMenuOpen(false)} />

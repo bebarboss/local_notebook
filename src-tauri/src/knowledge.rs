@@ -7,7 +7,8 @@ use crate::chats::Message;
 use crate::errors::{AppError, AppResult};
 use crate::ingest::KNOWLEDGE_EXT;
 use crate::llm::ChatMessage;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Notes put in front of the documents (at most).
@@ -234,6 +235,173 @@ pub fn prefer_notes(note: &[bool], strong: &[bool]) -> Vec<usize> {
     lead.iter().copied().chain((0..note.len()).filter(|i| !lead.contains(i))).collect()
 }
 
+// ------------------------------------------------------------------ duplicate notes
+//
+// After a note is saved, its first chunk (title + problem + cause, as the indexer cuts it) is
+// compared with the first chunk of every other note of the service, passage against passage.
+// A close one is offered for merging: the model writes one note that keeps every fix with how
+// well it worked, the user checks it, and the two old notes are hidden (moved aside), never
+// deleted. Nothing of a note (title, path or text) is logged: file names are titles.
+
+/// Folder (next to the note) that hidden notes are moved into; `.hidden` is never indexed.
+pub const HIDDEN_DIR: &str = "ซ่อนแล้ว";
+const HIDDEN_EXT: &str = ".hidden";
+/// Most similar notes reported for one new note.
+pub const MAX_SIMILAR: usize = 3;
+
+/// A note like the one just saved.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SimilarNote {
+    pub path: String,
+    pub title: String,
+    /// cosine of the two notes' first chunks, 0–1
+    pub similarity: f32,
+    /// the note's document on the server (shared services)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<i64>,
+}
+
+/// The "มีบันทึกเรื่องนี้อยู่แล้ว" event.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateFound {
+    pub service_id: String,
+    pub path: String,
+    pub title: String,
+    pub similar: Vec<SimilarNote>,
+}
+
+/// The notes closest to `v` (best first), over `threshold`, the note itself left out.
+pub fn pick_similar(heads: &[(String, Vec<f32>)], v: &[f32], exclude: &str, threshold: f32, limit: usize) -> Vec<(String, f32)> {
+    let mut out: Vec<(String, f32)> = heads
+        .iter()
+        .filter(|(p, _)| !p.eq_ignore_ascii_case(exclude))
+        .map(|(p, h)| (p.clone(), crate::search::dot(v, h)))
+        .filter(|(_, s)| *s >= threshold)
+        .collect();
+    out.sort_by(|a, b| b.1.total_cmp(&a.1));
+    out.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
+    out.truncate(limit);
+    out
+}
+
+/// Title of a note from its path (see `title_of`).
+pub fn title_of_path(path: &str) -> String {
+    let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    title_of(name)
+}
+
+/// The note without its "# title" and "> บันทึกความรู้ · …" lines (what the model merges).
+pub fn body_of(text: &str) -> String {
+    let mut lines = text.lines().peekable();
+    if lines.peek().is_some_and(|l| l.starts_with("# ")) {
+        lines.next();
+    }
+    let rest = lines.collect::<Vec<_>>().join("\n");
+    let rest = rest.trim_start();
+    if rest.starts_with("> บันทึกความรู้") {
+        return rest.split_once('\n').map(|(_, after)| after.trim().to_string()).unwrap_or_default();
+    }
+    rest.trim().to_string()
+}
+
+/// "แก้ได้แล้ว" / "ยังไม่ยืนยัน" from the note's meta line (None: not written by DocAsk).
+pub fn status_of(text: &str) -> Option<&'static str> {
+    let meta = text.lines().take(4).find(|l| l.starts_with("> บันทึกความรู้"))?;
+    if meta.contains("สถานะ: ยังไม่ยืนยัน") {
+        Some("ยังไม่ยืนยัน")
+    } else if meta.contains("สถานะ: แก้ได้แล้ว") {
+        Some("แก้ได้แล้ว")
+    } else {
+        None
+    }
+}
+
+pub fn merge_prompt(a: &str, b: &str) -> Vec<ChatMessage> {
+    let note = |label: &str, text: &str| {
+        let status = status_of(text).unwrap_or("ไม่ระบุ");
+        let title = text.lines().next().unwrap_or("").trim_start_matches("# ").trim().to_string();
+        format!("บันทึก {label} (สถานะทั้งบันทึก: {status})\nชื่อเรื่อง: {title}\n\n{}", body_of(text))
+    };
+    let system = "คุณรวม \"บันทึกความรู้\" สองอันที่เป็นปัญหาเดียวกันให้เป็นบันทึกเดียว\n\
+        - ขึ้นต้นด้วยบรรทัด @@@ ตามด้วยชื่อเรื่องสั้นๆ ที่ครอบคลุมทั้งสองบันทึก\n\
+        - ใต้บรรทัดนั้นเขียน Markdown ด้วยหัวข้อเหล่านี้ตามลำดับ:\n\
+          ## ปัญหา / อาการ\n## สาเหตุ\n## การตรวจสอบ\n## วิธีแก้ไข\n## เอกสารอ้างอิง\n\
+        - วิธีแก้ไข: เก็บทุกวิธีจากทั้งสองบันทึก วิธีที่ซ้ำกันรวมเป็นข้อเดียว เขียนเป็นข้อมีเลข และต่อท้ายแต่ละข้อด้วยสถานะหนึ่งอย่าง: \
+          **(ได้ผล)** **(ยังไม่ยืนยัน)** หรือ **(ไม่ได้ผล)**\n\
+        - สถานะของแต่ละวิธี: ถ้าบันทึกบอกชัดว่าวิธีนั้นได้ผลหรือไม่ได้ผล ให้ใช้ตามนั้น ไม่อย่างนั้นใช้สถานะทั้งบันทึก \
+          (แก้ได้แล้ว = ได้ผล, ยังไม่ยืนยัน หรือไม่ระบุ = ยังไม่ยืนยัน) ห้ามเดาว่าได้ผล\n\
+        - สาเหตุ การตรวจสอบ และเอกสารอ้างอิง: รวมจากทั้งสองบันทึก ตัดที่ซ้ำ ถ้าขัดกันให้เขียนไว้ทั้งสองแบบ\n\
+        - ใช้เฉพาะข้อมูลที่อยู่ในสองบันทึก ห้ามเติมความรู้ภายนอก คำสั่ง SQL หรือโค้ดคัดลอกตรงตัว ห้ามแก้ชื่อตารางหรือฟิลด์\n\
+        - ไม่ต้องมีข้อความอื่นนอกจากบันทึก ไม่ต้องใส่หัวข้อระดับ #";
+    vec![
+        ChatMessage::new("system", system),
+        ChatMessage::new("user", format!("{}\n\n----------\n\n{}", note("ก", a), note("ข", b))),
+    ]
+}
+
+/// The merged note from the model's reply (one note; extra ones are folded into the first).
+pub fn parse_merge(reply: &str, fallback_title: &str) -> Option<Draft> {
+    let mut drafts = parse_drafts(reply, fallback_title);
+    if drafts.is_empty() {
+        return None;
+    }
+    let mut first = drafts.remove(0);
+    for d in drafts {
+        first.markdown.push_str("\n\n");
+        first.markdown.push_str(&d.markdown);
+    }
+    Some(first)
+}
+
+/// Move a note aside instead of deleting it: `<its folder>\ซ่อนแล้ว\<name>.hidden`.
+/// Only `*.knowledge.md` files; never over another file. Returns where it went.
+pub fn hide_note(path: &Path) -> AppResult<PathBuf> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if !crate::ingest::is_knowledge(&name) || !path.is_file() {
+        return Err(AppError::new("invalid", "ซ่อนได้เฉพาะไฟล์บันทึกความรู้"));
+    }
+    let dir = path.parent().ok_or_else(|| AppError::new("invalid", "ไม่พบโฟลเดอร์ของบันทึก"))?.join(HIDDEN_DIR);
+    std::fs::create_dir_all(&dir)?;
+    let mut dest = dir.join(format!("{name}{HIDDEN_EXT}"));
+    let mut n = 2;
+    while dest.exists() {
+        dest = dir.join(format!("{name}-{n}{HIDDEN_EXT}"));
+        n += 1;
+    }
+    std::fs::rename(path, &dest)?;
+    Ok(dest)
+}
+
+/// Pairs the user chose to keep apart ("เก็บทั้งคู่"), so they are not offered again.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct KeptApart {
+    pairs: BTreeSet<String>,
+}
+
+impl KeptApart {
+    fn path() -> PathBuf {
+        crate::config::data_dir().join("knowledge-kept.json")
+    }
+    fn key(a: &str, b: &str) -> String {
+        let (a, b) = (a.to_lowercase(), b.to_lowercase());
+        if a <= b { format!("{a}\n{b}") } else { format!("{b}\n{a}") }
+    }
+    pub fn load() -> Self {
+        crate::config::read_json(&Self::path()).ok().flatten().unwrap_or_default()
+    }
+    pub fn contains(&self, a: &str, b: &str) -> bool {
+        self.pairs.contains(&Self::key(a, b))
+    }
+    pub fn insert(&mut self, a: &str, b: &str) {
+        self.pairs.insert(Self::key(a, b));
+    }
+    pub fn save(&self) -> AppResult<()> {
+        crate::config::write_json(&Self::path(), self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,6 +486,71 @@ mod tests {
     fn titles_from_file_names() {
         assert_eq!(title_of("2026-11-12_OT-ไม่ขึ้น.knowledge.md"), "OT ไม่ขึ้น");
         assert_eq!(title_of("วิธีลา.knowledge.md"), "วิธีลา");
+    }
+
+    #[test]
+    fn similar_notes_over_the_threshold_best_first() {
+        let n = |x: f32, y: f32| {
+            let l = (x * x + y * y).sqrt();
+            vec![x / l, y / l]
+        };
+        let heads = vec![
+            ("C:\\K\\new.knowledge.md".to_string(), n(1.0, 0.0)),
+            ("C:\\K\\a.knowledge.md".to_string(), n(1.0, 0.1)),
+            ("C:\\K\\b.knowledge.md".to_string(), n(1.0, 0.6)),
+            ("C:\\K\\c.knowledge.md".to_string(), n(0.0, 1.0)),
+        ];
+        let got = pick_similar(&heads, &n(1.0, 0.0), "c:\\k\\NEW.knowledge.md", 0.85, 3);
+        assert_eq!(got.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), vec!["C:\\K\\a.knowledge.md", "C:\\K\\b.knowledge.md"]);
+        assert!(got[0].1 > got[1].1);
+        assert_eq!(pick_similar(&heads, &n(1.0, 0.0), "x", 0.85, 1).len(), 1);
+        assert!(pick_similar(&heads, &n(1.0, 0.0), "x", 1.01, 3).is_empty());
+    }
+
+    #[test]
+    fn note_parts_for_merging() {
+        let text = compose("OT ไม่ขึ้น", "ยังไม่ยืนยัน", "2026-11-12", "แชต", "## ปัญหา / อาการ\nOT หาย");
+        assert_eq!(body_of(&text), "## ปัญหา / อาการ\nOT หาย");
+        assert_eq!(status_of(&text), Some("ยังไม่ยืนยัน"));
+        assert_eq!(status_of("# x\n\nไม่มีเมตา"), None);
+        assert_eq!(body_of("# x\n\nเนื้อหา"), "เนื้อหา");
+        assert_eq!(title_of_path("C:\\K\\2026-11-12_OT-ไม่ขึ้น.knowledge.md"), "OT ไม่ขึ้น");
+        let p = merge_prompt(&text, "# ลา\n\n> บันทึกความรู้ · 2026-11-13 · สถานะ: แก้ได้แล้ว\n\n## วิธีแก้ไข\n1. รัน TA");
+        assert!(p[1].content.contains("สถานะทั้งบันทึก: ยังไม่ยืนยัน") && p[1].content.contains("สถานะทั้งบันทึก: แก้ได้แล้ว"));
+        assert!(p[1].content.contains("ชื่อเรื่อง: OT ไม่ขึ้น") && !p[1].content.contains("> บันทึกความรู้"));
+        assert!(p[0].content.contains("(ไม่ได้ผล)"));
+        let m = parse_merge("@@@ OT ไม่ขึ้น\n## วิธีแก้ไข\n1. รัน TA **(ได้ผล)**\n@@@ เกิน\n## อื่น\nx", "f").unwrap();
+        assert_eq!(m.title, "OT ไม่ขึ้น");
+        assert!(m.markdown.contains("(ได้ผล)") && m.markdown.contains("## อื่น"), "a second note is folded in, not lost");
+        assert!(parse_merge("  ", "f").is_none());
+    }
+
+    #[test]
+    fn hidden_notes_are_moved_aside_not_deleted() {
+        let dir = std::env::temp_dir().join(format!("docask-hide-{}", uuid::Uuid::new_v4().simple()));
+        let a = write_note(&dir, "OT", "fixed", "2026-11-12", "", "x").unwrap();
+        let b = write_note(&dir, "OT", "fixed", "2026-11-12", "", "y").unwrap();
+        let ha = hide_note(&a).unwrap();
+        assert!(!a.exists() && ha.exists());
+        assert_eq!(ha.parent().unwrap(), dir.join(HIDDEN_DIR));
+        assert!(!crate::ingest::is_supported(&ha), "a hidden note is never indexed");
+        // the same name again does not overwrite the first
+        std::fs::rename(&b, &a).unwrap();
+        let hb = hide_note(&a).unwrap();
+        assert_ne!(ha, hb);
+        assert!(std::fs::read_to_string(&ha).unwrap().contains("\nx\n"));
+        let other = dir.join("plain.md");
+        std::fs::write(&other, "x").unwrap();
+        assert!(hide_note(&other).is_err(), "only knowledge notes");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn kept_apart_pairs_ignore_order_and_case() {
+        let mut k = KeptApart::default();
+        k.insert("C:\\A.knowledge.md", "c:\\b.knowledge.md");
+        assert!(k.contains("C:\\B.knowledge.md", "c:\\a.knowledge.md"));
+        assert!(!k.contains("a", "c"));
     }
 
     #[test]

@@ -13,7 +13,7 @@ use crate::commands::AppState;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
 
 const TRAY_ID: &str = "docask";
@@ -132,6 +132,33 @@ fn quit(app: &AppHandle) {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         app.exit(0);
+    });
+}
+
+/// After knowledge notes are saved: look for notes of the same problem in the service, in
+/// the background, and say so with "knowledge-duplicate" (Settings › การค้นหา turns it off
+/// and sets how alike counts as the same). A failure only means no warning; it is logged
+/// by its code, never with the note.
+pub fn spawn_duplicate_check(app: &AppHandle, service_id: String, paths: Vec<String>) {
+    let state = app.state::<AppState>();
+    let (on, threshold) = {
+        let s = state.settings.lock();
+        (s.knowledge_dup_check, s.knowledge_dup_threshold)
+    };
+    if !on || paths.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        for path in paths {
+            match crate::commands::find_duplicates(&app, &service_id, &path, threshold).await {
+                Ok(Some(found)) => {
+                    let _ = app.emit("knowledge-duplicate", found);
+                }
+                Ok(None) => {}
+                Err(e) => crate::diag::log(format!("knowledge check skipped ({})", e.code)),
+            }
+        }
     });
 }
 

@@ -37,6 +37,28 @@ export interface NewNote extends KnowledgeDraft {
   status: "fixed" | "unverified";
 }
 
+/** A note like the one just saved (cosine of their first chunks). */
+export interface SimilarNote {
+  path: string;
+  title: string;
+  similarity: number;
+  /** the note's document on the server (shared services) */
+  documentId?: number;
+}
+
+/** "knowledge-duplicate": a saved note has notes of the same problem in its service. */
+export interface KnowledgeDuplicate {
+  serviceId: string;
+  path: string;
+  title: string;
+  similar: SimilarNote[];
+}
+
+export interface NoteToHide {
+  path: string;
+  documentId?: number;
+}
+
 export interface KnowledgeInfo {
   dir: string;
   notes: number;
@@ -202,6 +224,10 @@ export interface Settings {
   font: FontChoice;
   textSize: TextSize;
   startHidden: boolean;
+  /** look for a note of the same problem after saving one */
+  knowledgeDupCheck: boolean;
+  /** how alike (0.5–0.99) counts as the same problem */
+  knowledgeDupThreshold: number;
 }
 
 

@@ -363,6 +363,10 @@ code { font-family: var(--mono); font-size: 12.5px; background: var(--code); col
 .progress > div { height: 100%; border-radius: 3px; background: var(--accent); transition: width .3s; }
 .progress.thin { height: 4px; }
 
+.note-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.note-compare-col { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.note-compare-body { border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; max-height: 52vh; overflow: auto; font-size: 13px; }
+@media (max-width: 760px) { .note-compare { grid-template-columns: 1fr; } }
 .list-card { border: 1px solid var(--border); border-radius: 14px; background: var(--surface); overflow: hidden; }
 .list-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding: 14px 16px; }
 .list-row + .list-row { border-top: 1px solid var(--border-soft); }

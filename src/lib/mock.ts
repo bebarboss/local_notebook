@@ -98,7 +98,7 @@ export function createMockBackend(): Backend {
   let settings: Settings = {
     theme: "system", userName: "navaritrod", setupDone: false, historyTurns: 20, autoDeleteDays: 0,
     topK: 5, threshold: 0.3, chunkSize: 1000, chunkOverlap: 150, embeddingModel: "bge-m3", teamServer: false, lastServiceId: "hr",
-    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true, rerank: true, hybrid: true, indexLoad: "normal", font: "looped", textSize: "m", startHidden: true,
+    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true, rerank: true, hybrid: true, indexLoad: "normal", font: "looped", textSize: "m", startHidden: true, knowledgeDupCheck: true, knowledgeDupThreshold: 0.85,
   };
   try {
     const saved = localStorage.getItem("docask-mock-settings");
@@ -372,6 +372,18 @@ export function createMockBackend(): Backend {
     downloadServiceFiles: async () => { await wait(900); return 7; },
     knowledgeInfo: async (sid) => ({ dir: services.find((x) => x.id === sid)?.knowledgeDir || "C:\\Users\\me\\Documents\\DocAsk ความรู้\\" + (services.find((x) => x.id === sid)?.name ?? ""), notes: notes[sid] ?? 0 }),
     cancelKnowledgeDraft: async () => {},
+    readNote: async (_s, path) => {
+      await wait(300);
+      return path.includes("ใหม่")
+        ? "# OT ไม่ขึ้นใน Payable Time\n\n> บันทึกความรู้ · 2026-11-18 · สถานะ: ยังไม่ยืนยัน\n\n## ปัญหา / อาการ\nOT ไม่ขึ้น\n\n## วิธีแก้ไข\n1. รัน Time Administration ใหม่"
+        : "# OT หายจากรายงาน\n\n> บันทึกความรู้ · 2026-11-10 · สถานะ: แก้ได้แล้ว\n\n## ปัญหา / อาการ\nยอด OT หาย\n\n## วิธีแก้ไข\n1. ตรวจ TRC ของพนักงาน";
+    },
+    mergeNotes: async () => {
+      await wait(1500);
+      return { title: "OT ไม่ขึ้นใน Payable Time", markdown: "## ปัญหา / อาการ\nOT ไม่ขึ้น / ยอดหายจากรายงาน\n\n## สาเหตุ\nไม่ระบุ\n\n## การตรวจสอบ\n1. ดูเวลาที่ลงไว้\n\n## วิธีแก้ไข\n1. ตรวจ TRC ของพนักงาน **(ได้ผล)**\n2. รัน Time Administration ใหม่ **(ยังไม่ยืนยัน)**\n\n## เอกสารอ้างอิง\nไม่ระบุ" };
+    },
+    saveMergedNote: async () => { await wait(400); return "C:\\mock\\merged.knowledge.md"; },
+    keepNotesApart: async () => {},
     draftKnowledge: async () => {
       await wait(1200);
       return [
@@ -382,7 +394,13 @@ export function createMockBackend(): Backend {
     saveKnowledge: async (sid, _cid, date, list) => {
       await wait(300);
       notes[sid] = (notes[sid] ?? 0) + list.length;
-      return list.map((n) => `C:\\Users\\me\\Documents\\DocAsk ความรู้\\${date}_${n.title}.knowledge.md`);
+      const saved = list.map((n) => `C:\\Users\\me\\Documents\\DocAsk ความรู้\\${date}_${n.title}-ใหม่.knowledge.md`);
+      // the background duplicate check, as the app reports it
+      setTimeout(() => emit("knowledge-duplicate", {
+        serviceId: sid, path: saved[0], title: list[0].title,
+        similar: [{ path: "C:\\Users\\me\\Documents\\DocAsk ความรู้\\2026-11-10_OT-หายจากรายงาน.knowledge.md", title: "OT หายจากรายงาน", similarity: 0.91 }],
+      }), 1200);
+      return saved;
     },
     openKnowledgeFolder: async () => {},
     embeddingStatus: async () => clone(embedding),

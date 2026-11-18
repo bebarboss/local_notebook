@@ -74,6 +74,10 @@ pub struct Settings {
     pub text_size: String,
     /// when Windows starts DocAsk at sign-in, stay in the tray instead of opening the window
     pub start_hidden: bool,
+    /// after a knowledge note is saved, look for a note of the same problem (knowledge.rs)
+    pub knowledge_dup_check: bool,
+    /// how alike two notes must be (cosine of their first chunks) to be called the same
+    pub knowledge_dup_threshold: f32,
 }
 
 /// The server that came with this build, else bge-m3 on this PC.
@@ -112,6 +116,8 @@ impl Default for Settings {
             font: "looped".into(),
             text_size: "m".into(),
             start_hidden: true,
+            knowledge_dup_check: true,
+            knowledge_dup_threshold: 0.85,
         }
     }
 }
@@ -135,6 +141,7 @@ impl Settings {
         self.threshold = self.threshold.clamp(0.0, 1.0);
         self.chunk_size = self.chunk_size.clamp(300, 4000);
         self.chunk_overlap = self.chunk_overlap.min(self.chunk_size / 2);
+        self.knowledge_dup_threshold = if self.knowledge_dup_threshold.is_finite() { self.knowledge_dup_threshold.clamp(0.5, 0.99) } else { 0.85 };
         // v0.8.0 had no local models and could save an empty choice
         // bge-m3 is the only local model since v0.12.0 (e5 indexes are redone once it is there);
         // a build with a server uses it until bge-m3 has been downloaded on purpose

@@ -59,6 +59,8 @@ export const DEFAULT_SETTINGS: Settings = {
   font: "looped",
   textSize: "m",
   startHidden: true,
+  knowledgeDupCheck: true,
+  knowledgeDupThreshold: 0.85,
 };
 
 export function AppProvider({ children }: { children: ReactNode }) {

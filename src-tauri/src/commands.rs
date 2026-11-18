@@ -1198,6 +1198,38 @@ pub fn cancel_knowledge_draft() {
     }
 }
 
+/// Let the model write a note (a draft or a merge), streamed: a long non-streamed reply hit
+/// the client's idle timeout and looked frozen. The dialog sees the text grow
+/// ("knowledge-progress") and closing it cancels this.
+async fn stream_note(app: &AppHandle, model: &ModelConfig, key: &str, messages: &[ChatMessage], too_long: &str) -> AppResult<String> {
+    // notes are short: a small output cap and low effort keep a thinking model from running on
+    let effort = (model.reasoning_effort_format == "chat-completions" && model.supports_reasoning_effort.iter().any(|e| e == "low")).then_some("low");
+    let req = llm::Request { url: &model.url, key, model: &model.id, effort, max_tokens: model.max_output_tokens.min(DRAFT_MAX_TOKENS), messages };
+    let token = CancellationToken::new();
+    if let Some(old) = DRAFT_CANCEL.lock().replace(token.clone()) {
+        old.cancel();
+    }
+    let mut last_emit = Instant::now();
+    let mut chars = 0usize;
+    let streamed = tokio::time::timeout(DRAFT_LIMIT, llm::stream(&req, &token, |d| {
+        chars += d.chars().count();
+        if last_emit.elapsed() >= Duration::from_millis(400) {
+            last_emit = Instant::now();
+            let _ = app.emit("knowledge-progress", chars);
+        }
+    }))
+    .await;
+    match streamed {
+        Err(_) => {
+            token.cancel();
+            Err(AppError::new("timeout", too_long))
+        }
+        Ok(Err(e)) => Err(e),
+        Ok(Ok(StreamEnd::Cancelled(_))) => Err(AppError::new("cancelled", "ยกเลิกแล้ว")),
+        Ok(Ok(StreamEnd::Finished(text))) => Ok(text),
+    }
+}
+
 /// Ask the model to write notes (one per problem) from a chat, up to message `upto`.
 /// Nothing is saved: the user checks and edits the drafts first.
 #[tauri::command]
@@ -1222,34 +1254,7 @@ pub async fn draft_knowledge(app: AppHandle, chat_id: String, upto: Option<i64>)
     }
     .ok_or_else(|| AppError::new("no_model", "ไม่มีโมเดลที่เปิดใช้ — ตรวจในหมวดโมเดล"))?;
     let messages = crate::knowledge::draft_prompt(&transcript);
-    // notes are short: a small output cap and low effort keep a thinking model from running on
-    let effort = (model.reasoning_effort_format == "chat-completions" && model.supports_reasoning_effort.iter().any(|e| e == "low")).then_some("low");
-    let req = llm::Request { url: &model.url, key: &key, model: &model.id, effort, max_tokens: model.max_output_tokens.min(DRAFT_MAX_TOKENS), messages: &messages };
-    // streamed: a long non-streamed reply hit the client's idle timeout and looked frozen;
-    // the dialog sees the text grow and can cancel (closing it cancels this)
-    let token = CancellationToken::new();
-    if let Some(old) = DRAFT_CANCEL.lock().replace(token.clone()) {
-        old.cancel();
-    }
-    let mut last_emit = Instant::now();
-    let mut chars = 0usize;
-    let streamed = tokio::time::timeout(DRAFT_LIMIT, llm::stream(&req, &token, |d| {
-        chars += d.chars().count();
-        if last_emit.elapsed() >= Duration::from_millis(400) {
-            last_emit = Instant::now();
-            let _ = app.emit("knowledge-progress", chars);
-        }
-    }))
-    .await;
-    let reply = match streamed {
-        Err(_) => {
-            token.cancel();
-            return Err(AppError::new("timeout", "โมเดลใช้เวลานานเกิน 4 นาที — ลองอีกครั้ง หรือเลือกเฉพาะช่วงแชตที่สั้นลง"));
-        }
-        Ok(Err(e)) => return Err(e),
-        Ok(Ok(StreamEnd::Cancelled(_))) => return Err(AppError::new("cancelled", "ยกเลิกแล้ว")),
-        Ok(Ok(StreamEnd::Finished(text))) => text,
-    };
+    let reply = stream_note(&app, &model, &key, &messages, "โมเดลใช้เวลานานเกิน 4 นาที — ลองอีกครั้ง หรือเลือกเฉพาะช่วงแชตที่สั้นลง").await?;
     let drafts = crate::knowledge::parse_drafts(&reply, &chat.title);
     crate::diag::log(format!("[{}] knowledge draft: {} note(s) from {} chars", svc.code, drafts.len(), transcript.chars().count()));
     if drafts.is_empty() {
@@ -1288,8 +1293,180 @@ pub fn save_knowledge(app: AppHandle, state: S<'_>, service_id: String, chat_id:
     if folders_changed {
         state.watchers.watch(&svc);
     }
+    // the same problem written down before? (in the background; says so with "knowledge-duplicate")
+    crate::background::spawn_duplicate_check(&app, svc.id.clone(), saved.clone());
     state.indexer.start(app, svc.id.clone(), false);
     Ok(saved)
+}
+
+// ------------------------------------------------------------------ duplicate notes
+
+/// A knowledge note's text as a passage vector, the way the index makes them: the server's
+/// model, else the same model on this PC when the server is down. At most 10 seconds.
+async fn embed_note(embedder: Arc<Embedder>, src: Source, text: String) -> AppResult<Vec<f32>> {
+    let job = tauri::async_runtime::spawn_blocking(move || {
+        let texts = [text];
+        match embedder.embed_passages_from(&src, &texts) {
+            Err(e) if crate::embed_server::is_down(&e) => match &src {
+                Source::Server(m) => match ModelId::from_server_model(m).filter(|l| Embedder::status(*l).ready) {
+                    Some(l) => embedder.embed_passages(l, &texts),
+                    None => Err(e),
+                },
+                _ => Err(e),
+            },
+            r => r,
+        }
+    });
+    let vectors = tokio::time::timeout(Duration::from_secs(10), job)
+        .await
+        .map_err(|_| AppError::new("timeout", "ทำ embedding ของบันทึกนานเกินไป"))?
+        .map_err(|e| AppError::new("embedding", format!("ทำ embedding ไม่สำเร็จ: {e}")))??;
+    vectors.into_iter().next().ok_or_else(|| AppError::new("embedding", "ไม่ได้ vector ของบันทึก"))
+}
+
+/// Notes of the service like the one at `path` (over `threshold`, pairs kept apart left out).
+/// Logs counts and the best similarity only — never a title, path or text.
+pub(crate) async fn find_duplicates(app: &AppHandle, service_id: &str, path: &str, threshold: f32) -> AppResult<Option<crate::knowledge::DuplicateFound>> {
+    use crate::knowledge::{pick_similar, title_of_path, SimilarNote, MAX_SIMILAR};
+    let state = app.state::<AppState>();
+    let svc = state.services.lock().get(service_id)?;
+    let opts = {
+        let s = state.settings.lock();
+        crate::ingest::chunker::ChunkOptions { size: s.chunk_size, overlap: s.chunk_overlap }
+    };
+    let p = PathBuf::from(path);
+    let extracted = tauri::async_runtime::spawn_blocking(move || crate::ingest::extract_chunks(&p, opts))
+        .await
+        .map_err(|e| AppError::new("io", format!("อ่านบันทึกไม่ได้: {e}")))??;
+    let Some(head) = extracted.chunks.into_iter().next().map(|(_, t)| t).filter(|t| !t.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let (found, compared): (Vec<SimilarNote>, Option<usize>) = if svc.shared {
+        // every member's notes are on the server: compare there, passage against passage
+        let got = crate::team::similar_notes(&svc.id, &head, path, threshold).await?;
+        let notes = got.into_iter().map(|(p, similarity, id)| SimilarNote { title: title_of_path(&p), path: p, similarity, document_id: Some(id) }).collect();
+        (notes, None)
+    } else {
+        let v = embed_note(state.embedder.clone(), state.embedding_source()?, head).await?;
+        let heads = state.stores.get(&svc.id)?.lock().knowledge_heads()?;
+        let notes = pick_similar(&heads, &v, path, threshold, MAX_SIMILAR)
+            .into_iter()
+            .map(|(p, similarity)| SimilarNote { title: title_of_path(&p), path: p, similarity, document_id: None })
+            .collect();
+        (notes, Some(heads.len()))
+    };
+    let kept = crate::knowledge::KeptApart::load();
+    let found: Vec<SimilarNote> = found.into_iter().filter(|n| !kept.contains(path, &n.path)).collect();
+    let best = found.first().map(|n| n.similarity).unwrap_or(0.0);
+    match compared {
+        Some(n) => crate::diag::log(format!("[{}] knowledge check: {} similar of {} note(s), best {best:.2}", svc.code, found.len(), n)),
+        None => crate::diag::log(format!("[{}] knowledge check (server): {} similar, best {best:.2}", svc.code, found.len())),
+    }
+    if found.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(crate::knowledge::DuplicateFound { service_id: svc.id, path: path.to_string(), title: title_of_path(path), similar: found }))
+}
+
+/// A note this PC may read for the service: a `*.knowledge.md` inside the service's folders,
+/// else (shared services) the copy on the server.
+async fn note_of(svc: &Service, path: &str) -> AppResult<String> {
+    if !crate::ingest::is_knowledge(path) || path.contains("..") {
+        return Err(AppError::new("invalid", "เปิดได้เฉพาะไฟล์บันทึกความรู้"));
+    }
+    let lower = path.to_lowercase();
+    let inside = svc.folders.iter().chain(std::iter::once(&svc.knowledge_dir)).filter(|f| !f.is_empty()).any(|f| lower.starts_with(&f.to_lowercase()));
+    let p = Path::new(path);
+    if inside && p.is_file() {
+        return Ok(std::fs::read_to_string(p)?);
+    }
+    if svc.shared {
+        return crate::team::note_text(&svc.id, path).await;
+    }
+    Err(AppError::new("not_found", "ไม่พบไฟล์บันทึกนี้ (อาจถูกย้ายหรือซ่อนไปแล้ว)"))
+}
+
+#[tauri::command]
+pub async fn read_note(app: AppHandle, service_id: String, path: String) -> AppResult<String> {
+    let svc = app.state::<AppState>().services.lock().get(&service_id)?;
+    note_of(&svc, &path).await
+}
+
+/// One note from two of the same problem: every fix kept, each marked ได้ผล / ยังไม่ยืนยัน /
+/// ไม่ได้ผล. Nothing is saved: the user checks and edits it first.
+#[tauri::command]
+pub async fn merge_notes(app: AppHandle, service_id: String, a: String, b: String) -> AppResult<crate::knowledge::Draft> {
+    let state = app.state::<AppState>();
+    let key = secrets::require_key()?;
+    let svc = state.services.lock().get(&service_id)?;
+    let (ta, tb) = (note_of(&svc, &a).await?, note_of(&svc, &b).await?);
+    let model = {
+        let models = state.models.lock();
+        models.iter().find(|m| m.enabled && m.id == svc.model).or_else(|| models.iter().find(|m| m.enabled)).cloned()
+    }
+    .ok_or_else(|| AppError::new("no_model", "ไม่มีโมเดลที่เปิดใช้ — ตรวจในหมวดโมเดล"))?;
+    let messages = crate::knowledge::merge_prompt(&ta, &tb);
+    let reply = stream_note(&app, &model, &key, &messages, "โมเดลใช้เวลานานเกิน 4 นาที — ลองอีกครั้ง").await?;
+    let merged = crate::knowledge::parse_merge(&reply, &crate::knowledge::title_of_path(&a));
+    crate::diag::log(format!("[{}] knowledge merge: {}", svc.code, if merged.is_some() { "drafted" } else { "empty reply" }));
+    merged.ok_or_else(|| AppError::new("empty", "โมเดลไม่ได้ส่งบันทึกกลับมา — ลองอีกครั้ง"))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteToHide {
+    pub path: String,
+    pub document_id: Option<i64>,
+}
+
+/// Save the merged note, then hide the old ones (moved aside on this PC, hidden on the
+/// server) — never deleted. For a shared service the server is told first, so a failure
+/// there leaves everything as it was.
+#[tauri::command]
+pub async fn save_merged_note(app: AppHandle, service_id: String, date: String, note: NewNote, hide: Vec<NoteToHide>) -> AppResult<String> {
+    let state = app.state::<AppState>();
+    let svc = state.services.lock().get(&service_id)?;
+    for h in &hide {
+        if !crate::ingest::is_knowledge(&h.path) || h.path.contains("..") {
+            return Err(AppError::new("invalid", "ซ่อนได้เฉพาะไฟล์บันทึกความรู้"));
+        }
+    }
+    if svc.shared {
+        for h in &hide {
+            let id = match h.document_id {
+                Some(id) => Some(id),
+                None => crate::team::document_id(&svc.id, &h.path).await?,
+            };
+            if let Some(id) = id {
+                crate::team::set_hidden(&svc.id, id, true).await?;
+            }
+        }
+    }
+    let (svc, folders_changed) = state.services.lock().ensure_knowledge_dir(&service_id)?;
+    let saved = crate::knowledge::write_note(Path::new(&svc.knowledge_dir), &note.title, &note.status, &date, "", &note.markdown)?;
+    let lower: Vec<String> = svc.folders.iter().chain(std::iter::once(&svc.knowledge_dir)).filter(|f| !f.is_empty()).map(|f| f.to_lowercase()).collect();
+    let mut moved = 0;
+    for h in &hide {
+        let p = Path::new(&h.path);
+        if p.is_file() && lower.iter().any(|f| h.path.to_lowercase().starts_with(f)) {
+            crate::knowledge::hide_note(p)?;
+            moved += 1;
+        }
+    }
+    crate::diag::log(format!("[{}] knowledge merge: saved 1 note, {} hidden ({} on this PC)", svc.code, hide.len(), moved));
+    if folders_changed {
+        state.watchers.watch(&svc);
+    }
+    state.indexer.start(app.clone(), svc.id.clone(), false);
+    Ok(saved.to_string_lossy().into_owned())
+}
+
+/// "เก็บทั้งคู่": these two notes are different problems — do not offer them again.
+#[tauri::command]
+pub fn keep_notes_apart(a: String, b: String) -> AppResult<()> {
+    let mut k = crate::knowledge::KeptApart::load();
+    k.insert(&a, &b);
+    k.save()
 }
 
 /// Open the knowledge folder in Explorer (created if needed).
