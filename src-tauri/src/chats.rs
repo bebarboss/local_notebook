@@ -157,6 +157,36 @@ impl ChatDb {
         if !has {
             conn.execute_batch("ALTER TABLE chats ADD COLUMN mode TEXT NOT NULL DEFAULT 'docs';")?;
         }
+        // v0.19: older DBs declared service_id as NOT NULL; general (floating) chats need it
+        // nullable. SQLite can't drop a column constraint in place, so rebuild the table once.
+        let service_notnull: i64 = conn.query_row(
+            r#"SELECT "notnull" FROM pragma_table_info('chats') WHERE name='service_id'"#,
+            [],
+            |r| r.get(0),
+        )?;
+        if service_notnull == 1 {
+            conn.execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 BEGIN;
+                 CREATE TABLE chats_new (
+                   id TEXT PRIMARY KEY,
+                   service_id TEXT,
+                   title TEXT NOT NULL,
+                   created_at INTEGER NOT NULL,
+                   updated_at INTEGER NOT NULL,
+                   mode TEXT NOT NULL DEFAULT 'docs',
+                   summary TEXT,
+                   summary_upto INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO chats_new (id,service_id,title,created_at,updated_at,mode,summary,summary_upto)
+                   SELECT id,service_id,title,created_at,updated_at,mode,summary,summary_upto FROM chats;
+                 DROP TABLE chats;
+                 ALTER TABLE chats_new RENAME TO chats;
+                 CREATE INDEX IF NOT EXISTS chats_service ON chats(service_id, updated_at DESC);
+                 COMMIT;
+                 PRAGMA foreign_keys=ON;",
+            )?;
+        }
         Ok(Self { conn })
     }
 
@@ -445,5 +475,31 @@ mod tests {
         assert_eq!(hr.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec![d.id.as_str()]);
         // reload keeps the mode
         assert_eq!(db.get_chat(&g.id).unwrap().mode, "chat");
+    }
+
+    #[test]
+    fn legacy_not_null_service_id_is_relaxed_for_general_chats() {
+        // a pre-v0.19 DB declared service_id NOT NULL; general chats need it nullable
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chats (id TEXT PRIMARY KEY, service_id TEXT NOT NULL, title TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+             CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT NOT NULL,
+               model TEXT, reasoning_effort TEXT, sources TEXT NOT NULL DEFAULT '[]', elapsed_ms INTEGER, error TEXT, created_at INTEGER NOT NULL);
+             INSERT INTO chats VALUES('old','hr','เดิม',0,0);
+             INSERT INTO messages(chat_id,role,content,created_at) VALUES('old','assistant','คำตอบเก่า',0);",
+        )
+        .unwrap();
+        let db = ChatDb::init(conn).unwrap();
+        // the migration must drop NOT NULL so a floating chat can be created
+        let g = db.create_chat(None, "chat", "สรุปให้หน่อย").unwrap();
+        assert_eq!(g.service_id, None);
+        assert_eq!(g.mode, "chat");
+        // the old docs chat and its message survive the table rebuild
+        assert_eq!(db.get_chat("old").unwrap().service_id.as_deref(), Some("hr"));
+        assert_eq!(db.get_chat("old").unwrap().mode, "docs");
+        assert_eq!(db.messages("old").unwrap()[0].content, "คำตอบเก่า");
+        // and the two kinds still don't mix
+        assert_eq!(db.list_chats(None, "").unwrap().len(), 1);
+        assert_eq!(db.list_chats(Some("hr"), "").unwrap().len(), 1);
     }
 }
