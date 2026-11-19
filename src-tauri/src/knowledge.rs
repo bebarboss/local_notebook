@@ -235,6 +235,40 @@ pub fn prefer_notes(note: &[bool], strong: &[bool]) -> Vec<usize> {
     lead.iter().copied().chain((0..note.len()).filter(|i| !lead.contains(i))).collect()
 }
 
+/// What to do with each hit when a knowledge note is sent whole instead of as one matched chunk.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NoteAction {
+    /// the first hit of a note: replace its text with the whole note (the saved SQL/fix may sit
+    /// further down the note than the line the question matched)
+    Expand,
+    /// a later chunk of a note already expanded: drop it, the whole note already covers it
+    Drop,
+    /// not a knowledge note: leave it unchanged
+    Leave,
+}
+
+/// Per hit: `paths[i]` is the note's path when hit i is a knowledge note, else `None`.
+/// The first hit of each note expands to the whole note; later chunks of the same note drop.
+/// Paths compare case-insensitively (the same note reached by two casings counts once).
+pub fn note_actions(paths: &[Option<&str>]) -> Vec<NoteAction> {
+    let mut seen: Vec<String> = Vec::new();
+    paths
+        .iter()
+        .map(|p| match p {
+            None => NoteAction::Leave,
+            Some(path) => {
+                let key = path.to_lowercase();
+                if seen.contains(&key) {
+                    NoteAction::Drop
+                } else {
+                    seen.push(key);
+                    NoteAction::Expand
+                }
+            }
+        })
+        .collect()
+}
+
 // ------------------------------------------------------------------ duplicate notes
 //
 // After a note is saved, its first chunk (title + problem + cause, as the indexer cuts it) is
@@ -411,7 +445,7 @@ mod tests {
         Message {
             id, chat_id: "c".into(), role: role.into(), content: content.into(), model: None, reasoning_effort: None,
             sources: vec![], elapsed_ms: None, error: None, created_at: 0,
-            search_query: None,
+            search_query: None, steps: vec![],
         }
     }
 
@@ -452,6 +486,16 @@ mod tests {
         let d = parse_drafts("```markdown\n## ปัญหา / อาการ\nช้า\n```", "ระบบช้า");
         assert_eq!(d, vec![Draft { title: "ระบบช้า".into(), markdown: "## ปัญหา / อาการ\nช้า".into() }]);
         assert!(parse_drafts("  ", "x").is_empty());
+    }
+
+    #[test]
+    fn note_actions_expand_first_drop_repeats() {
+        use NoteAction::*;
+        let a = "C:\\K\\a.knowledge.md";
+        let b = "C:\\K\\b.knowledge.md";
+        // same note reached by two casings counts once; documents are left alone
+        let paths = [None, Some(a), Some("c:\\k\\A.knowledge.md"), Some(b), None];
+        assert_eq!(note_actions(&paths), vec![Leave, Expand, Drop, Expand, Leave]);
     }
 
     #[test]

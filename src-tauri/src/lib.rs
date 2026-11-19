@@ -1,5 +1,6 @@
 //! DocAsk — local RAG over company documents through the Gosoft Agent Gateway.
 
+pub mod agent;
 pub mod background;
 pub mod chats;
 pub mod commands;

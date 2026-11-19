@@ -61,6 +61,7 @@ export const DEFAULT_SETTINGS: Settings = {
   startHidden: true,
   knowledgeDupCheck: true,
   knowledgeDupThreshold: 0.85,
+  agentic: true,
 };
 
 export function AppProvider({ children }: { children: ReactNode }) {

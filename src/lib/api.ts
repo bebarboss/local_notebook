@@ -16,6 +16,7 @@ import type {
   ChatDelta,
   ChatDone,
   ChatSources,
+  ChatStep,
   DocItem,
   DownloadProgress,
   EmbeddingModelId,
@@ -51,6 +52,8 @@ import { createMockBackend } from "./mock";
 export interface EventMap {
   "chat-delta": ChatDelta;
   "chat-sources": ChatSources;
+  /** one activity line from the agentic gather step, emitted live each round */
+  "chat-step": ChatStep;
   "chat-done": ChatDone;
   "chat-error": { requestId: string; chatId: string; error: AppError };
   "index-progress": IndexProgress;

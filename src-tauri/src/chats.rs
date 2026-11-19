@@ -56,6 +56,9 @@ pub struct Message {
     /// the standalone query a follow-up question was searched with
     #[serde(skip_serializing_if = "Option::is_none")]
     pub search_query: Option<String>,
+    /// the agentic gather step's activity (what it searched / read); empty when it didn't run
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<crate::agent::Step>,
 }
 
 pub struct NewMessage<'a> {
@@ -68,6 +71,7 @@ pub struct NewMessage<'a> {
     pub elapsed_ms: Option<i64>,
     pub error: Option<&'a str>,
     pub search_query: Option<&'a str>,
+    pub steps: &'a [crate::agent::Step],
 }
 
 /// (answer message id, question, answer)
@@ -138,6 +142,11 @@ impl ChatDb {
         let has: bool = conn.prepare("SELECT 1 FROM pragma_table_info('chats') WHERE name='summary'")?.exists([])?;
         if !has {
             conn.execute_batch("ALTER TABLE chats ADD COLUMN summary TEXT; ALTER TABLE chats ADD COLUMN summary_upto INTEGER NOT NULL DEFAULT 0;")?;
+        }
+        // v0.19: the agentic gather step's activity list (agent.rs), stored as JSON
+        let has: bool = conn.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name='steps'")?.exists([])?;
+        if !has {
+            conn.execute_batch("ALTER TABLE messages ADD COLUMN steps TEXT;")?;
         }
         Ok(Self { conn })
     }
@@ -221,10 +230,11 @@ impl ChatDb {
     pub fn add_message(&self, m: NewMessage<'_>) -> AppResult<Message> {
         let now = now_ms();
         let sources = serde_json::to_string(m.sources)?;
+        let steps = if m.steps.is_empty() { None } else { Some(serde_json::to_string(m.steps)?) };
         self.conn.execute(
-            "INSERT INTO messages(chat_id,role,content,model,reasoning_effort,sources,elapsed_ms,error,created_at,search_query)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            params![m.chat_id, m.role, m.content, m.model, m.reasoning_effort, sources, m.elapsed_ms, m.error, now, m.search_query],
+            "INSERT INTO messages(chat_id,role,content,model,reasoning_effort,sources,elapsed_ms,error,created_at,search_query,steps)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![m.chat_id, m.role, m.content, m.model, m.reasoning_effort, sources, m.elapsed_ms, m.error, now, m.search_query, steps],
         )?;
         let id = self.conn.last_insert_rowid();
         self.touch(m.chat_id)?;
@@ -240,16 +250,18 @@ impl ChatDb {
             error: m.error.map(Into::into),
             created_at: now,
             search_query: m.search_query.map(Into::into),
+            steps: m.steps.to_vec(),
         })
     }
 
     pub fn messages(&self, chat_id: &str) -> AppResult<Vec<Message>> {
         let mut st = self.conn.prepare(
-            "SELECT id,chat_id,role,content,model,reasoning_effort,sources,elapsed_ms,error,created_at,search_query
+            "SELECT id,chat_id,role,content,model,reasoning_effort,sources,elapsed_ms,error,created_at,search_query,steps
              FROM messages WHERE chat_id=?1 ORDER BY id",
         )?;
         let rows = st.query_map([chat_id], |r| {
             let src: String = r.get(6)?;
+            let steps: Option<String> = r.get(11)?;
             Ok(Message {
                 id: r.get(0)?,
                 chat_id: r.get(1)?,
@@ -262,6 +274,7 @@ impl ChatDb {
                 error: r.get(8)?,
                 created_at: r.get(9)?,
                 search_query: r.get(10)?,
+                steps: steps.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -339,7 +352,7 @@ mod tests {
     use super::*;
 
     fn msg<'a>(chat: &'a str, role: &'a str, content: &'a str, error: Option<&'a str>) -> NewMessage<'a> {
-        NewMessage { chat_id: chat, role, content, model: None, reasoning_effort: None, sources: &[], elapsed_ms: None, error, search_query: None }
+        NewMessage { chat_id: chat, role, content, model: None, reasoning_effort: None, sources: &[], elapsed_ms: None, error, search_query: None, steps: &[] }
     }
 
     #[test]

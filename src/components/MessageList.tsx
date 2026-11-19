@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { BookMarked, Copy, Check, RotateCcw, Search } from "lucide-react";
-import type { Message, Source } from "../lib/types";
+import { BookMarked, BookOpen, Copy, Check, CircleAlert, RotateCcw, Search } from "lucide-react";
+import type { AgentStep, Message, Source } from "../lib/types";
 import { th } from "../i18n/th";
 import { initials, useApp } from "../state";
 import { Markdown } from "./Markdown";
@@ -12,6 +12,8 @@ export interface StreamingState {
   error: string | null;
   /** a follow-up question was searched with this */
   searchQuery?: string;
+  /** the agentic gather step's activity, appended live each round */
+  steps?: AgentStep[];
 }
 
 /** "ค้นด้วย: …" — how a follow-up question was understood for the search */
@@ -21,6 +23,44 @@ function SearchedAs({ query }: { query?: string }) {
     <div className="searched-as" title="คำถามต่อเนื่อง: แอปเขียนคำถามใหม่ให้ครบความหมายจากบทสนทนาก่อนค้นเอกสาร">
       <Search size={12} strokeWidth={2} aria-hidden="true" />
       <span>ค้นด้วย: {query}</span>
+    </div>
+  );
+}
+
+function stepText(s: AgentStep): string {
+  switch (s.kind) {
+    case "search":
+      return `ค้นเพิ่ม: ${s.detail}${s.found ? ` — เจอ ${s.found} ท่อน` : " — ไม่พบท่อนใหม่"}`;
+    case "read":
+      return `อ่านรอบแหล่ง ${s.detail}`;
+    case "done":
+      return "ข้อมูลพอแล้ว";
+    case "error":
+      return "ค้นเพิ่มไม่สำเร็จ ใช้ข้อมูลที่มี";
+    default:
+      return s.detail;
+  }
+}
+
+function stepIcon(kind: string) {
+  const p = { size: 12, strokeWidth: 2, "aria-hidden": true } as const;
+  if (kind === "read") return <BookOpen {...p} />;
+  if (kind === "done") return <Check {...p} />;
+  if (kind === "error") return <CircleAlert {...p} />;
+  return <Search {...p} />;
+}
+
+/** "กำลังทำอะไร" — the agentic gather step's live activity, like Claude's tool steps */
+function AgentSteps({ steps }: { steps?: AgentStep[] }) {
+  if (!steps || steps.length === 0) return null;
+  return (
+    <div className="agent-steps" aria-label="ขั้นตอนการค้นเพิ่มของ AI">
+      {steps.map((s, i) => (
+        <div key={i} className="agent-step">
+          {stepIcon(s.kind)}
+          <span>{stepText(s)}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -55,6 +95,7 @@ export function MessageList({
       {streaming && (
         <div className="ai-msg" aria-busy={!streaming.error}>
           <SearchedAs query={streaming.searchQuery} />
+          <AgentSteps steps={streaming.steps} />
           {streaming.content ? (
             <Markdown text={streaming.content} sources={streaming.sources} trailing={<span className="caret" aria-hidden="true" />} />
           ) : !streaming.error ? (
@@ -103,6 +144,7 @@ function AiMsg({ msg, onRetry, retryDisabled, onSaveKnowledge }: { msg: Message;
     >
       {menu && <ContextMenu at={menu} onClose={() => setMenu(null)} onCopy={copy} onSaveKnowledge={onSaveKnowledge!} />}
       <SearchedAs query={msg.searchQuery} />
+      <AgentSteps steps={msg.steps} />
       {msg.content && <Markdown text={msg.content} sources={msg.sources} />}
       {msg.error && <ErrorState message={msg.error} />}
       <div className="ai-meta">

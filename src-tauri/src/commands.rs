@@ -669,6 +669,10 @@ struct Done {
 struct Failed {
     error: AppError,
 }
+#[derive(Serialize, Clone)]
+struct StepEvent {
+    step: crate::agent::Step,
+}
 
 #[tauri::command]
 pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<AskStarted> {
@@ -706,7 +710,7 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
         let previous = db.last_answer(&chat.id)?;
         let um = db.add_message(NewMessage {
             chat_id: &chat.id, role: "user", content: &question, model: None, reasoning_effort: None,
-            sources: &[], elapsed_ms: None, error: None, search_query: None,
+            sources: &[], elapsed_ms: None, error: None, search_query: None, steps: &[],
         })?;
         (chat, history, summary, previous, um)
     };
@@ -719,7 +723,7 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
     let token = CancellationToken::new();
     state.streams.lock().insert(request_id.clone(), token.clone());
 
-    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, model, effort: req.effort, all: req.all_services, question, history, summary, turns, previous, search_query: None, key, token };
+    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, model, effort: req.effort, all: req.all_services, question, history, summary, turns, previous, search_query: None, steps: Vec::new(), key, token };
     tauri::async_runtime::spawn(job.run());
 
     Ok(AskStarted { request_id, chat_id: chat.id, user_message })
@@ -748,6 +752,8 @@ struct AskJob {
     /// the last good answer and its sources, for follow-up questions
     previous: Option<(String, Vec<SourceRef>)>,
     search_query: Option<String>,
+    /// the agentic gather step's activity, saved with the answer
+    steps: Vec<crate::agent::Step>,
     key: String,
     token: CancellationToken,
 }
@@ -772,6 +778,7 @@ impl AskJob {
             elapsed_ms: Some(elapsed),
             error,
             search_query: self.search_query.as_deref(),
+            steps: &self.steps,
         });
         saved.unwrap_or_else(|e| Message {
             id: -now_ms(),
@@ -785,6 +792,7 @@ impl AskJob {
             error: Some(error.map(str::to_string).unwrap_or_else(|| format!("บันทึกประวัติไม่สำเร็จ: {}", e.message))),
             created_at: now_ms(),
             search_query: self.search_query.clone(),
+            steps: self.steps.clone(),
         })
     }
 
@@ -835,7 +843,7 @@ impl AskJob {
             }
         }
 
-        let sources = match retrieve(&self.app, &self.svc, self.all, &queries, &carried).await {
+        let mut sources = match retrieve(&self.app, &self.svc, self.all, &queries, &carried).await {
             Ok(s) => s,
             Err(e) => {
                 self.fail(e, &[], elapsed());
@@ -843,6 +851,36 @@ impl AskJob {
                 return;
             }
         };
+
+        // agentic gather: when the first passages fall short (a table name behind a field code,
+        // a schema in another document), let the model search again a few bounded rounds. Only
+        // for a tool-calling model, a single service, and when the setting is on.
+        let agentic = self.model.tool_calling && !self.all && self.app.state::<AppState>().settings.lock().agentic;
+        if agentic && !self.token.is_cancelled() {
+            // inner scope so `backend` (which borrows &self) is dropped before we touch self.steps
+            let (gathered, collected) = {
+                let backend = AgentBackend {
+                    app: &self.app, svc: &self.svc, model: &self.model, key: self.key.as_str(),
+                    effort: None, tools_max: self.model.max_output_tokens.min(2000),
+                };
+                let (rid, cid, app2) = (self.request_id.clone(), self.chat_id.clone(), self.app.clone());
+                let mut collected: Vec<crate::agent::Step> = Vec::new();
+                let gathered = crate::agent::gather(&backend, &self.question, &sources, &self.token, |step| {
+                    let _ = app2.emit("chat-step", ChatEvent { request_id: rid.clone(), chat_id: cid.clone(), data: StepEvent { step: step.clone() } });
+                    collected.push(step);
+                })
+                .await;
+                (gathered, collected)
+            };
+            self.steps = collected;
+            if !gathered.added.is_empty() {
+                sources.extend(gathered.added);
+                for (i, s) in sources.iter_mut().enumerate() {
+                    s.n = i + 1;
+                }
+            }
+        }
+
         self.emit("chat-sources", Sources { sources: sources.clone(), search_query: self.search_query.clone() });
 
         let messages = build_prompt(&self.svc, &sources, &self.history, self.summary.as_deref(), &self.question, self.all);
@@ -907,6 +945,19 @@ impl AskJob {
 /// Embed the question locally and search the service's index (or all services).
 fn has_local_index(state: &AppState, targets: &[Service]) -> bool {
     targets.iter().any(|s| state.stores.get(&s.id).ok().and_then(|st| st.lock().stats().ok()).is_some_and(|(_, chunks, ..)| chunks > 0))
+}
+
+/// A whole knowledge note is trimmed to this many characters before it goes to the model.
+const WHOLE_NOTE_CAP: usize = 8000;
+
+/// A note's text for the prompt, trimmed on a char boundary so a huge note can't flood context.
+fn cap_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push_str("\n…(ตัดเนื้อโน้ตบางส่วน)");
+    out
 }
 
 /// `queries[0]` is the main query (reranks and labels); later ones only add candidates.
@@ -1043,9 +1094,41 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, queries: &[String],
     hits.truncate(k);
     rr.truncate(k);
 
+    let mut merged: std::collections::HashSet<(String, String, i64)> = std::collections::HashSet::new();
+
+    // a knowledge note is sent whole, not just the chunk the question matched: a saved SQL
+    // query or fix usually sits further down the note than the "problem" line that matched.
+    // Notes are short and prefer_notes keeps at most two, so this stays small. Later chunks of
+    // the same note drop out (the retain below); a note the model can't read keeps its chunk.
+    {
+        let actions = {
+            let note_paths: Vec<Option<&str>> = hits
+                .iter()
+                .map(|(_, h)| crate::ingest::is_knowledge(&h.doc_path).then_some(h.doc_path.as_str()))
+                .collect();
+            crate::knowledge::note_actions(&note_paths)
+        };
+        for (i, action) in actions.into_iter().enumerate() {
+            match action {
+                crate::knowledge::NoteAction::Expand => {
+                    let (s, path) = { let (s, h) = &hits[i]; (s.clone(), h.doc_path.clone()) };
+                    match note_of(&s, &path).await {
+                        Ok(t) => hits[i].1.text = cap_chars(&t, WHOLE_NOTE_CAP),
+                        // can't read it (moved/hidden/server down): keep the matched chunk, never fail
+                        Err(e) => log::warn!("whole-note skipped: {}", e.code),
+                    }
+                }
+                crate::knowledge::NoteAction::Drop => {
+                    let (s, h) = &hits[i];
+                    merged.insert((s.id.clone(), h.doc_path.clone(), h.ord));
+                }
+                crate::knowledge::NoteAction::Leave => {}
+            }
+        }
+    }
+
     // the best hits get the chunk before and after them (a SQL statement or a procedure cut
     // across two chunks reaches the model whole); a neighbour that is itself a hit is merged
-    let mut merged: std::collections::HashSet<(String, String, i64)> = std::collections::HashSet::new();
     for i in 0..hits.len().min(crate::context::NEIGHBOUR_TOP) {
         let (s, h) = &hits[i];
         if crate::ingest::is_knowledge(&h.doc_path) || merged.contains(&(s.id.clone(), h.doc_path.clone(), h.ord)) {
@@ -1098,6 +1181,40 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, queries: &[String],
             text: h.text,
         })
         .collect())
+}
+
+/// Wires the agentic gather step (agent.rs) to the Gateway and this PC's retrieval.
+struct AgentBackend<'a> {
+    app: &'a AppHandle,
+    svc: &'a Service,
+    model: &'a ModelConfig,
+    key: &'a str,
+    effort: Option<&'a str>,
+    tools_max: u64,
+}
+
+impl crate::agent::Backend for AgentBackend<'_> {
+    async fn complete(&self, messages: &serde_json::Value, tools: &serde_json::Value) -> AppResult<llm::Reply> {
+        llm::complete_tools(&self.model.url, self.key, &self.model.id, self.effort, self.tools_max, messages, tools, crate::agent::PER_CALL).await
+    }
+    async fn search(&self, queries: &[String]) -> Vec<SourceRef> {
+        // the same service only (never "all services"); whole-note expansion applies here too
+        retrieve(self.app, self.svc, false, queries, &[]).await.unwrap_or_default()
+    }
+    async fn read_around(&self, src: &SourceRef) -> Option<String> {
+        let state = self.app.state::<AppState>();
+        let ords = [src.ord - 1, src.ord + 1];
+        let mut got = state.stores.get(&src.service_id).ok().and_then(|st| st.lock().chunk_texts_at(&src.doc_path, &ords).ok()).unwrap_or_default();
+        if got.is_empty() && self.svc.shared {
+            got = crate::team::neighbours(&src.service_id, &src.doc_path, &ords).await.unwrap_or_default();
+        }
+        let before = got.iter().find(|(o, _)| *o == src.ord - 1).map(|(_, t)| t.as_str());
+        let after = got.iter().find(|(o, _)| *o == src.ord + 1).map(|(_, t)| t.as_str());
+        if before.is_none() && after.is_none() {
+            return None;
+        }
+        Some(crate::context::widen(before, &src.text, after))
+    }
 }
 
 pub fn build_prompt(svc: &Service, sources: &[SourceRef], history: &[(String, String)], summary: Option<&str>, question: &str, all: bool) -> Vec<ChatMessage> {

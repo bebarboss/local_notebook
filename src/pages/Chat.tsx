@@ -74,6 +74,7 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
   useEffect(() => {
     const offs = [
       api.on("chat-sources", (p) => setStream((s) => (s && s.requestId === p.requestId ? { ...s, sources: p.sources, searchQuery: p.searchQuery } : s))),
+      api.on("chat-step", (p) => setStream((s) => (s && s.requestId === p.requestId ? { ...s, steps: [...(s.steps ?? []), p.step] } : s))),
       api.on("chat-delta", (p) => setStream((s) => (s && s.requestId === p.requestId ? { ...s, content: s.content + p.delta } : s))),
       api.on("chat-done", (p) => {
         if (streamRef.current?.requestId !== p.requestId) return;

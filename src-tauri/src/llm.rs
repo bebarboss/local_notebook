@@ -91,6 +91,83 @@ pub async fn complete_within(req: &Request<'_>, limit: Duration) -> AppResult<St
     Ok(v.pointer("/choices/0/message/content").and_then(|c| c.as_str()).unwrap_or_default().to_string())
 }
 
+/// One function the model asked to call during a tool-calling round.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    /// the arguments as the model wrote them (a JSON string; may be malformed)
+    pub arguments: String,
+}
+
+/// A tool-calling round's result: any text the model wrote and the tools it wants run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reply {
+    pub content: String,
+    pub tool_calls: Vec<ToolCall>,
+}
+
+#[derive(Serialize)]
+struct ToolBody<'a> {
+    model: &'a str,
+    messages: &'a serde_json::Value,
+    stream: bool,
+    max_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
+    tools: &'a serde_json::Value,
+    tool_choice: &'a str,
+}
+
+/// One non-streaming tool-calling round: send the conversation so far plus the tool schemas,
+/// read back the model's text and any tool calls. The Bearer key is attached here only.
+/// `messages` is a raw JSON array so a round can carry assistant `tool_calls` and `tool` results.
+#[allow(clippy::too_many_arguments)]
+pub async fn complete_tools(
+    url: &str,
+    key: &str,
+    model: &str,
+    effort: Option<&str>,
+    max_tokens: u64,
+    messages: &serde_json::Value,
+    tools: &serde_json::Value,
+    limit: Duration,
+) -> AppResult<Reply> {
+    let body = ToolBody { model, messages, stream: false, max_tokens, reasoning_effort: effort, tools, tool_choice: "auto" };
+    let resp = CLIENT.post(url).bearer_auth(key).json(&body).timeout(limit).send().await.map_err(AppError::from)?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        let mut e = AppError::from_status(status.as_u16(), &text);
+        e.message = redact_secret(&e.message, Some(key));
+        return Err(e);
+    }
+    let v: serde_json::Value = resp.json().await.map_err(AppError::from)?;
+    Ok(parse_tool_reply(&v))
+}
+
+/// Pull the text and tool calls out of a chat-completions response.
+pub fn parse_tool_reply(v: &serde_json::Value) -> Reply {
+    let content = v.pointer("/choices/0/message/content").and_then(|c| c.as_str()).unwrap_or_default().to_string();
+    let tool_calls = v
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|tc| {
+                    let f = tc.get("function")?;
+                    Some(ToolCall {
+                        id: tc.get("id").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+                        name: f.get("name").and_then(|x| x.as_str())?.to_string(),
+                        arguments: f.get("arguments").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Reply { content, tool_calls }
+}
+
 pub enum StreamEnd {
     Finished(String),
     Cancelled(String),
@@ -198,5 +275,27 @@ mod tests {
         assert_eq!(parse_sse_line(": keep-alive"), SseLine::Skip);
         assert_eq!(parse_sse_line(r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#), SseLine::Skip);
         assert!(matches!(parse_sse_line(r#"data: {"error":{"message":"quota"}}"#), SseLine::Error(_)));
+    }
+
+    #[test]
+    fn reads_tool_calls_and_plain_replies() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"choices":[{"message":{"content":null,"tool_calls":[
+                {"id":"c1","type":"function","function":{"name":"search_documents","arguments":"{\"queries\":[\"PS_X\"]}"}},
+                {"id":"c2","type":"function","function":{"name":"read_around","arguments":"{\"source\":2}"}}
+            ]}}]}"#,
+        )
+        .unwrap();
+        let r = parse_tool_reply(&v);
+        assert_eq!(r.content, "");
+        assert_eq!(r.tool_calls.len(), 2);
+        assert_eq!(r.tool_calls[0].name, "search_documents");
+        assert_eq!(r.tool_calls[0].arguments, r#"{"queries":["PS_X"]}"#);
+        assert_eq!(r.tool_calls[1].id, "c2");
+        // no tool_calls → just content, empty list
+        let v2: serde_json::Value = serde_json::from_str(r#"{"choices":[{"message":{"content":"พอแล้ว"}}]}"#).unwrap();
+        let r2 = parse_tool_reply(&v2);
+        assert_eq!(r2.content, "พอแล้ว");
+        assert!(r2.tool_calls.is_empty());
     }
 }

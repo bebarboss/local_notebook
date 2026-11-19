@@ -138,6 +138,8 @@ export interface Message {
   createdAt: number;
   /** a follow-up question was searched with this standalone query */
   searchQuery?: string;
+  /** the agentic gather step's activity (empty/absent when it didn't run) */
+  steps?: AgentStep[];
 }
 
 export interface Chat {
@@ -228,6 +230,8 @@ export interface Settings {
   knowledgeDupCheck: boolean;
   /** how alike (0.5–0.99) counts as the same problem */
   knowledgeDupThreshold: number;
+  /** let the model search again when the first passages fall short (skipped for non-tool models) */
+  agentic: boolean;
 }
 
 
@@ -391,6 +395,22 @@ export interface ChatDone {
   requestId: string;
   chatId: string;
   message: Message;
+}
+
+/** one line of the agentic gather step's activity ("กำลังทำอะไร") */
+export interface AgentStep {
+  /** "search" | "read" | "done" | "error" */
+  kind: string;
+  /** search terms, source number, or error code — never passage text */
+  detail: string;
+  /** new passages this step added */
+  found: number;
+}
+
+export interface ChatStep {
+  requestId: string;
+  chatId: string;
+  step: AgentStep;
 }
 
 export interface AppInfo {

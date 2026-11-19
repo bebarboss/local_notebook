@@ -413,6 +413,7 @@ function SearchSection() {
         <NumberRow label="Threshold" desc="ตัดท่อนที่คะแนนความเกี่ยวข้องต่ำกว่าค่านี้ (0–1)" value={settings.threshold} min={0} max={1} step={0.05} onSave={(v) => updateSettings({ threshold: v })} />
         <HybridRow />
         <RerankRow />
+        <AgenticRow />
         <KnowledgeDupRows />
         <NumberRow label="ขนาดท่อน (ตัวอักษร)" desc="เปลี่ยนแล้วจะ index ใหม่ทั้งหมดในรอบถัดไป" value={settings.chunkSize} min={300} max={4000} step={50} onSave={(v) => updateSettings({ chunkSize: v })} />
         <NumberRow label="Overlap (ตัวอักษร)" desc="ส่วนที่ซ้อนกันระหว่างท่อน · เปลี่ยนแล้วจะ index ใหม่ทั้งหมด" value={settings.chunkOverlap} min={0} max={1000} step={10} onSave={(v) => updateSettings({ chunkOverlap: v })} />
@@ -627,6 +628,30 @@ function KnowledgeDupRows() {
           value={settings.knowledgeDupThreshold} min={0.5} max={0.99} step={0.01} onSave={(v) => updateSettings({ knowledgeDupThreshold: v })} />
       )}
     </>
+  );
+}
+
+/** when the first passages fall short, let the model search again a few bounded rounds (agent.rs) */
+function AgenticRow() {
+  const { settings, updateSettings, toast } = useApp();
+  return (
+    <div className="list-row">
+      <div className="l">
+        <span className="t">ให้ AI ค้นเพิ่มเองเมื่อข้อมูลไม่พอ</span>
+        <span className="d">
+          ถ้าท่อนที่ค้นรอบแรกยังไม่พอตอบ (เช่น เอกสารพูดถึงชื่อคอลัมน์/ฟิลด์ แต่ไม่มีชื่อตาราง) ให้ AI ค้นเพิ่มเองสูงสุด 3 รอบก่อนตอบ ·
+          เห็นขั้นตอนที่ค้นสด ๆ ใต้คำตอบ · ใช้ได้เฉพาะโมเดลที่เรียกเครื่องมือได้ (godev/gothink) · คำถามที่ต้องค้นเพิ่มจะช้าขึ้นเล็กน้อย
+        </span>
+      </div>
+      <Switch
+        checked={settings.agentic}
+        label="ให้ AI ค้นเพิ่มเองเมื่อข้อมูลไม่พอ"
+        onChange={async (v) => {
+          await updateSettings({ agentic: v });
+          toast(v ? "เปิดให้ AI ค้นเพิ่มเองแล้ว" : "ปิดแล้ว — ค้นรอบเดียวเหมือนเดิม");
+        }}
+      />
+    </div>
   );
 }
 
