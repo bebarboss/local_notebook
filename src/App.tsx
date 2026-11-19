@@ -142,6 +142,7 @@ export default function App() {
         {menuOpen && <div className="modal-backdrop only-narrow" style={{ zIndex: 44, background: "var(--overlay)" }} onClick={() => setMenuOpen(false)} aria-hidden="true" />}
         {page.name === "chat" && <ChatPage chatId={page.chatId} initial={page.initial} onMenu={() => setMenuOpen(true)} />}
         {page.name === "newchat" && <NewChatPage onMenu={() => setMenuOpen(true)} />}
+        {page.name === "general" && <NewChatPage general onMenu={() => setMenuOpen(true)} />}
         {page.name === "services" && <ServicesPage />}
         {page.name === "settings" && <SettingsPage section={page.section} />}
       </div>

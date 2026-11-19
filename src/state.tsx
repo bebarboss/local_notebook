@@ -5,9 +5,13 @@ import type { AskRequest, GatewayStatus, ModelConfig, Service, ServiceStats, Set
 export type Page =
   | { name: "chat"; chatId: string; initial?: AskRequest }
   | { name: "newchat" }
+  | { name: "general" }
   | { name: "services" }
   | { name: "settings"; section?: SettingsSection }
   | { name: "setup" };
+
+/** Top-level workspace, like Claude desktop's Claude ↔ Claude Code switch. */
+export type AppMode = "docs" | "chat";
 
 export type SettingsSection = "gateway" | "models" | "embedding" | "search" | "history" | "theme" | "startup" | "trouble" | "about";
 
@@ -25,6 +29,9 @@ interface Ctx {
   recheckGateway: () => Promise<void>;
   page: Page;
   go: (p: Page) => void;
+  /** which top-level workspace the sidebar shows (docs ↔ general chat) */
+  appMode: AppMode;
+  setAppMode: (m: AppMode) => void;
   /** service shown in the sidebar (selected list) */
   activeServiceId: string | null;
   setActiveServiceId: (id: string | null) => void;
@@ -73,7 +80,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [models, setModels] = useState<ModelConfig[]>([]);
   const [gateway, setGateway] = useState<GatewayStatus>({ state: "unknown", message: null, checkedAt: 0 });
   const [page, setPage] = useState<Page>({ name: "newchat" });
+  const [appMode, setAppModeState] = useState<AppMode>(() => (readAppMode()));
   const [activeServiceId, setActiveServiceId] = useState<string | null>(null);
+  const setAppMode = useCallback((m: AppMode) => {
+    setAppModeState(m);
+    try { localStorage.setItem("appMode", m); } catch { /* private mode */ }
+  }, []);
   const [chatsVersion, setChatsVersion] = useState(0);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const toastTimer = useRef<number>();
@@ -170,10 +182,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const value = useMemo<Ctx>(
     () => ({
       ready, loadError, settings, updateSettings, services, stats, refreshServices, models, refreshModels,
-      gateway, recheckGateway, page, go: setPage, activeServiceId, setActiveServiceId,
+      gateway, recheckGateway, page, go: setPage, appMode, setAppMode, activeServiceId, setActiveServiceId,
       chatsVersion, bumpChats: () => setChatsVersion((v) => v + 1), toast, reload,
     }),
-    [ready, loadError, settings, updateSettings, services, stats, refreshServices, models, refreshModels, gateway, recheckGateway, page, activeServiceId, chatsVersion, toast, reload],
+    [ready, loadError, settings, updateSettings, services, stats, refreshServices, models, refreshModels, gateway, recheckGateway, page, appMode, setAppMode, activeServiceId, chatsVersion, toast, reload],
   );
 
   return (
@@ -188,6 +200,10 @@ export function useApp(): Ctx {
   const c = useContext(AppCtx);
   if (!c) throw new Error("useApp outside AppProvider");
   return c;
+}
+
+function readAppMode(): AppMode {
+  try { return localStorage.getItem("appMode") === "chat" ? "chat" : "docs"; } catch { return "docs"; }
 }
 
 /** mock-mode preview helper: ?page=chat|services|settings|setup */

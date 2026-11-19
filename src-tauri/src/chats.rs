@@ -11,10 +11,13 @@ use unicode_segmentation::UnicodeSegmentation;
 #[serde(rename_all = "camelCase")]
 pub struct Chat {
     pub id: String,
-    pub service_id: String,
+    /// `None` for a general (floating) chat that isn't tied to any service
+    pub service_id: Option<String>,
     pub title: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// `"docs"` (RAG over a service) or `"chat"` (general, no documents) — locked at creation
+    pub mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,10 +114,11 @@ impl ChatDb {
              PRAGMA foreign_keys=ON;
              CREATE TABLE IF NOT EXISTS chats (
                id TEXT PRIMARY KEY,
-               service_id TEXT NOT NULL,
+               service_id TEXT,
                title TEXT NOT NULL,
                created_at INTEGER NOT NULL,
-               updated_at INTEGER NOT NULL
+               updated_at INTEGER NOT NULL,
+               mode TEXT NOT NULL DEFAULT 'docs'
              );
              CREATE INDEX IF NOT EXISTS chats_service ON chats(service_id, updated_at DESC);
              CREATE TABLE IF NOT EXISTS messages (
@@ -148,41 +152,50 @@ impl ChatDb {
         if !has {
             conn.execute_batch("ALTER TABLE messages ADD COLUMN steps TEXT;")?;
         }
+        // v0.19: chat mode — "docs" (RAG, existing rows) or "chat" (general, no service)
+        let has: bool = conn.prepare("SELECT 1 FROM pragma_table_info('chats') WHERE name='mode'")?.exists([])?;
+        if !has {
+            conn.execute_batch("ALTER TABLE chats ADD COLUMN mode TEXT NOT NULL DEFAULT 'docs';")?;
+        }
         Ok(Self { conn })
     }
 
-    pub fn create_chat(&self, service_id: &str, first_question: &str) -> AppResult<Chat> {
+    /// `service_id = None` + `mode = "chat"` makes a general (floating) chat; otherwise a docs chat.
+    pub fn create_chat(&self, service_id: Option<&str>, mode: &str, first_question: &str) -> AppResult<Chat> {
         let now = now_ms();
         let c = Chat {
             id: uuid::Uuid::new_v4().to_string(),
-            service_id: service_id.to_string(),
+            service_id: service_id.map(str::to_string),
             title: title_from(first_question),
             created_at: now,
             updated_at: now,
+            mode: mode.to_string(),
         };
         self.conn.execute(
-            "INSERT INTO chats(id,service_id,title,created_at,updated_at) VALUES(?1,?2,?3,?4,?5)",
-            params![c.id, c.service_id, c.title, c.created_at, c.updated_at],
+            "INSERT INTO chats(id,service_id,title,created_at,updated_at,mode) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![c.id, c.service_id, c.title, c.created_at, c.updated_at, c.mode],
         )?;
         Ok(c)
     }
 
     fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Chat> {
-        Ok(Chat { id: r.get(0)?, service_id: r.get(1)?, title: r.get(2)?, created_at: r.get(3)?, updated_at: r.get(4)? })
+        Ok(Chat { id: r.get(0)?, service_id: r.get(1)?, title: r.get(2)?, created_at: r.get(3)?, updated_at: r.get(4)?, mode: r.get(5)? })
     }
 
     pub fn get_chat(&self, id: &str) -> AppResult<Chat> {
         self.conn
-            .query_row("SELECT id,service_id,title,created_at,updated_at FROM chats WHERE id=?1", [id], Self::row)
+            .query_row("SELECT id,service_id,title,created_at,updated_at,mode FROM chats WHERE id=?1", [id], Self::row)
             .optional()?
             .ok_or_else(|| AppError::new("not_found", "ไม่พบแชตนี้"))
     }
 
+    /// `service_id = Some(id)` lists that service's docs chats; `None` lists the general
+    /// (floating) chats (`mode='chat'`) — the two menus never mix.
     pub fn list_chats(&self, service_id: Option<&str>, query: &str) -> AppResult<Vec<Chat>> {
         let like = format!("%{}%", query.trim().replace('%', "\\%").replace('_', "\\_"));
         let mut st = self.conn.prepare(
-            "SELECT id,service_id,title,created_at,updated_at FROM chats
-             WHERE (?1 IS NULL OR service_id=?1) AND title LIKE ?2 ESCAPE '\\'
+            "SELECT id,service_id,title,created_at,updated_at,mode FROM chats
+             WHERE ((?1 IS NULL AND mode='chat') OR service_id=?1) AND title LIKE ?2 ESCAPE '\\'
              ORDER BY updated_at DESC LIMIT 200",
         )?;
         let rows = st.query_map(params![service_id, like], Self::row)?;
@@ -367,6 +380,8 @@ mod tests {
         )
         .unwrap();
         let db = ChatDb::init(conn).unwrap();
+        // the old chats table had no `mode` column — the migration adds it as 'docs'
+        assert_eq!(db.get_chat("c").unwrap().mode, "docs");
         assert_eq!(db.messages("c").unwrap()[0].search_query, None);
         let mut m = msg("c", "assistant", "ใหม่ [1]", None);
         m.search_query = Some("คำค้นที่เขียนใหม่");
@@ -379,7 +394,7 @@ mod tests {
     #[test]
     fn turns_leaving_the_window_are_summarized_once() {
         let db = ChatDb::open_in_memory().unwrap();
-        let c = db.create_chat("hr", "q").unwrap();
+        let c = db.create_chat(Some("hr"), "docs", "q").unwrap();
         for i in 0..5 {
             db.add_message(msg(&c.id, "user", &format!("q{i}"), None)).unwrap();
             db.add_message(msg(&c.id, "assistant", &format!("a{i}"), None)).unwrap();
@@ -401,7 +416,7 @@ mod tests {
     #[test]
     fn history_roundtrip_and_turns() {
         let db = ChatDb::open_in_memory().unwrap();
-        let c = db.create_chat("hr", "พนักงานลาพักร้อนได้กี่วันต่อปี และต้องแจ้งล่วงหน้ากี่วันทำการ ตามนโยบายบริษัท").unwrap();
+        let c = db.create_chat(Some("hr"), "docs", "พนักงานลาพักร้อนได้กี่วันต่อปี และต้องแจ้งล่วงหน้ากี่วันทำการ ตามนโยบายบริษัท").unwrap();
         assert!(c.title.ends_with('…'));
         for i in 0..4 {
             db.add_message(msg(&c.id, "user", &format!("q{i}"), None)).unwrap();
@@ -413,5 +428,22 @@ mod tests {
         assert!(db.list_chats(Some("pos"), "").unwrap().is_empty());
         db.delete_by_service("hr").unwrap();
         assert!(db.messages(&c.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn general_and_docs_chats_never_mix() {
+        let db = ChatDb::open_in_memory().unwrap();
+        let g = db.create_chat(None, "chat", "สรุปอีเมลให้หน่อย").unwrap();
+        let d = db.create_chat(Some("hr"), "docs", "สิทธิลาพักร้อน").unwrap();
+        assert_eq!(g.service_id, None);
+        assert_eq!(g.mode, "chat");
+        assert_eq!(d.service_id.as_deref(), Some("hr"));
+        // general menu (None) lists only the floating chat; the service menu only its own
+        let general = db.list_chats(None, "").unwrap();
+        assert_eq!(general.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec![g.id.as_str()]);
+        let hr = db.list_chats(Some("hr"), "").unwrap();
+        assert_eq!(hr.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec![d.id.as_str()]);
+        // reload keeps the mode
+        assert_eq!(db.get_chat(&g.id).unwrap().mode, "chat");
     }
 }

@@ -6,7 +6,7 @@ import { useApp, visibleModels } from "../state";
 import { Composer } from "../components/Composer";
 import { CodeBadge, SkeletonList } from "../components/ui";
 
-export default function NewChatPage({ onMenu }: { onMenu: () => void }) {
+export default function NewChatPage({ onMenu, general = false }: { onMenu: () => void; general?: boolean }) {
   const app = useApp();
   const { services, stats, settings, go, gateway, activeServiceId, setActiveServiceId, ready } = app;
   const models = visibleModels(app.models);
@@ -26,19 +26,25 @@ export default function NewChatPage({ onMenu }: { onMenu: () => void }) {
     if (s) { setModel(s.model); setEffort(s.effort); }
   };
 
-  // clicking a service in the sidebar while on this page picks it too
+  // clicking a service in the sidebar while on this page picks it too (docs mode only)
   useEffect(() => {
-    if (activeServiceId && activeServiceId !== mountedActive.current) {
+    if (!general && activeServiceId && activeServiceId !== mountedActive.current) {
       mountedActive.current = activeServiceId;
       pick(activeServiceId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeServiceId]);
+  }, [activeServiceId, general]);
+
+  // general chat isn't tied to a service, so default to the first available model
+  useEffect(() => {
+    if (general && !model && models.length) { setModel(models[0].id); setEffort("medium"); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [general, models]);
 
   const sendBlocked =
     gateway.state === "unreachable" ? th.err.unreachable :
     gateway.state === "error" ? gateway.message ?? th.gatewayError :
-    svc && !models.length ? th.err.noModels : null;
+    !models.length ? th.err.noModels : null;
 
   return (
     <main className="main" aria-label={th.newChat}>
@@ -48,13 +54,17 @@ export default function NewChatPage({ onMenu }: { onMenu: () => void }) {
       <div className="scroll" style={{ display: "flex", flexDirection: "column", justifyContent: "center" }}>
         <div style={{ width: "100%", maxWidth: 720, margin: "0 auto", padding: "40px 20px 8px", display: "flex", flexDirection: "column", gap: 22 }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 6, textAlign: "center" }}>
-            <h1 style={{ fontSize: 28, fontWeight: 700 }}>สวัสดี {settings.userName || "คุณ"}</h1>
-            <p className="muted" style={{ fontSize: 15 }}>เลือก service ที่จะใช้ค้นเอกสารก่อนเริ่มแชต</p>
+            <h1 style={{ fontSize: 28, fontWeight: 700 }}>
+              {general ? "เริ่มคุยทั่วไป" : <>สวัสดี {settings.userName || "คุณ"}</>}
+            </h1>
+            <p className="muted" style={{ fontSize: 15 }}>
+              {general ? "คุยกับ AI ได้เลย โหมดนี้ไม่ค้นเอกสารและไม่ผูกกับ service" : "เลือก service ที่จะใช้ค้นเอกสารก่อนเริ่มแชต"}
+            </p>
           </div>
 
-          {!ready && <SkeletonList rows={2} h={72} />}
+          {!general && !ready && <SkeletonList rows={2} h={72} />}
 
-          {ready && services.length === 0 && (
+          {!general && ready && services.length === 0 && (
             <div className="empty card">
               <h2>ยังไม่มี service</h2>
               <span>สร้าง service แรกโดยเลือกโฟลเดอร์เอกสาร ตั้งชื่อ และเลือกโมเดลเริ่มต้น</span>
@@ -64,7 +74,7 @@ export default function NewChatPage({ onMenu }: { onMenu: () => void }) {
             </div>
           )}
 
-          {services.length > 0 && (
+          {!general && services.length > 0 && (
             <div className="pick-grid" role="radiogroup" aria-label="เลือก service">
               {services.map((s) => {
                 const on = s.id === picked;
@@ -105,7 +115,8 @@ export default function NewChatPage({ onMenu }: { onMenu: () => void }) {
       </div>
 
       <Composer
-        service={svc}
+        service={general ? null : svc}
+        docsMode={!general}
         models={models}
         model={model}
         effort={effort}
@@ -113,15 +124,19 @@ export default function NewChatPage({ onMenu }: { onMenu: () => void }) {
         allServices={allServices}
         onToggleAll={() => setAllServices((v) => !v)}
         onSend={async (q) => {
+          if (general) {
+            go({ name: "chat", chatId: "new", initial: { chatId: null, serviceId: null, question: q, model, effort, mode: "chat", allServices: false } });
+            return;
+          }
           if (!svc) return;
           await app.updateSettings({ lastServiceId: svc.id });
-          go({ name: "chat", chatId: "new", initial: { chatId: null, serviceId: svc.id, question: q, model, effort, allServices } });
+          go({ name: "chat", chatId: "new", initial: { chatId: null, serviceId: svc.id, question: q, model, effort, mode: "docs", allServices } });
         }}
         onStop={() => {}}
         streaming={false}
         sendBlockedReason={sendBlocked}
-        placeholder={svc ? `ถามอะไรก็ได้เกี่ยวกับเอกสารใน ${svc.name}` : undefined}
-        hint={svc ? `จะค้นเฉพาะเอกสารใน ${svc.name} · เปลี่ยน service ได้ก่อนส่งข้อความแรก` : "แชตแต่ละห้องผูกกับ service เดียว"}
+        placeholder={general ? "พิมพ์ข้อความ… (คุยทั่วไป)" : svc ? `ถามอะไรก็ได้เกี่ยวกับเอกสารใน ${svc.name}` : undefined}
+        hint={general ? "คุยทั่วไป — ไม่ค้นเอกสาร ไม่ผูก service" : svc ? `จะค้นเฉพาะเอกสารใน ${svc.name} · เปลี่ยน service ได้ก่อนส่งข้อความแรก` : "แชตแต่ละห้องผูกกับ service เดียว"}
         autoFocus
       />
     </main>

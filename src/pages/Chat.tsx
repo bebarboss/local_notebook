@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { FileText, Menu } from "lucide-react";
+import { FileText, Menu, MessageCircle } from "lucide-react";
 import { api } from "../lib/api";
 import type { AskRequest, Chat as ChatT, Effort, Message } from "../lib/types";
 import { th } from "../i18n/th";
@@ -14,7 +14,7 @@ interface Stream extends StreamingState { requestId: string | null; chatId: stri
 
 export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; initial?: AskRequest; onMenu: () => void }) {
   const app = useApp();
-  const { services, stats, gateway, go, models: allModels, setActiveServiceId, bumpChats } = app;
+  const { services, stats, gateway, go, models: allModels, setActiveServiceId, setAppMode, bumpChats } = app;
   const models = visibleModels(allModels);
   const [chat, setChat] = useState<ChatT | null>(null);
   const [messages, setMessages] = useState<Message[] | null>(null);
@@ -32,6 +32,11 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
 
   const serviceId = chat?.serviceId ?? initial?.serviceId ?? null;
   const service = services.find((s) => s.id === serviceId) ?? null;
+  const mode = chat?.mode ?? initial?.mode ?? "docs";
+  const docsMode = mode === "docs";
+
+  // keep the sidebar workspace in sync with the chat being viewed
+  useEffect(() => { setAppMode(mode); }, [mode, setAppMode]);
 
   // ---- load existing chat (from SQLite, no Gateway call)
   const load = useCallback(async () => {
@@ -100,10 +105,10 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
 
   const send = useCallback(
     async (question: string, override?: Partial<AskRequest>) => {
-      if (!serviceId) return;
+      if (docsMode && !serviceId) return;
       const req: AskRequest = {
         chatId: chat?.id ?? (chatId === "new" ? null : chatId),
-        serviceId, question, model, effort, allServices, ...override,
+        serviceId, question, model, effort, mode, allServices, ...override,
         // known before the call, so no early delta/done event can be missed
         requestId: crypto.randomUUID(),
       };
@@ -127,7 +132,7 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
         if (err.code === "gateway_unreachable") app.recheckGateway();
       }
     },
-    [serviceId, chat, chatId, model, effort, allServices, bumpChats, go, app],
+    [serviceId, docsMode, mode, chat, chatId, model, effort, allServices, bumpChats, go, app],
   );
 
   // first question coming from NewChat
@@ -163,7 +168,13 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
         <div className="topbar">
           <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flex: 1 }}>
             <button className="icon-btn only-narrow" aria-label="เปิดเมนู" onClick={onMenu}><Menu size={18} strokeWidth={1.8} /></button>
-            {service && (
+            {!docsMode && (
+              <span className="chip chip-general" style={{ flex: "none" }}>
+                <MessageCircle size={13} strokeWidth={2} aria-hidden="true" />
+                คุยทั่วไป
+              </span>
+            )}
+            {docsMode && service && (
               <span className="chip" style={{ flex: "none" }}>
                 <span className="swatch" style={{ width: 8, height: 8, borderRadius: 2, background: service.color }} aria-hidden="true" />
                 {service.name}
@@ -195,7 +206,7 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
                 streaming={stream}
                 retryDisabled={!!stream && !stream.error}
                 onRetry={(q) => send(q)}
-                onSaveKnowledge={chat && !(stream && !stream.error) ? (id) => setKnowledgeUpto(id) : undefined}
+                onSaveKnowledge={docsMode && chat && !(stream && !stream.error) ? (id) => setKnowledgeUpto(id) : undefined}
               />
             )}
             {stream?.error && (
@@ -211,6 +222,7 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
 
         <Composer
           service={service}
+          docsMode={docsMode}
           models={models}
           model={model}
           effort={effort}
@@ -219,14 +231,15 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
           onToggleAll={() => setAllServices((v) => !v)}
           onSend={(q) => send(q)}
           onStop={() => stream?.requestId && api.stop(stream.requestId)}
-          onAddDocs={addDocs}
+          onAddDocs={docsMode ? addDocs : undefined}
           streaming={!!stream && !stream.error}
           sendBlockedReason={sendBlocked}
+          hint={docsMode ? undefined : "คุยทั่วไป — ไม่ค้นเอกสาร ไม่ผูก service"}
           autoFocus
         />
       </main>
       {service && showDocs && <DocPanel service={service} onClose={() => setShowDocs(false)} />}
-      {knowledgeUpto != null && chat && (
+      {knowledgeUpto != null && chat && chat.serviceId && (
         <KnowledgeDialog chatId={chat.id} serviceId={chat.serviceId} upto={knowledgeUpto} onClose={() => setKnowledgeUpto(null)} />
       )}
     </>

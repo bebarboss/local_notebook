@@ -73,10 +73,12 @@ export function createMockBackend(): Backend {
   };
 
   const chats: Chat[] = [
-    { id: "c1", serviceId: "hr", title: "นโยบายการลาพักร้อน", createdAt: t0 - 3.6e6, updatedAt: t0 - 3e5 },
-    { id: "c2", serviceId: "hr", title: "สิทธิ์ค่ารักษาพยาบาล", createdAt: t0 - 8.6e7, updatedAt: t0 - 8.6e7 },
-    { id: "c3", serviceId: "hr", title: "ขั้นตอนรับพนักงานใหม่", createdAt: t0 - 2e8, updatedAt: t0 - 2e8 },
-    { id: "c4", serviceId: "pos", title: "เครื่องพิมพ์ใบเสร็จไม่ทำงาน", createdAt: t0 - 4e7, updatedAt: t0 - 4e7 },
+    { id: "c1", serviceId: "hr", title: "นโยบายการลาพักร้อน", createdAt: t0 - 3.6e6, updatedAt: t0 - 3e5, mode: "docs" },
+    { id: "c2", serviceId: "hr", title: "สิทธิ์ค่ารักษาพยาบาล", createdAt: t0 - 8.6e7, updatedAt: t0 - 8.6e7, mode: "docs" },
+    { id: "c3", serviceId: "hr", title: "ขั้นตอนรับพนักงานใหม่", createdAt: t0 - 2e8, updatedAt: t0 - 2e8, mode: "docs" },
+    { id: "c4", serviceId: "pos", title: "เครื่องพิมพ์ใบเสร็จไม่ทำงาน", createdAt: t0 - 4e7, updatedAt: t0 - 4e7, mode: "docs" },
+    { id: "cg1", serviceId: null, title: "สรุปอีเมลให้หน่อย", createdAt: t0 - 5e6, updatedAt: t0 - 5e5, mode: "chat" },
+    { id: "cg2", serviceId: null, title: "ช่วยร่างข้อความลางาน", createdAt: t0 - 9e7, updatedAt: t0 - 9e7, mode: "chat" },
   ];
 
   const hrSources: Source[] = [
@@ -302,7 +304,7 @@ export function createMockBackend(): Backend {
       const q = query.trim().toLowerCase();
       return clone(
         chats
-          .filter((c) => (sid === null || c.serviceId === sid) && (!q || c.title.toLowerCase().includes(q)))
+          .filter((c) => (sid === null ? c.mode === "chat" : c.serviceId === sid) && (!q || c.title.toLowerCase().includes(q)))
           .sort((a, b) => b.updatedAt - a.updatedAt),
       );
     },
@@ -325,11 +327,13 @@ export function createMockBackend(): Backend {
     deleteAllChats: async () => { chats.splice(0); for (const k of Object.keys(messages)) delete messages[k]; },
     ask: async (req) => {
       if (status.state !== "ok") throw { code: "gateway_unreachable", message: errorText(0, "") };
-      const svc = services.find((s) => s.id === req.serviceId)!;
+      const existing = req.chatId ? chats.find((c) => c.id === req.chatId) : null;
+      const isChat = existing ? existing.mode === "chat" : req.mode === "chat";
+      const svc = isChat ? null : services.find((s) => s.id === req.serviceId)!;
       let chatId = req.chatId;
       if (!chatId) {
         chatId = uid("chat");
-        chats.push({ id: chatId, serviceId: svc.id, title: req.question.trim().slice(0, 40), createdAt: now(), updatedAt: now() });
+        chats.push({ id: chatId, serviceId: svc?.id ?? null, title: req.question.trim().slice(0, 40), createdAt: now(), updatedAt: now(), mode: isChat ? "chat" : "docs" });
         messages[chatId] = [];
       }
       const userMessage: Message = { id: ++seq, chatId, role: "user", content: req.question, model: null, reasoningEffort: null, sources: [], elapsedMs: null, error: null, createdAt: now() };
@@ -340,7 +344,22 @@ export function createMockBackend(): Backend {
       const cid = chatId;
       (async () => {
         const started = now();
-        const { text, sources } = answerFor(req.question, svc);
+        // general chat: no documents, no sources, no agentic steps
+        if (isChat) {
+          const text = `นี่เป็นคำตอบสมมติในโหมด **คุยทั่วไป** (mock) — ตอบจากความรู้ทั่วไป ไม่ได้ค้นเอกสาร\n\nถ้าต้องการอ้างอิงข้อมูลบริษัท ให้สลับไปโหมด "คุยจากเอกสาร"`;
+          await wait(300);
+          let out = "";
+          const parts = text.match(/.{1,6}/gsu) ?? [];
+          for (const p of parts) { if (st.stopped) break; await wait(30); out += p; emit("chat-delta", { requestId, chatId: cid, delta: p }); }
+          const msg: Message = { id: ++seq, chatId: cid, role: "assistant", content: out, model: req.model, reasoningEffort: req.effort, sources: [], elapsedMs: now() - started, error: st.stopped ? "หยุดโดยผู้ใช้" : null, createdAt: now() };
+          messages[cid].push(msg);
+          const c = chats.find((x) => x.id === cid);
+          if (c) c.updatedAt = now();
+          streams.delete(requestId);
+          emit("chat-done", { requestId, chatId: cid, message: clone(msg) });
+          return;
+        }
+        const { text, sources } = answerFor(req.question, svc!);
         const base = req.allServices ? sources.map((s) => ({ ...s })) : sources;
         const ranked = settings.rerank && reranker.ready ? base.map((s, i) => ({ ...s, rerankScore: 0.97 - i * 0.21 })) : base;
         const srcs = settings.hybrid ? ranked.map((s, i) => (i === 0 ? { ...s, keyword: true } : s)) : ranked;

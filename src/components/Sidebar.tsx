@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { MoreHorizontal, Plus, Search, Settings as SettingsIcon, Pencil, Trash2, BookMarked } from "lucide-react";
+import { MoreHorizontal, Plus, Search, Settings as SettingsIcon, Pencil, Trash2, BookMarked, MessageCircle, FileText } from "lucide-react";
 import { api } from "../lib/api";
 import type { Chat } from "../lib/types";
 import { th } from "../i18n/th";
@@ -10,8 +10,9 @@ import { ConfirmDialog, Logo, Modal, Skeleton, usePopover } from "./ui";
 
 export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () => void }) {
   const app = useApp();
-  const { services, stats, page, go, activeServiceId, setActiveServiceId, settings, gateway, chatsVersion } = app;
+  const { services, stats, page, go, appMode, setAppMode, activeServiceId, setActiveServiceId, settings, gateway, chatsVersion } = app;
   const active = services.find((s) => s.id === activeServiceId) ?? null;
+  const generalMode = appMode === "chat";
   const [chats, setChats] = useState<Chat[] | null>(null);
   const [query, setQuery] = useState("");
   const [renaming, setRenaming] = useState<Chat | null>(null);
@@ -19,14 +20,16 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
   const [deleting, setDeleting] = useState<Chat | null>(null);
 
   useEffect(() => {
-    if (!active) { setChats([]); return; }
+    // general mode lists floating chats (null); docs mode lists the active service's chats
+    if (!generalMode && !active) { setChats([]); return; }
     let alive = true;
     setChats(null);
     const t = setTimeout(() => {
-      api.listChats(active.id, query).then((c) => alive && setChats(c)).catch(() => alive && setChats([]));
+      const p = generalMode ? api.listChats(null, query) : api.listChats(active!.id, query);
+      p.then((c) => alive && setChats(c)).catch(() => alive && setChats([]));
     }, query ? 200 : 0);
     return () => { alive = false; clearTimeout(t); };
-  }, [active, query, chatsVersion]);
+  }, [generalMode, active, query, chatsVersion]);
 
   const openChat = page.name === "chat" ? page.chatId : null;
 
@@ -35,42 +38,77 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
   return (
     <aside className={`sidebar${open ? " open" : ""}`} aria-label="เมนูหลัก">
       <Logo />
-      <button
-        className={`nav-item nav-new${page.name === "newchat" ? " selected" : ""}`}
-        onClick={nav(() => go({ name: "newchat" }))}
-      >
-        <span className="plus" aria-hidden="true"><Plus size={14} strokeWidth={2.4} /></span>
-        {th.newChat}
-      </button>
 
-      <div className="side-head">
-        <span>{th.service}</span>
-        <button className="link-btn" onClick={nav(() => go({ name: "services" }))}>{th.manage}</button>
-      </div>
-      {services.length === 0 && (
-        <button className="nav-item" onClick={nav(() => go({ name: "services" }))} style={{ color: "var(--accent-text)" }}>
-          <Plus size={16} strokeWidth={1.8} aria-hidden="true" /> สร้าง service แรก
-        </button>
-      )}
-      {services.map((s) => (
+      {/* top-left mode switcher — like Claude desktop's Claude ↔ Claude Code */}
+      <div className="mode-switch" role="tablist" aria-label="โหมดการใช้งาน">
         <button
-          key={s.id}
-          className={`nav-item${s.id === activeServiceId ? " selected" : ""}`}
-          aria-current={s.id === activeServiceId ? "true" : undefined}
-          onClick={() => {
-            setActiveServiceId(s.id);
-            if (page.name === "chat") { /* stay; list below changes */ }
-          }}
+          role="tab"
+          aria-selected={generalMode}
+          className={`mode-tab${generalMode ? " on on-chat" : ""}`}
+          onClick={nav(() => { setAppMode("chat"); go({ name: "general" }); })}
         >
-          <span className="swatch" style={{ background: s.color }} aria-hidden="true" />
-          <span className="ellipsis" style={{ flex: 1 }}>{s.name}</span>
-          <span style={{ fontSize: 12, color: s.id === activeServiceId ? undefined : "var(--muted)" }}>{stats[s.id]?.documents ?? 0}</span>
+          <MessageCircle size={14} strokeWidth={2.2} aria-hidden="true" /> คุยทั่วไป
         </button>
-      ))}
+        <button
+          role="tab"
+          aria-selected={!generalMode}
+          className={`mode-tab${!generalMode ? " on on-docs" : ""}`}
+          onClick={nav(() => { setAppMode("docs"); go({ name: "newchat" }); })}
+        >
+          <FileText size={14} strokeWidth={2.2} aria-hidden="true" /> เอกสาร
+        </button>
+      </div>
 
-      {active && (
+      {generalMode ? (
+        <button
+          className={`nav-item nav-new${page.name === "general" ? " selected" : ""}`}
+          onClick={nav(() => go({ name: "general" }))}
+        >
+          <span className="plus" aria-hidden="true"><Plus size={14} strokeWidth={2.4} /></span>
+          เริ่มคุยใหม่
+        </button>
+      ) : (
         <>
-          <div className="side-head" style={{ paddingTop: 16 }}><span className="ellipsis">{th.recentIn(active.code)}</span></div>
+          <button
+            className={`nav-item nav-new${page.name === "newchat" ? " selected" : ""}`}
+            onClick={nav(() => go({ name: "newchat" }))}
+          >
+            <span className="plus" aria-hidden="true"><Plus size={14} strokeWidth={2.4} /></span>
+            {th.newChat}
+          </button>
+
+          <div className="side-head">
+            <span>{th.service}</span>
+            <button className="link-btn" onClick={nav(() => go({ name: "services" }))}>{th.manage}</button>
+          </div>
+          {services.length === 0 && (
+            <button className="nav-item" onClick={nav(() => go({ name: "services" }))} style={{ color: "var(--accent-text)" }}>
+              <Plus size={16} strokeWidth={1.8} aria-hidden="true" /> สร้าง service แรก
+            </button>
+          )}
+          {services.map((s) => (
+            <button
+              key={s.id}
+              className={`nav-item${s.id === activeServiceId ? " selected" : ""}`}
+              aria-current={s.id === activeServiceId ? "true" : undefined}
+              onClick={() => {
+                setActiveServiceId(s.id);
+                if (page.name === "chat") { /* stay; list below changes */ }
+              }}
+            >
+              <span className="swatch" style={{ background: s.color }} aria-hidden="true" />
+              <span className="ellipsis" style={{ flex: 1 }}>{s.name}</span>
+              <span style={{ fontSize: 12, color: s.id === activeServiceId ? undefined : "var(--muted)" }}>{stats[s.id]?.documents ?? 0}</span>
+            </button>
+          ))}
+        </>
+      )}
+
+      {(generalMode || active) && (
+        <>
+          <div className="side-head" style={{ paddingTop: 16 }}>
+            <span className="ellipsis">{generalMode ? "แชตล่าสุด" : th.recentIn(active!.code)}</span>
+          </div>
           <label style={{ position: "relative", margin: "2px 0 4px" }}>
             <span className="sr-only">{th.searchChats}</span>
             <Search size={14} aria-hidden="true" style={{ position: "absolute", left: 10, top: 11, color: "var(--muted)" }} />
@@ -79,7 +117,7 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
           {chats === null && <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "4px 10px" }}><Skeleton /><Skeleton w="80%" /><Skeleton w="60%" /></div>}
           {chats?.length === 0 && <span style={{ fontSize: 12, color: "var(--muted)", padding: "4px 10px" }}>{query ? "ไม่พบแชตที่ค้นหา" : th.noChats}</span>}
           {chats?.map((c) => (
-            <ChatRow key={c.id} chat={c} open={c.id === openChat} onOpen={nav(() => go({ name: "chat", chatId: c.id }))} onRename={() => setRenaming(c)} onDelete={() => setDeleting(c)} onKnowledge={() => setNoting(c)} />
+            <ChatRow key={c.id} chat={c} general={generalMode} open={c.id === openChat} onOpen={nav(() => go({ name: "chat", chatId: c.id }))} onRename={() => setRenaming(c)} onDelete={() => setDeleting(c)} onKnowledge={() => setNoting(c)} />
           ))}
         </>
       )}
@@ -96,7 +134,7 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
       </div>
 
       {renaming && <RenameDialog chat={renaming} onClose={() => setRenaming(null)} />}
-      {noting && <KnowledgeDialog chatId={noting.id} serviceId={noting.serviceId} upto={null} onClose={() => setNoting(null)} />}
+      {noting && noting.serviceId && <KnowledgeDialog chatId={noting.id} serviceId={noting.serviceId} upto={null} onClose={() => setNoting(null)} />}
       {deleting && (
         <ConfirmDialog
           title="ลบแชตนี้?"
@@ -106,7 +144,7 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
           onCancel={() => setDeleting(null)}
           onConfirm={async () => {
             await api.deleteChat(deleting.id);
-            if (openChat === deleting.id) go({ name: "newchat" });
+            if (openChat === deleting.id) go({ name: generalMode ? "general" : "newchat" });
             setDeleting(null);
             app.bumpChats();
           }}
@@ -116,7 +154,7 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
   );
 }
 
-function ChatRow({ chat, open, onOpen, onRename, onDelete, onKnowledge }: { chat: Chat; open: boolean; onOpen: () => void; onRename: () => void; onDelete: () => void; onKnowledge: () => void }) {
+function ChatRow({ chat, general, open, onOpen, onRename, onDelete, onKnowledge }: { chat: Chat; general?: boolean; open: boolean; onOpen: () => void; onRename: () => void; onDelete: () => void; onKnowledge: () => void }) {
   const pop = usePopover();
   return (
     <div className="chat-row" ref={pop.ref} onContextMenu={(e) => { e.preventDefault(); pop.setOpen(true); }}>
@@ -129,7 +167,7 @@ function ChatRow({ chat, open, onOpen, onRename, onDelete, onKnowledge }: { chat
       {pop.open && (
         <div className="popover" role="menu" style={{ right: 0, top: 36 }}>
           <button role="menuitem" className="menu-item" onClick={() => { pop.setOpen(false); onRename(); }}><Pencil size={14} strokeWidth={1.8} aria-hidden="true" />{th.rename}</button>
-          <button role="menuitem" className="menu-item" onClick={() => { pop.setOpen(false); onKnowledge(); }}><BookMarked size={14} strokeWidth={1.8} aria-hidden="true" />บันทึกเป็นความรู้…</button>
+          {!general && <button role="menuitem" className="menu-item" onClick={() => { pop.setOpen(false); onKnowledge(); }}><BookMarked size={14} strokeWidth={1.8} aria-hidden="true" />บันทึกเป็นความรู้…</button>}
           <button role="menuitem" className="menu-item danger" onClick={() => { pop.setOpen(false); onDelete(); }}><Trash2 size={14} strokeWidth={1.8} aria-hidden="true" />{th.delete}</button>
         </div>
       )}

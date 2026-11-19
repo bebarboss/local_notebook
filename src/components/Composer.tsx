@@ -5,10 +5,12 @@ import { th } from "../i18n/th";
 import { ModelPicker } from "./ModelPicker";
 
 export function Composer({
-  service, models, model, effort, onModelChange, allServices, onToggleAll, onSend, onStop, onAddDocs,
+  service, docsMode = true, models, model, effort, onModelChange, allServices, onToggleAll, onSend, onStop, onAddDocs,
   streaming, sendBlockedReason, placeholder, hint, autoFocus, lockedScope,
 }: {
   service: Service | null;
+  /** docs chat (true) shows the scope + add-docs controls; general chat (false) hides them */
+  docsMode?: boolean;
   models: ModelConfig[];
   model: string;
   effort: Effort;
@@ -28,11 +30,12 @@ export function Composer({
 }) {
   const [text, setText] = useState("");
   const ta = useRef<HTMLTextAreaElement>(null);
-  const disabled = !service;
+  // a general chat has no service but is still usable
+  const disabled = docsMode && !service;
 
   useEffect(() => {
-    if (autoFocus && service) ta.current?.focus();
-  }, [autoFocus, service]);
+    if (autoFocus && !disabled) ta.current?.focus();
+  }, [autoFocus, disabled]);
 
   // auto-grow
   useEffect(() => {
@@ -80,22 +83,24 @@ export function Composer({
           />
         </label>
         <div className="composer-row">
-          {onAddDocs && (
+          {docsMode && onAddDocs && (
             <button type="button" className="icon-btn bordered" aria-label={th.addDocs} title={th.addDocs} onClick={onAddDocs} disabled={disabled}>
               <Plus size={16} strokeWidth={2} />
             </button>
           )}
-          <button
-            type="button"
-            className="scope-btn"
-            aria-pressed={allServices}
-            disabled={disabled || lockedScope}
-            onClick={onToggleAll}
-            title="กดเพื่อสลับระหว่างค้นเฉพาะ service นี้ / ค้นทุก service"
-          >
-            <span className="swatch" style={{ width: 8, height: 8, borderRadius: 2, background: allServices ? "var(--accent)" : service?.color ?? "var(--disabled)" }} aria-hidden="true" />
-            {service ? (allServices ? th.searchAll : th.searchIn(service.code)) : "ค้นใน: ยังไม่ได้เลือก"}
-          </button>
+          {docsMode && (
+            <button
+              type="button"
+              className="scope-btn"
+              aria-pressed={allServices}
+              disabled={disabled || lockedScope}
+              onClick={onToggleAll}
+              title="กดเพื่อสลับระหว่างค้นเฉพาะ service นี้ / ค้นทุก service"
+            >
+              <span className="swatch" style={{ width: 8, height: 8, borderRadius: 2, background: allServices ? "var(--accent)" : service?.color ?? "var(--disabled)" }} aria-hidden="true" />
+              {service ? (allServices ? th.searchAll : th.searchIn(service.code)) : "ค้นใน: ยังไม่ได้เลือก"}
+            </button>
+          )}
           <span className="spacer" />
           <ModelPicker models={models} model={model} effort={effort} onChange={onModelChange} disabled={disabled} />
           {streaming ? (
