@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, Plus, Square } from "lucide-react";
+import { ArrowUp, Paperclip, Plus, Square, X } from "lucide-react";
 import type { Effort, ModelConfig, Service } from "../lib/types";
 import { th } from "../i18n/th";
 import { ModelPicker } from "./ModelPicker";
 
+const baseName = (p: string) => p.replace(/[/\\]+$/, "").split(/[/\\]/).pop() || p;
+
 export function Composer({
-  service, docsMode = true, models, model, effort, onModelChange, allServices, onToggleAll, onSend, onStop, onAddDocs,
+  service, docsMode = true, models, model, effort, onModelChange, allServices, onToggleAll, onSend, onStop, onAddDocs, onPickFiles,
   streaming, sendBlockedReason, placeholder, hint, autoFocus, lockedScope,
 }: {
   service: Service | null;
@@ -17,9 +19,11 @@ export function Composer({
   onModelChange: (m: string, e: Effort) => void;
   allServices: boolean;
   onToggleAll: () => void;
-  onSend: (text: string) => void;
+  onSend: (text: string, attachments?: string[]) => void;
   onStop: () => void;
   onAddDocs?: () => void;
+  /** general chat: pick files/images to attach to this one question (returns their paths) */
+  onPickFiles?: () => Promise<string[]>;
   streaming: boolean;
   /** when set, typing works but sending is blocked (e.g. gateway down) */
   sendBlockedReason: string | null;
@@ -29,6 +33,8 @@ export function Composer({
   lockedScope?: boolean;
 }) {
   const [text, setText] = useState("");
+  const [attached, setAttached] = useState<string[]>([]);
+  const [picking, setPicking] = useState(false);
   const ta = useRef<HTMLTextAreaElement>(null);
   // a general chat has no service but is still usable
   const disabled = docsMode && !service;
@@ -48,8 +54,20 @@ export function Composer({
   const canSend = !disabled && !streaming && !sendBlockedReason && text.trim().length > 0 && !!model;
   const submit = () => {
     if (!canSend) return;
-    onSend(text.trim());
+    onSend(text.trim(), attached.length ? attached : undefined);
     setText("");
+    setAttached([]);
+  };
+
+  const pickFiles = async () => {
+    if (!onPickFiles || picking) return;
+    setPicking(true);
+    try {
+      const picked = await onPickFiles();
+      if (picked.length) setAttached((a) => [...new Set([...a, ...picked])]);
+    } finally {
+      setPicking(false);
+    }
   };
 
   const defaultHint = service
@@ -82,7 +100,25 @@ export function Composer({
             }}
           />
         </label>
+        {attached.length > 0 && (
+          <div className="attach-chips">
+            {attached.map((p) => (
+              <span key={p} className="attach-chip" title={p}>
+                <Paperclip size={12} strokeWidth={2} aria-hidden="true" />
+                <span className="ellipsis">{baseName(p)}</span>
+                <button type="button" className="attach-x" aria-label={`เอา ${baseName(p)} ออก`} onClick={() => setAttached((a) => a.filter((x) => x !== p))}>
+                  <X size={12} strokeWidth={2.4} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         <div className="composer-row">
+          {!docsMode && onPickFiles && (
+            <button type="button" className="icon-btn bordered" aria-label="แนบไฟล์หรือรูป" title="แนบไฟล์หรือรูป (อ่านเฉพาะคำถามนี้ ไม่บันทึก)" onClick={pickFiles} disabled={picking}>
+              <Paperclip size={16} strokeWidth={2} />
+            </button>
+          )}
           {docsMode && onAddDocs && (
             <button type="button" className="icon-btn bordered" aria-label={th.addDocs} title={th.addDocs} onClick={onAddDocs} disabled={disabled}>
               <Plus size={16} strokeWidth={2} />

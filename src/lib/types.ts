@@ -376,6 +376,8 @@ export interface AskRequest {
   /** "docs" (default) or "chat"; only used when creating a new chat */
   mode?: "docs" | "chat";
   allServices: boolean;
+  /** file paths attached to this one question (general chat only); read fresh, not indexed */
+  attachments?: string[];
 }
 
 export interface AskStarted {

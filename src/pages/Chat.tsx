@@ -229,9 +229,10 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
           onModelChange={(m, e) => { setModel(m); setEffort(e); }}
           allServices={allServices}
           onToggleAll={() => setAllServices((v) => !v)}
-          onSend={(q) => send(q)}
+          onSend={(q, atts) => send(q, atts && atts.length ? { attachments: atts } : undefined)}
           onStop={() => stream?.requestId && api.stop(stream.requestId)}
           onAddDocs={docsMode ? addDocs : undefined}
+          onPickFiles={docsMode ? undefined : api.pickFiles}
           streaming={!!stream && !stream.error}
           sendBlockedReason={sendBlocked}
           hint={docsMode ? undefined : "คุยทั่วไป — ไม่ค้นเอกสาร ไม่ผูก service"}

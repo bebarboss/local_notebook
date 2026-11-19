@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Menu, Plus } from "lucide-react";
 import type { Effort } from "../lib/types";
+import { api } from "../lib/api";
 import { th } from "../i18n/th";
 import { useApp, visibleModels } from "../state";
 import { Composer } from "../components/Composer";
@@ -123,15 +124,16 @@ export default function NewChatPage({ onMenu, general = false }: { onMenu: () =>
         onModelChange={(m, e) => { setModel(m); setEffort(e); }}
         allServices={allServices}
         onToggleAll={() => setAllServices((v) => !v)}
-        onSend={async (q) => {
+        onSend={async (q, atts) => {
           if (general) {
-            go({ name: "chat", chatId: "new", initial: { chatId: null, serviceId: null, question: q, model, effort, mode: "chat", allServices: false } });
+            go({ name: "chat", chatId: "new", initial: { chatId: null, serviceId: null, question: q, model, effort, mode: "chat", allServices: false, attachments: atts } });
             return;
           }
           if (!svc) return;
           await app.updateSettings({ lastServiceId: svc.id });
           go({ name: "chat", chatId: "new", initial: { chatId: null, serviceId: svc.id, question: q, model, effort, mode: "docs", allServices } });
         }}
+        onPickFiles={general ? api.pickFiles : undefined}
         onStop={() => {}}
         streaming={false}
         sendBlockedReason={sendBlocked}

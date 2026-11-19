@@ -349,6 +349,13 @@ code { font-family: var(--mono); font-size: 12.5px; background: var(--code); col
 .send-btn.stop { background: var(--text); color: var(--surface); }
 .composer-hint { font-size: 12px; color: var(--muted); text-align: center; }
 
+/* attached files on a general chat (read fresh for one question, not indexed) */
+.attach-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 2px 0; }
+.attach-chip { display: inline-flex; align-items: center; gap: 5px; max-width: 220px; padding: 3px 4px 3px 9px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); color: var(--text-2); font-size: 12px; }
+.attach-chip .ellipsis { max-width: 160px; }
+.attach-x { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+.attach-x:hover { background: var(--accent-soft); color: var(--accent-ink); }
+
 /* ---------- popover / menu / modal ---------- */
 .popover {
   position: absolute; z-index: 30; background: var(--surface); border: 1px solid var(--border); border-radius: 12px;

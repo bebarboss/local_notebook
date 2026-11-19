@@ -346,7 +346,11 @@ export function createMockBackend(): Backend {
         const started = now();
         // general chat: no documents, no sources, no agentic steps
         if (isChat) {
-          const text = `นี่เป็นคำตอบสมมติในโหมด **คุยทั่วไป** (mock) — ตอบจากความรู้ทั่วไป ไม่ได้ค้นเอกสาร\n\nถ้าต้องการอ้างอิงข้อมูลบริษัท ให้สลับไปโหมด "คุยจากเอกสาร"`;
+          const atts = req.attachments ?? [];
+          const attLine = atts.length
+            ? `\n\n📎 แนบ ${atts.length} ไฟล์: ${atts.map((p: string) => p.split(/[/\\]/).pop()).join(", ")} (ของจริงจะอ่านข้อความ/OCR มาเป็น context)`
+            : "";
+          const text = `นี่เป็นคำตอบสมมติในโหมด **คุยทั่วไป** (mock) — ตอบจากความรู้ทั่วไป ไม่ได้ค้นเอกสาร\n\nถ้าต้องการอ้างอิงข้อมูลบริษัท ให้สลับไปโหมด "คุยจากเอกสาร"${attLine}`;
           await wait(300);
           let out = "";
           const parts = text.match(/.{1,6}/gsu) ?? [];
