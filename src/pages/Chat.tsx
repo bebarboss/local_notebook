@@ -233,6 +233,7 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
           onStop={() => stream?.requestId && api.stop(stream.requestId)}
           onAddDocs={docsMode ? addDocs : undefined}
           onPickFiles={docsMode ? undefined : api.pickFiles}
+          onSavePastedImage={docsMode ? undefined : api.savePastedImage}
           streaming={!!stream && !stream.error}
           sendBlockedReason={sendBlocked}
           hint={docsMode ? undefined : "คุยทั่วไป — ไม่ค้นเอกสาร ไม่ผูก service"}

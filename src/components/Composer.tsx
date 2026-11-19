@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { type ClipboardEvent, useEffect, useRef, useState } from "react";
 import { ArrowUp, Paperclip, Plus, Square, X } from "lucide-react";
 import type { Effort, ModelConfig, Service } from "../lib/types";
 import { th } from "../i18n/th";
@@ -7,7 +7,7 @@ import { ModelPicker } from "./ModelPicker";
 const baseName = (p: string) => p.replace(/[/\\]+$/, "").split(/[/\\]/).pop() || p;
 
 export function Composer({
-  service, docsMode = true, models, model, effort, onModelChange, allServices, onToggleAll, onSend, onStop, onAddDocs, onPickFiles,
+  service, docsMode = true, models, model, effort, onModelChange, allServices, onToggleAll, onSend, onStop, onAddDocs, onPickFiles, onSavePastedImage,
   streaming, sendBlockedReason, placeholder, hint, autoFocus, lockedScope,
 }: {
   service: Service | null;
@@ -24,6 +24,8 @@ export function Composer({
   onAddDocs?: () => void;
   /** general chat: pick files/images to attach to this one question (returns their paths) */
   onPickFiles?: () => Promise<string[]>;
+  /** general chat: save an image pasted (Ctrl+V) into the box; returns its temp path */
+  onSavePastedImage?: (bytes: Uint8Array, ext: string) => Promise<string>;
   streaming: boolean;
   /** when set, typing works but sending is blocked (e.g. gateway down) */
   sendBlockedReason: string | null;
@@ -70,6 +72,25 @@ export function Composer({
     }
   };
 
+  const onPaste = async (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (docsMode || !onSavePastedImage) return;
+    const imgs = Array.from(e.clipboardData.items).filter((it) => it.kind === "file" && it.type.startsWith("image/"));
+    if (!imgs.length) return;
+    e.preventDefault();
+    for (const it of imgs) {
+      const file = it.getAsFile();
+      if (!file) continue;
+      const ext = (file.type.split("/")[1] || "png").replace("jpeg", "jpg").replace("svg+xml", "png");
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const path = await onSavePastedImage(bytes, ext);
+        setAttached((a) => [...new Set([...a, path])]);
+      } catch {
+        /* a failed paste just does nothing — the user can try the + button */
+      }
+    }
+  };
+
   const defaultHint = service
     ? allServices
       ? `ค้นเอกสารทุก service แล้วส่งท่อนที่เกี่ยวข้องไปยัง Gateway บริษัท`
@@ -92,6 +113,7 @@ export function Composer({
             disabled={disabled}
             placeholder={disabled ? th.composerPickFirst : placeholder ?? th.composerPlaceholder}
             onChange={(e) => setText(e.target.value)}
+            onPaste={onPaste}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();

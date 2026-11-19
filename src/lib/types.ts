@@ -378,6 +378,8 @@ export interface AskRequest {
   allServices: boolean;
   /** file paths attached to this one question (general chat only); read fresh, not indexed */
   attachments?: string[];
+  /** current date/time from the user's clock (Thai-formatted); set automatically in api.ask */
+  now?: string;
 }
 
 export interface AskStarted {

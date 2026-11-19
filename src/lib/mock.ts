@@ -567,6 +567,7 @@ export function createMockBackend(): Backend {
     },
     pickFolder: async () => "D:\\Docs\\ตัวอย่าง",
     pickFiles: async () => ["D:\\Docs\\เอกสารใหม่.pdf"],
+    savePastedImage: async (_bytes, ext) => `D:\\paste\\วางรูป-${Date.now().toString(36)}.${ext}`,
     pickZip: async () => "C:\\Users\\me\\Downloads\\DocAsk-HR-นโยบาย.zip",
     pickJson: async () => "C:\\Users\\me\\AppData\\Roaming\\Code\\User\\chatLanguageModels.json",
     on: async (event, cb) => {

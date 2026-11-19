@@ -145,6 +145,7 @@ pub fn run() {
             commands::delete_chat,
             commands::delete_all_chats,
             commands::ask,
+            commands::save_pasted_image,
             commands::stop_generation,
             commands::open_source_file,
             commands::embedding_status,

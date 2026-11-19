@@ -643,6 +643,10 @@ pub struct AskRequest {
     /// OCR — is read fresh and injected as context, not indexed or saved.
     #[serde(default)]
     pub attachments: Vec<String>,
+    /// current date/time from the user's own clock (Thai-formatted by the frontend), injected
+    /// into the system prompt so the model can answer "what day is it" questions.
+    #[serde(default)]
+    pub now: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -749,7 +753,8 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
 
     // attachments only make sense for a general chat (docs chats search the service instead)
     let attachments = if docs { Vec::new() } else { req.attachments };
-    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, docs, model, effort: req.effort, all: req.all_services, question, history, summary, turns, previous, search_query: None, steps: Vec::new(), attachments, key, token };
+    let now = req.now.filter(|s| !s.trim().is_empty());
+    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, docs, model, effort: req.effort, all: req.all_services, question, history, summary, turns, previous, search_query: None, steps: Vec::new(), attachments, now, key, token };
     tauri::async_runtime::spawn(job.run());
 
     Ok(AskStarted { request_id, chat_id: chat.id, user_message })
@@ -785,6 +790,8 @@ struct AskJob {
     steps: Vec<crate::agent::Step>,
     /// file paths attached to this question (general chat only); read fresh, never saved
     attachments: Vec<String>,
+    /// current date/time from the user's clock, injected into the system prompt
+    now: Option<String>,
     key: String,
     token: CancellationToken,
 }
@@ -877,7 +884,7 @@ impl AskJob {
                     _ => None,
                 }
             };
-            let messages = build_chat_prompt(&self.history, self.summary.as_deref(), attached.as_deref(), &self.question);
+            let messages = build_chat_prompt(&self.history, self.summary.as_deref(), attached.as_deref(), self.now.as_deref(), &self.question);
             self.answer(messages, Vec::new(), started).await;
             return;
         }
@@ -940,7 +947,7 @@ impl AskJob {
 
         self.emit("chat-sources", Sources { sources: sources.clone(), search_query: self.search_query.clone() });
 
-        let messages = build_prompt(&svc, &sources, &self.history, self.summary.as_deref(), &self.question, self.all);
+        let messages = build_prompt(&svc, &sources, &self.history, self.summary.as_deref(), &self.question, self.all, self.now.as_deref());
         self.answer(messages, sources, started).await;
     }
 
@@ -1063,6 +1070,40 @@ fn read_attachments(paths: &[String], opts: crate::ingest::chunker::ChunkOptions
         }
     }
     out.trim().to_string()
+}
+
+/// Max bytes accepted for one pasted image (guards against a giant clipboard payload).
+const PASTE_MAX: usize = 25 * 1024 * 1024;
+
+/// Save an image pasted into a general chat to a temp file and return its path, so it flows
+/// through the same attachment pipeline (OCR → context) as a picked file. Pastes older than two
+/// hours are pruned so temp files don't pile up. Never logs the image bytes.
+#[tauri::command]
+pub fn save_pasted_image(bytes: Vec<u8>, ext: String) -> AppResult<String> {
+    if bytes.is_empty() {
+        return Err(AppError::new("invalid", "ไม่มีรูปในคลิปบอร์ด"));
+    }
+    if bytes.len() > PASTE_MAX {
+        return Err(AppError::new("too_big", "รูปที่วางใหญ่เกินไป (เกิน 25MB)"));
+    }
+    let ext = match ext.to_lowercase().as_str() {
+        "png" | "jpg" | "jpeg" | "bmp" | "webp" | "tif" | "tiff" | "gif" => ext.to_lowercase(),
+        _ => "png".to_string(),
+    };
+    let dir = std::env::temp_dir().join("docask-paste");
+    std::fs::create_dir_all(&dir).map_err(|e| AppError::new("io", format!("สร้างโฟลเดอร์ชั่วคราวไม่ได้: {e}")))?;
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        let cutoff = std::time::SystemTime::now() - Duration::from_secs(2 * 3600);
+        for e in rd.flatten() {
+            if e.metadata().and_then(|m| m.modified()).map(|m| m < cutoff).unwrap_or(false) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    let name = format!("pasted-{}.{ext}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let path = dir.join(name);
+    std::fs::write(&path, &bytes).map_err(|e| AppError::new("io", format!("บันทึกรูปที่วางไม่ได้: {e}")))?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 /// `queries[0]` is the main query (reranks and labels); later ones only add candidates.
@@ -1324,7 +1365,7 @@ impl crate::agent::Backend for AgentBackend<'_> {
 
 /// General-chat prompt: a plain, helpful assistant with no documents and no citation rules.
 /// Keeps the chat's own history and summary, but never mentions "เอกสารที่เกี่ยวข้อง".
-pub fn build_chat_prompt(history: &[(String, String)], summary: Option<&str>, attachments: Option<&str>, question: &str) -> Vec<ChatMessage> {
+pub fn build_chat_prompt(history: &[(String, String)], summary: Option<&str>, attachments: Option<&str>, now: Option<&str>, question: &str) -> Vec<ChatMessage> {
     let mut system = String::from(
         "คุณคือผู้ช่วยทั่วไป พูดคุยและช่วยงานได้หลากหลาย\n\
          - ตอบเป็นภาษาเดียวกับคำถาม\n\
@@ -1334,6 +1375,9 @@ pub fn build_chat_prompt(history: &[(String, String)], summary: Option<&str>, at
          ให้บอกผู้ใช้ว่าควรสลับไปโหมด \"คุยจากเอกสาร\" เพื่อให้ได้คำตอบที่อ้างอิงเอกสารจริง\n\
          - ถ้าไม่แน่ใจหรือไม่รู้ ให้บอกตรงๆ อย่าเดา",
     );
+    if let Some(n) = now {
+        system.push_str(&format!("\n- วันเวลาปัจจุบัน (ตามนาฬิกาเครื่องผู้ใช้): {n} — ใช้ตอบคำถามเกี่ยวกับวัน/เวลาได้"));
+    }
     if attachments.is_some() {
         system.push_str(
             "\n- ผู้ใช้แนบไฟล์มากับคำถามนี้ ข้อความในส่วน \"ไฟล์แนบ\" คือเนื้อหาที่ดึงจากไฟล์ \
@@ -1356,7 +1400,7 @@ pub fn build_chat_prompt(history: &[(String, String)], summary: Option<&str>, at
     msgs
 }
 
-pub fn build_prompt(svc: &Service, sources: &[SourceRef], history: &[(String, String)], summary: Option<&str>, question: &str, all: bool) -> Vec<ChatMessage> {
+pub fn build_prompt(svc: &Service, sources: &[SourceRef], history: &[(String, String)], summary: Option<&str>, question: &str, all: bool, now: Option<&str>) -> Vec<ChatMessage> {
     let mut system = String::from(
         "คุณคือผู้ช่วยตอบคำถามจากเอกสารภายในองค์กร\n\
          - ตอบเป็นภาษาเดียวกับคำถาม\n\
@@ -1377,6 +1421,9 @@ pub fn build_prompt(svc: &Service, sources: &[SourceRef], history: &[(String, St
          - ท่อนที่ขึ้นต้นว่า \"บันทึกความรู้\" คือวิธีที่เคยใช้แก้ปัญหานี้ได้ในแชตก่อน ใช้เป็นแนวทางได้ (อ้าง [n] เหมือนท่อนอื่น) \
          แต่ถ้าขัดกับเอกสาร ให้ยึดเอกสาร และบอกว่าบันทึกขัดกับเอกสารตรงไหน",
     );
+    if let Some(n) = now {
+        system.push_str(&format!("\n- วันเวลาปัจจุบัน (ตามนาฬิกาเครื่องผู้ใช้): {n} — ใช้ตอบคำถามเกี่ยวกับวัน/เวลาได้"));
+    }
     if !svc.system_prompt.trim().is_empty() {
         system.push_str("\n\nคำแนะนำเพิ่มเติมของ service นี้:\n");
         system.push_str(svc.system_prompt.trim());
@@ -2139,9 +2186,9 @@ mod tests {
         };
         let src = vec![SourceRef { n: 1, service_id: "hr".into(), service_name: "HR".into(), doc_path: "a.pdf".into(), file_name: "a.pdf".into(), page: Some(4), ord: 0, score: 0.9, rerank_score: None, keyword: false, knowledge: false, text: "ลา 10 วัน".into() }];
         let hist = vec![("q0".to_string(), "a0".to_string())];
-        let m = build_prompt(&svc, &src, &hist, None, "ลาได้กี่วัน", false);
+        let m = build_prompt(&svc, &src, &hist, None, "ลาได้กี่วัน", false, None);
         assert!(!m[0].content.contains("สรุปบทสนทนาช่วงก่อนหน้า"));
-        let with = build_prompt(&svc, &src, &hist, Some("- รหัสพนักงาน 12345"), "ลาได้กี่วัน", false);
+        let with = build_prompt(&svc, &src, &hist, Some("- รหัสพนักงาน 12345"), "ลาได้กี่วัน", false, None);
         assert!(with[0].content.contains("สรุปบทสนทนาช่วงก่อนหน้า") && with[0].content.contains("รหัสพนักงาน 12345"));
         assert_eq!(m.len(), 4);
         assert!(m[0].content.contains("ตอบสั้น"));
@@ -2151,7 +2198,7 @@ mod tests {
         let mut note = src[0].clone();
         note.file_name = "2026-11-12_OT-ไม่ขึ้น.knowledge.md".into();
         note.knowledge = true;
-        let m = build_prompt(&svc, &[note], &[], None, "OT ไม่ขึ้น", false);
+        let m = build_prompt(&svc, &[note], &[], None, "OT ไม่ขึ้น", false, None);
         assert!(m[1].content.contains("[1] บันทึกความรู้: OT ไม่ขึ้น\n"), "{}", m[1].content);
         assert!(m[0].content.contains("ให้ยึดเอกสาร"));
         // queries may be written from the schema, but must say so and come with checks

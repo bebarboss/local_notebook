@@ -134,6 +134,7 @@ export default function NewChatPage({ onMenu, general = false }: { onMenu: () =>
           go({ name: "chat", chatId: "new", initial: { chatId: null, serviceId: svc.id, question: q, model, effort, mode: "docs", allServices } });
         }}
         onPickFiles={general ? api.pickFiles : undefined}
+        onSavePastedImage={general ? api.savePastedImage : undefined}
         onStop={() => {}}
         streaming={false}
         sendBlockedReason={sendBlocked}
