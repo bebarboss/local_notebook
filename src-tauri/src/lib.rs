@@ -28,6 +28,8 @@ pub mod services;
 pub mod share;
 pub mod store;
 pub mod updater;
+pub mod websearch;
+pub mod web_research;
 
 use commands::AppState;
 use tauri::Manager;
@@ -146,6 +148,7 @@ pub fn run() {
             commands::delete_all_chats,
             commands::ask,
             commands::save_pasted_image,
+            commands::open_url,
             commands::stop_generation,
             commands::open_source_file,
             commands::embedding_status,

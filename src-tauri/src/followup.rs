@@ -115,7 +115,7 @@ mod tests {
     fn src(n: usize) -> SourceRef {
         SourceRef {
             n, service_id: "hr".into(), service_name: "HR".into(), doc_path: format!("d{n}.md"), file_name: format!("d{n}.md"),
-            page: None, ord: n as i64, score: 0.5, rerank_score: None, keyword: false, knowledge: false, text: format!("t{n}"),
+            page: None, ord: n as i64, score: 0.5, rerank_score: None, keyword: false, knowledge: false, web: false, text: format!("t{n}"),
         }
     }
 

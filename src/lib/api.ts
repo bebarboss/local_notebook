@@ -140,6 +140,8 @@ export interface Backend {
   ask(req: AskRequest): Promise<AskStarted>;
   /** save an image pasted into a general chat to a temp file; returns its path */
   savePastedImage(bytes: Uint8Array, ext: string): Promise<string>;
+  /** open a web source (http/https) in the system default browser */
+  openUrl(url: string): Promise<void>;
   stop(requestId: string): Promise<void>;
   /** a shared document whose file is on another PC is fetched from the server first */
   openSource(path: string, serviceId?: string): Promise<void>;
@@ -269,6 +271,7 @@ function createTauriBackend(): Backend {
     deleteAllChats: () => call("delete_all_chats"),
     ask: (req) => call("ask", { req: { ...req, now: new Intl.DateTimeFormat("th-TH", { dateStyle: "full", timeStyle: "short" }).format(new Date()) } }),
     savePastedImage: (bytes, ext) => call("save_pasted_image", { bytes: Array.from(bytes), ext }),
+    openUrl: (url) => call("open_url", { url }),
     stop: (requestId) => call("stop_generation", { requestId }),
     openSource: (path, serviceId) => call("open_source_file", { path, serviceId: serviceId ?? null }),
     downloadServiceFiles: (serviceId, dest) => call("download_service_files", { serviceId, dest }),

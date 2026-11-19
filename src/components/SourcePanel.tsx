@@ -8,6 +8,35 @@ import { SourceImageGrid } from "./SourceImages";
 
 export function SourcePanel({ source, onClose }: { source: Source; onClose: () => void }) {
   const { toast } = useApp();
+  if (source.web) {
+    return (
+      <Modal title={`แหล่งจากเว็บ [${source.n}]`} onClose={onClose} width={620}>
+        <div className="kv">
+          <div><span className="k">ชื่อ</span><span style={{ wordBreak: "break-word" }}>{source.fileName}</span></div>
+          <div><span className="k">ลิงก์</span><span style={{ wordBreak: "break-all" }}>{source.docPath}</span></div>
+        </div>
+        <p className="muted" style={{ fontSize: 13, margin: "0 0 4px" }}>เนื้อหาจากเว็บ — อาจไม่อัปเดต/ไม่ถูกต้องเสมอไป ตรวจแหล่งต้นทางก่อนใช้งานจริง</p>
+        <div
+          style={{ background: "var(--sidebar)", borderRadius: 12, padding: "14px 16px", lineHeight: 1.85, fontSize: 14, whiteSpace: "pre-wrap", maxHeight: 340, overflowY: "auto" }}
+          tabIndex={0}
+          aria-label="ข้อความจากหน้าเว็บ"
+        >
+          {source.text}
+        </div>
+        <div className="modal-actions">
+          <button
+            className="btn btn-lg"
+            onClick={async () => {
+              try { await api.openUrl(source.docPath); } catch (e) { toast((e as { message: string }).message); }
+            }}
+          >
+            <ExternalLink size={16} strokeWidth={1.8} aria-hidden="true" />เปิดลิงก์
+          </button>
+          <button className="btn btn-lg btn-primary" onClick={onClose}>{th.close}</button>
+        </div>
+      </Modal>
+    );
+  }
   return (
     <Modal title={source.knowledge ? `บันทึกความรู้ [${source.n}]` : `แหล่งอ้างอิง [${source.n}]`} onClose={onClose} width={620}>
       {source.knowledge && (

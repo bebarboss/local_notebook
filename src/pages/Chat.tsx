@@ -25,6 +25,7 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
   const [effort, setEffort] = useState<Effort>(initial?.effort ?? "medium");
   const [allServices, setAllServices] = useState(initial?.allServices ?? false);
   const [knowledgeUpto, setKnowledgeUpto] = useState<number | null>(null);
+  const [web, setWeb] = useState(initial?.web ?? false);
   const scroller = useRef<HTMLDivElement>(null);
   const started = useRef(false);
   const streamRef = useRef<Stream | null>(null);
@@ -108,7 +109,7 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
       if (docsMode && !serviceId) return;
       const req: AskRequest = {
         chatId: chat?.id ?? (chatId === "new" ? null : chatId),
-        serviceId, question, model, effort, mode, allServices, ...override,
+        serviceId, question, model, effort, mode, allServices, web: docsMode ? false : web, ...override,
         // known before the call, so no early delta/done event can be missed
         requestId: crypto.randomUUID(),
       };
@@ -132,7 +133,7 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
         if (err.code === "gateway_unreachable") app.recheckGateway();
       }
     },
-    [serviceId, docsMode, mode, chat, chatId, model, effort, allServices, bumpChats, go, app],
+    [serviceId, docsMode, mode, chat, chatId, model, effort, allServices, web, bumpChats, go, app],
   );
 
   // first question coming from NewChat
@@ -234,6 +235,8 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
           onAddDocs={docsMode ? addDocs : undefined}
           onPickFiles={docsMode ? undefined : api.pickFiles}
           onSavePastedImage={docsMode ? undefined : api.savePastedImage}
+          web={web}
+          onToggleWeb={docsMode ? undefined : () => setWeb((v) => !v)}
           streaming={!!stream && !stream.error}
           sendBlockedReason={sendBlocked}
           hint={docsMode ? undefined : "คุยทั่วไป — ไม่ค้นเอกสาร ไม่ผูก service"}

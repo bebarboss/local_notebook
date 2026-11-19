@@ -647,6 +647,9 @@ pub struct AskRequest {
     /// into the system prompt so the model can answer "what day is it" questions.
     #[serde(default)]
     pub now: Option<String>,
+    /// general chat only: run a web-research step (DuckDuckGo) before answering.
+    #[serde(default)]
+    pub web: bool,
 }
 
 #[derive(Serialize)]
@@ -754,7 +757,9 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
     // attachments only make sense for a general chat (docs chats search the service instead)
     let attachments = if docs { Vec::new() } else { req.attachments };
     let now = req.now.filter(|s| !s.trim().is_empty());
-    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, docs, model, effort: req.effort, all: req.all_services, question, history, summary, turns, previous, search_query: None, steps: Vec::new(), attachments, now, key, token };
+    // web research is a general-chat feature and needs a tool-calling model
+    let web = !docs && req.web && model.tool_calling;
+    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, docs, model, effort: req.effort, all: req.all_services, question, history, summary, turns, previous, search_query: None, steps: Vec::new(), attachments, now, web, key, token };
     tauri::async_runtime::spawn(job.run());
 
     Ok(AskStarted { request_id, chat_id: chat.id, user_message })
@@ -792,6 +797,8 @@ struct AskJob {
     attachments: Vec<String>,
     /// current date/time from the user's clock, injected into the system prompt
     now: Option<String>,
+    /// general chat only: run the web-research step before answering
+    web: bool,
     key: String,
     token: CancellationToken,
 }
@@ -884,6 +891,28 @@ impl AskJob {
                     _ => None,
                 }
             };
+            // web research: let the model search the public web (DuckDuckGo) a few bounded rounds,
+            // collect sources, then answer citing them. Trouble just yields fewer/zero sources.
+            if self.web {
+                let backend = WebAgent {
+                    model: &self.model,
+                    key: self.key.as_str(),
+                    effort: None,
+                    tools_max: self.model.max_output_tokens.min(2000),
+                };
+                let (rid, cid, app2) = (self.request_id.clone(), self.chat_id.clone(), self.app.clone());
+                let mut collected: Vec<crate::agent::Step> = Vec::new();
+                let sources = crate::web_research::research(&backend, &self.question, self.now.as_deref(), &self.token, |step| {
+                    let _ = app2.emit("chat-step", ChatEvent { request_id: rid.clone(), chat_id: cid.clone(), data: StepEvent { step: step.clone() } });
+                    collected.push(step);
+                })
+                .await;
+                self.steps = collected;
+                self.emit("chat-sources", Sources { sources: sources.clone(), search_query: None });
+                let messages = build_web_prompt(&self.history, self.summary.as_deref(), attached.as_deref(), self.now.as_deref(), &sources, &self.question);
+                self.answer(messages, sources, started).await;
+                return;
+            }
             let messages = build_chat_prompt(&self.history, self.summary.as_deref(), attached.as_deref(), self.now.as_deref(), &self.question);
             self.answer(messages, Vec::new(), started).await;
             return;
@@ -1324,6 +1353,7 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, queries: &[String],
             score: h.score,
             rerank_score,
             keyword: h.keyword,
+            web: false,
             text: h.text,
         })
         .collect())
@@ -1363,6 +1393,26 @@ impl crate::agent::Backend for AgentBackend<'_> {
     }
 }
 
+/// Backend for the web-research loop: a Gateway tool round plus the DuckDuckGo tools.
+struct WebAgent<'a> {
+    model: &'a ModelConfig,
+    key: &'a str,
+    effort: Option<&'a str>,
+    tools_max: u64,
+}
+
+impl crate::web_research::WebBackend for WebAgent<'_> {
+    async fn complete(&self, messages: &serde_json::Value, tools: &serde_json::Value) -> AppResult<llm::Reply> {
+        llm::complete_tools(&self.model.url, self.key, &self.model.id, self.effort, self.tools_max, messages, tools, crate::web_research::PER_CALL).await
+    }
+    async fn search_web(&self, query: &str) -> Vec<crate::websearch::WebHit> {
+        crate::websearch::search(query, crate::web_research::SEARCH_RESULTS).await.unwrap_or_default()
+    }
+    async fn read_url(&self, url: &str) -> Option<String> {
+        crate::websearch::fetch_text(url, crate::web_research::PAGE_CHARS).await.ok()
+    }
+}
+
 /// General-chat prompt: a plain, helpful assistant with no documents and no citation rules.
 /// Keeps the chat's own history and summary, but never mentions "เอกสารที่เกี่ยวข้อง".
 pub fn build_chat_prompt(history: &[(String, String)], summary: Option<&str>, attachments: Option<&str>, now: Option<&str>, question: &str) -> Vec<ChatMessage> {
@@ -1397,6 +1447,44 @@ pub fn build_chat_prompt(history: &[(String, String)], summary: Option<&str>, at
         msgs.push(ChatMessage::new("user", format!("ไฟล์แนบสำหรับคำถามนี้:\n{att}")));
     }
     msgs.push(ChatMessage::new("user", question.to_string()));
+    msgs
+}
+
+/// Web-research prompt: answer from the collected web sources, citing them with [n] → URL. Used
+/// by the "ค้นเว็บ" toggle in a general chat.
+pub fn build_web_prompt(history: &[(String, String)], summary: Option<&str>, attachments: Option<&str>, now: Option<&str>, sources: &[SourceRef], question: &str) -> Vec<ChatMessage> {
+    let mut system = String::from(
+        "คุณคือผู้ช่วยที่ตอบคำถามจากผลการค้นเว็บด้านล่าง\n\
+         - ตอบเป็นภาษาเดียวกับคำถาม ตอบกระชับ ตรงประเด็น ใช้ **ตัวหนา** กับคำสำคัญได้\n\
+         - ใช้ข้อมูลจาก \"แหล่งจากเว็บ\" เป็นหลัก อ้างอิงด้วย [1], [2] ตามหมายเลขแหล่ง ต่อท้ายข้อความที่ใช้ และห้ามสร้างหมายเลขที่ไม่มีอยู่\n\
+         - ข้อมูลจากเว็บอาจไม่ถูกต้องเสมอไป ถ้าแหล่งขัดกันให้บอก และเตือนให้ผู้ใช้ตรวจแหล่งต้นทางก่อนใช้งานจริง\n\
+         - ถ้าผลการค้นไม่พอจะตอบ ให้บอกตรงๆ ว่ายังไม่พบข้อมูลที่ชัดเจนจากเว็บ อย่าเดา",
+    );
+    if let Some(n) = now {
+        system.push_str(&format!("\n- วันเวลาปัจจุบัน: {n}"));
+    }
+    if attachments.is_some() {
+        system.push_str("\n- ผู้ใช้แนบไฟล์มาด้วย (ส่วน \"ไฟล์แนบ\") ใช้ประกอบการตอบได้");
+    }
+    if let Some(s) = summary {
+        system.push_str(&crate::memory::system_note(s));
+    }
+    let mut msgs = vec![ChatMessage::new("system", system)];
+    for (q, a) in history {
+        msgs.push(ChatMessage::new("user", q.clone()));
+        msgs.push(ChatMessage::new("assistant", a.clone()));
+    }
+    if let Some(att) = attachments {
+        msgs.push(ChatMessage::new("user", format!("ไฟล์แนบสำหรับคำถามนี้:\n{att}")));
+    }
+    let mut user = format!("คำถาม: {question}\n\nแหล่งจากเว็บ:\n");
+    if sources.is_empty() {
+        user.push_str("(ค้นเว็บไม่พบผล หรือค้นไม่สำเร็จ)\n");
+    }
+    for s in sources {
+        user.push_str(&format!("[{}] {} ({})\n{}\n\n", s.n, s.file_name, s.doc_path, s.text));
+    }
+    msgs.push(ChatMessage::new("user", user));
     msgs
 }
 
@@ -1477,6 +1565,22 @@ pub async fn open_source_file(app: AppHandle, path: String, service_id: Option<S
     #[cfg(all(unix, not(target_os = "macos")))]
     let r = std::process::Command::new("xdg-open").arg(&p).spawn();
     r.map(|_| ()).map_err(|e| AppError::new("open", format!("เปิดไฟล์ไม่ได้: {e}")))
+}
+
+/// Open a web source (from "ค้นเว็บ") in the system default browser. http/https only.
+#[tauri::command]
+pub fn open_url(url: String) -> AppResult<()> {
+    let u = url::Url::parse(&url).map_err(|_| AppError::new("invalid", "ลิงก์ไม่ถูกต้อง"))?;
+    if !matches!(u.scheme(), "http" | "https") {
+        return Err(AppError::new("invalid", "เปิดได้เฉพาะลิงก์ http/https"));
+    }
+    #[cfg(windows)]
+    let r = std::process::Command::new("explorer").arg(u.as_str()).spawn();
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(u.as_str()).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(u.as_str()).spawn();
+    r.map(|_| ()).map_err(|e| AppError::new("open", format!("เปิดลิงก์ไม่ได้: {e}")))
 }
 
 // ------------------------------------------------------------------ knowledge
@@ -2184,7 +2288,7 @@ mod tests {
             id: "hr".into(), name: "HR".into(), code: "HR".into(), color: "#1F4FD1".into(), folders: vec![], files: vec![], excluded: vec![],
             model: "godev1".into(), effort: "medium".into(), top_k: 5, system_prompt: "ตอบสั้น".into(), knowledge_dir: String::new(), shared: false, created_at: 0, updated_at: 0,
         };
-        let src = vec![SourceRef { n: 1, service_id: "hr".into(), service_name: "HR".into(), doc_path: "a.pdf".into(), file_name: "a.pdf".into(), page: Some(4), ord: 0, score: 0.9, rerank_score: None, keyword: false, knowledge: false, text: "ลา 10 วัน".into() }];
+        let src = vec![SourceRef { n: 1, service_id: "hr".into(), service_name: "HR".into(), doc_path: "a.pdf".into(), file_name: "a.pdf".into(), page: Some(4), ord: 0, score: 0.9, rerank_score: None, keyword: false, knowledge: false, web: false, text: "ลา 10 วัน".into() }];
         let hist = vec![("q0".to_string(), "a0".to_string())];
         let m = build_prompt(&svc, &src, &hist, None, "ลาได้กี่วัน", false, None);
         assert!(!m[0].content.contains("สรุปบทสนทนาช่วงก่อนหน้า"));

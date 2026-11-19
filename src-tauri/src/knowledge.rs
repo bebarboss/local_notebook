@@ -454,7 +454,7 @@ mod tests {
         let mut a = msg(2, "assistant", "ตรวจตาราง PS_TL_PAYABLE_TIME [1]");
         a.sources = vec![SourceRef {
             n: 1, service_id: "s".into(), service_name: "S".into(), doc_path: "x".into(), file_name: "SQL.pdf".into(),
-            page: Some(12), ord: 0, score: 0.5, rerank_score: None, keyword: false, knowledge: false, text: String::new(),
+            page: Some(12), ord: 0, score: 0.5, rerank_score: None, keyword: false, knowledge: false, web: false, text: String::new(),
         }];
         let mut failed = msg(3, "assistant", "");
         failed.error = Some("timeout".into());

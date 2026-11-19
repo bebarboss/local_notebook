@@ -16,6 +16,7 @@ export default function NewChatPage({ onMenu, general = false }: { onMenu: () =>
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState<Effort>("medium");
   const [allServices, setAllServices] = useState(false);
+  const [web, setWeb] = useState(false);
   const mountedActive = useRef(activeServiceId);
 
   const svc = services.find((s) => s.id === picked) ?? null;
@@ -126,7 +127,7 @@ export default function NewChatPage({ onMenu, general = false }: { onMenu: () =>
         onToggleAll={() => setAllServices((v) => !v)}
         onSend={async (q, atts) => {
           if (general) {
-            go({ name: "chat", chatId: "new", initial: { chatId: null, serviceId: null, question: q, model, effort, mode: "chat", allServices: false, attachments: atts } });
+            go({ name: "chat", chatId: "new", initial: { chatId: null, serviceId: null, question: q, model, effort, mode: "chat", allServices: false, attachments: atts, web } });
             return;
           }
           if (!svc) return;
@@ -135,6 +136,8 @@ export default function NewChatPage({ onMenu, general = false }: { onMenu: () =>
         }}
         onPickFiles={general ? api.pickFiles : undefined}
         onSavePastedImage={general ? api.savePastedImage : undefined}
+        web={web}
+        onToggleWeb={general ? () => setWeb((v) => !v) : undefined}
         onStop={() => {}}
         streaming={false}
         sendBlockedReason={sendBlocked}

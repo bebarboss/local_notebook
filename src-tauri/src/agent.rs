@@ -244,7 +244,7 @@ mod tests {
     fn src(id: &str, path: &str, ord: i64, text: &str) -> SourceRef {
         SourceRef {
             n: 1, service_id: id.into(), service_name: "S".into(), doc_path: path.into(), file_name: "f".into(),
-            page: None, ord, score: 0.5, rerank_score: None, keyword: false, knowledge: false, text: text.into(),
+            page: None, ord, score: 0.5, rerank_score: None, keyword: false, knowledge: false, web: false, text: text.into(),
         }
     }
 

@@ -350,12 +350,27 @@ export function createMockBackend(): Backend {
           const attLine = atts.length
             ? `\n\n📎 แนบ ${atts.length} ไฟล์: ${atts.map((p: string) => p.split(/[/\\]/).pop()).join(", ")} (ของจริงจะอ่านข้อความ/OCR มาเป็น context)`
             : "";
-          const text = `นี่เป็นคำตอบสมมติในโหมด **คุยทั่วไป** (mock) — ตอบจากความรู้ทั่วไป ไม่ได้ค้นเอกสาร\n\nถ้าต้องการอ้างอิงข้อมูลบริษัท ให้สลับไปโหมด "คุยจากเอกสาร"${attLine}`;
+          // web research (mock): emit a couple of steps + fake web sources
+          let webSources: Source[] = [];
+          if (req.web) {
+            emit("chat-step", { requestId, chatId: cid, step: { kind: "websearch", detail: req.question.slice(0, 24), found: 2 } });
+            await wait(250);
+            emit("chat-step", { requestId, chatId: cid, step: { kind: "webread", detail: "example.com", found: 0 } });
+            await wait(200);
+            emit("chat-step", { requestId, chatId: cid, step: { kind: "done", detail: "", found: 0 } });
+            webSources = [
+              { n: 1, web: true, serviceId: "", serviceName: "เว็บ", docPath: "https://example.com/a", fileName: "ตัวอย่างผลเว็บ A", page: null, ord: 0, score: 0, text: "เนื้อหาสมมติจากเว็บ A" },
+              { n: 2, web: true, serviceId: "", serviceName: "เว็บ", docPath: "https://example.org/b", fileName: "ตัวอย่างผลเว็บ B", page: null, ord: 0, score: 0, text: "เนื้อหาสมมติจากเว็บ B" },
+            ];
+            emit("chat-sources", { requestId, chatId: cid, sources: clone(webSources) });
+          }
+          const webLine = req.web ? "นี่เป็นคำตอบสมมติจาก **ค้นเว็บ** (mock) อ้างอิง [1][2]" : `นี่เป็นคำตอบสมมติในโหมด **คุยทั่วไป** (mock) — ตอบจากความรู้ทั่วไป ไม่ได้ค้นเอกสาร\n\nถ้าต้องการอ้างอิงข้อมูลบริษัท ให้สลับไปโหมด "คุยจากเอกสาร"`;
+          const text = `${webLine}${attLine}`;
           await wait(300);
           let out = "";
           const parts = text.match(/.{1,6}/gsu) ?? [];
           for (const p of parts) { if (st.stopped) break; await wait(30); out += p; emit("chat-delta", { requestId, chatId: cid, delta: p }); }
-          const msg: Message = { id: ++seq, chatId: cid, role: "assistant", content: out, model: req.model, reasoningEffort: req.effort, sources: [], elapsedMs: now() - started, error: st.stopped ? "หยุดโดยผู้ใช้" : null, createdAt: now() };
+          const msg: Message = { id: ++seq, chatId: cid, role: "assistant", content: out, model: req.model, reasoningEffort: req.effort, sources: webSources, elapsedMs: now() - started, error: st.stopped ? "หยุดโดยผู้ใช้" : null, createdAt: now() };
           messages[cid].push(msg);
           const c = chats.find((x) => x.id === cid);
           if (c) c.updatedAt = now();
@@ -568,6 +583,7 @@ export function createMockBackend(): Backend {
     pickFolder: async () => "D:\\Docs\\ตัวอย่าง",
     pickFiles: async () => ["D:\\Docs\\เอกสารใหม่.pdf"],
     savePastedImage: async (_bytes, ext) => `D:\\paste\\วางรูป-${Date.now().toString(36)}.${ext}`,
+    openUrl: async (url) => { window.open(url, "_blank", "noopener"); },
     pickZip: async () => "C:\\Users\\me\\Downloads\\DocAsk-HR-นโยบาย.zip",
     pickJson: async () => "C:\\Users\\me\\AppData\\Roaming\\Code\\User\\chatLanguageModels.json",
     on: async (event, cb) => {

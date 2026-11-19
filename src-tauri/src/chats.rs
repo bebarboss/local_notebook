@@ -40,6 +40,9 @@ pub struct SourceRef {
     /// a knowledge note saved from an earlier chat (`*.knowledge.md`)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub knowledge: bool,
+    /// a web result/page from the "ค้นเว็บ" research step (`doc_path` is the URL)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub web: bool,
     pub text: String,
 }
 

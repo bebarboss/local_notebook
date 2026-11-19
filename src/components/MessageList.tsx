@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BookMarked, BookOpen, Copy, Check, CircleAlert, RotateCcw, Search } from "lucide-react";
+import { BookMarked, BookOpen, Copy, Check, CircleAlert, Globe, RotateCcw, Search } from "lucide-react";
 import type { AgentStep, Message, Source } from "../lib/types";
 import { th } from "../i18n/th";
 import { initials, useApp } from "../state";
@@ -33,6 +33,10 @@ function stepText(s: AgentStep): string {
       return `ค้นเพิ่ม: ${s.detail}${s.found ? ` — เจอ ${s.found} ท่อน` : " — ไม่พบท่อนใหม่"}`;
     case "read":
       return `อ่านรอบแหล่ง ${s.detail}`;
+    case "websearch":
+      return `ค้นเว็บ: ${s.detail}${s.found ? ` — เจอ ${s.found} แหล่ง` : ""}`;
+    case "webread":
+      return `อ่านหน้า: ${s.detail}`;
     case "done":
       return "ข้อมูลพอแล้ว";
     case "error":
@@ -45,6 +49,7 @@ function stepText(s: AgentStep): string {
 function stepIcon(kind: string) {
   const p = { size: 12, strokeWidth: 2, "aria-hidden": true } as const;
   if (kind === "read") return <BookOpen {...p} />;
+  if (kind === "websearch" || kind === "webread") return <Globe {...p} />;
   if (kind === "done") return <Check {...p} />;
   if (kind === "error") return <CircleAlert {...p} />;
   return <Search {...p} />;

@@ -106,6 +106,8 @@ export interface Source {
   rerankScore?: number | null;
   /** found by keyword (exact words) search */
   keyword?: boolean;
+  /** a web result/page from the "ค้นเว็บ" research step (docPath is the URL) */
+  web?: boolean;
   text: string;
 }
 
@@ -380,6 +382,8 @@ export interface AskRequest {
   attachments?: string[];
   /** current date/time from the user's clock (Thai-formatted); set automatically in api.ask */
   now?: string;
+  /** general chat only: run a web-research step (DuckDuckGo) before answering */
+  web?: boolean;
 }
 
 export interface AskStarted {

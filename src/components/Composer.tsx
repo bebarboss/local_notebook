@@ -1,5 +1,5 @@
 import { type ClipboardEvent, useEffect, useRef, useState } from "react";
-import { ArrowUp, Paperclip, Plus, Square, X } from "lucide-react";
+import { ArrowUp, Globe, Paperclip, Plus, Square, X } from "lucide-react";
 import type { Effort, ModelConfig, Service } from "../lib/types";
 import { th } from "../i18n/th";
 import { ModelPicker } from "./ModelPicker";
@@ -7,7 +7,7 @@ import { ModelPicker } from "./ModelPicker";
 const baseName = (p: string) => p.replace(/[/\\]+$/, "").split(/[/\\]/).pop() || p;
 
 export function Composer({
-  service, docsMode = true, models, model, effort, onModelChange, allServices, onToggleAll, onSend, onStop, onAddDocs, onPickFiles, onSavePastedImage,
+  service, docsMode = true, models, model, effort, onModelChange, allServices, onToggleAll, onSend, onStop, onAddDocs, onPickFiles, onSavePastedImage, web, onToggleWeb,
   streaming, sendBlockedReason, placeholder, hint, autoFocus, lockedScope,
 }: {
   service: Service | null;
@@ -26,6 +26,10 @@ export function Composer({
   onPickFiles?: () => Promise<string[]>;
   /** general chat: save an image pasted (Ctrl+V) into the box; returns its temp path */
   onSavePastedImage?: (bytes: Uint8Array, ext: string) => Promise<string>;
+  /** general chat: whether the "ค้นเว็บ" (web research) toggle is on */
+  web?: boolean;
+  /** general chat: toggle web research; the button shows only when this is provided */
+  onToggleWeb?: () => void;
   streaming: boolean;
   /** when set, typing works but sending is blocked (e.g. gateway down) */
   sendBlockedReason: string | null;
@@ -141,6 +145,12 @@ export function Composer({
               <Paperclip size={16} strokeWidth={2} />
             </button>
           )}
+          {!docsMode && onToggleWeb && (
+            <button type="button" className="scope-btn" aria-pressed={!!web} onClick={onToggleWeb} title="ค้นเว็บสาธารณะด้วย DuckDuckGo ก่อนตอบ (คำค้นถูกส่งออกอินเทอร์เน็ต)">
+              <Globe size={14} strokeWidth={2} aria-hidden="true" />
+              ค้นเว็บ
+            </button>
+          )}
           {docsMode && onAddDocs && (
             <button type="button" className="icon-btn bordered" aria-label={th.addDocs} title={th.addDocs} onClick={onAddDocs} disabled={disabled}>
               <Plus size={16} strokeWidth={2} />
@@ -172,7 +182,7 @@ export function Composer({
           )}
         </div>
       </form>
-      <span className="composer-hint">{sendBlockedReason ?? hint ?? defaultHint}</span>
+      <span className="composer-hint">{sendBlockedReason ?? (!docsMode && web ? "ค้นเว็บสาธารณะ — คำค้นถูกส่งออกอินเทอร์เน็ต (DuckDuckGo)" : hint ?? defaultHint)}</span>
     </div>
   );
 }
