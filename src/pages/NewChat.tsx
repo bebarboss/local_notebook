@@ -132,10 +132,10 @@ export default function NewChatPage({ onMenu, general = false }: { onMenu: () =>
           }
           if (!svc) return;
           await app.updateSettings({ lastServiceId: svc.id });
-          go({ name: "chat", chatId: "new", initial: { chatId: null, serviceId: svc.id, question: q, model, effort, mode: "docs", allServices } });
+          go({ name: "chat", chatId: "new", initial: { chatId: null, serviceId: svc.id, question: q, model, effort, mode: "docs", allServices, attachments: atts } });
         }}
-        onPickFiles={general ? api.pickFiles : undefined}
-        onSavePastedImage={general ? api.savePastedImage : undefined}
+        onPickFiles={api.pickFiles}
+        onSavePastedImage={api.savePastedImage}
         web={web}
         onToggleWeb={general ? () => setWeb((v) => !v) : undefined}
         onStop={() => {}}

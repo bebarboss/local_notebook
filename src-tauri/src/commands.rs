@@ -754,8 +754,8 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
     let token = CancellationToken::new();
     state.streams.lock().insert(request_id.clone(), token.clone());
 
-    // attachments only make sense for a general chat (docs chats search the service instead)
-    let attachments = if docs { Vec::new() } else { req.attachments };
+    // attachments are per-question context in both modes (docs chats also search the service)
+    let attachments = req.attachments;
     let now = req.now.filter(|s| !s.trim().is_empty());
     // web research is a general-chat feature and needs a tool-calling model
     let web = !docs && req.web && model.tool_calling;
@@ -873,24 +873,27 @@ impl AskJob {
         let started = Instant::now();
         let elapsed = || started.elapsed().as_millis() as i64;
 
+        // files/images attached to this one question (both modes): read fresh (OCR for images) as
+        // extra context, never indexed or saved. In docs mode they sit alongside the retrieved
+        // passages; in general mode they are the only context.
+        let attached = if self.attachments.is_empty() {
+            None
+        } else {
+            let opts = {
+                let st = self.app.state::<AppState>();
+                let s = st.settings.lock();
+                crate::ingest::chunker::ChunkOptions { size: s.chunk_size, overlap: s.chunk_overlap }
+            };
+            let paths = self.attachments.clone();
+            match tauri::async_runtime::spawn_blocking(move || read_attachments(&paths, opts)).await {
+                Ok(t) if !t.is_empty() => Some(t),
+                _ => None,
+            }
+        };
+
         // general (floating) chat: no documents, no retrieval — just answer with the model's
         // own knowledge, keeping the chat's own history.
         if !self.docs {
-            // read any attached files/images fresh (OCR for images) as context for this one turn
-            let attached = if self.attachments.is_empty() {
-                None
-            } else {
-                let opts = {
-                    let st = self.app.state::<AppState>();
-                    let s = st.settings.lock();
-                    crate::ingest::chunker::ChunkOptions { size: s.chunk_size, overlap: s.chunk_overlap }
-                };
-                let paths = self.attachments.clone();
-                match tauri::async_runtime::spawn_blocking(move || read_attachments(&paths, opts)).await {
-                    Ok(t) if !t.is_empty() => Some(t),
-                    _ => None,
-                }
-            };
             // web research: let the model search the public web (DuckDuckGo) a few bounded rounds,
             // collect sources, then answer citing them. Trouble just yields fewer/zero sources.
             if self.web {
@@ -976,7 +979,7 @@ impl AskJob {
 
         self.emit("chat-sources", Sources { sources: sources.clone(), search_query: self.search_query.clone() });
 
-        let messages = build_prompt(&svc, &sources, &self.history, self.summary.as_deref(), &self.question, self.all, self.now.as_deref());
+        let messages = build_prompt(&svc, &sources, &self.history, self.summary.as_deref(), &self.question, self.all, self.now.as_deref(), attached.as_deref());
         self.answer(messages, sources, started).await;
     }
 
@@ -1488,7 +1491,8 @@ pub fn build_web_prompt(history: &[(String, String)], summary: Option<&str>, att
     msgs
 }
 
-pub fn build_prompt(svc: &Service, sources: &[SourceRef], history: &[(String, String)], summary: Option<&str>, question: &str, all: bool, now: Option<&str>) -> Vec<ChatMessage> {
+#[allow(clippy::too_many_arguments)]
+pub fn build_prompt(svc: &Service, sources: &[SourceRef], history: &[(String, String)], summary: Option<&str>, question: &str, all: bool, now: Option<&str>, attachments: Option<&str>) -> Vec<ChatMessage> {
     let mut system = String::from(
         "คุณคือผู้ช่วยตอบคำถามจากเอกสารภายในองค์กร\n\
          - ตอบเป็นภาษาเดียวกับคำถาม\n\
@@ -1512,6 +1516,12 @@ pub fn build_prompt(svc: &Service, sources: &[SourceRef], history: &[(String, St
     if let Some(n) = now {
         system.push_str(&format!("\n- วันเวลาปัจจุบัน (ตามนาฬิกาเครื่องผู้ใช้): {n} — ใช้ตอบคำถามเกี่ยวกับวัน/เวลาได้"));
     }
+    if attachments.is_some() {
+        system.push_str(
+            "\n- ผู้ใช้แนบไฟล์มากับคำถามนี้ (ส่วน \"ไฟล์แนบ\") ข้อความนั้นดึงจากไฟล์ (รูปผ่าน OCR) \
+             ใช้ประกอบคำตอบได้เพิ่มจาก \"เอกสารที่เกี่ยวข้อง\" ถ้าอ้างอิงเนื้อหาจากไฟล์แนบให้บอกว่ามาจากไฟล์แนบ",
+        );
+    }
     if !svc.system_prompt.trim().is_empty() {
         system.push_str("\n\nคำแนะนำเพิ่มเติมของ service นี้:\n");
         system.push_str(svc.system_prompt.trim());
@@ -1523,6 +1533,9 @@ pub fn build_prompt(svc: &Service, sources: &[SourceRef], history: &[(String, St
     for (q, a) in history {
         msgs.push(ChatMessage::new("user", q.clone()));
         msgs.push(ChatMessage::new("assistant", a.clone()));
+    }
+    if let Some(att) = attachments {
+        msgs.push(ChatMessage::new("user", format!("ไฟล์แนบสำหรับคำถามนี้:\n{att}")));
     }
     let mut user = format!("คำถาม: {question}\n\nเอกสารที่เกี่ยวข้อง:\n");
     if sources.is_empty() {
@@ -2290,9 +2303,9 @@ mod tests {
         };
         let src = vec![SourceRef { n: 1, service_id: "hr".into(), service_name: "HR".into(), doc_path: "a.pdf".into(), file_name: "a.pdf".into(), page: Some(4), ord: 0, score: 0.9, rerank_score: None, keyword: false, knowledge: false, web: false, text: "ลา 10 วัน".into() }];
         let hist = vec![("q0".to_string(), "a0".to_string())];
-        let m = build_prompt(&svc, &src, &hist, None, "ลาได้กี่วัน", false, None);
+        let m = build_prompt(&svc, &src, &hist, None, "ลาได้กี่วัน", false, None, None);
         assert!(!m[0].content.contains("สรุปบทสนทนาช่วงก่อนหน้า"));
-        let with = build_prompt(&svc, &src, &hist, Some("- รหัสพนักงาน 12345"), "ลาได้กี่วัน", false, None);
+        let with = build_prompt(&svc, &src, &hist, Some("- รหัสพนักงาน 12345"), "ลาได้กี่วัน", false, None, None);
         assert!(with[0].content.contains("สรุปบทสนทนาช่วงก่อนหน้า") && with[0].content.contains("รหัสพนักงาน 12345"));
         assert_eq!(m.len(), 4);
         assert!(m[0].content.contains("ตอบสั้น"));
@@ -2302,7 +2315,7 @@ mod tests {
         let mut note = src[0].clone();
         note.file_name = "2026-11-12_OT-ไม่ขึ้น.knowledge.md".into();
         note.knowledge = true;
-        let m = build_prompt(&svc, &[note], &[], None, "OT ไม่ขึ้น", false, None);
+        let m = build_prompt(&svc, &[note], &[], None, "OT ไม่ขึ้น", false, None, None);
         assert!(m[1].content.contains("[1] บันทึกความรู้: OT ไม่ขึ้น\n"), "{}", m[1].content);
         assert!(m[0].content.contains("ให้ยึดเอกสาร"));
         // queries may be written from the schema, but must say so and come with checks

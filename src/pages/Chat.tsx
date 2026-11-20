@@ -233,8 +233,8 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
           onSend={(q, atts) => send(q, atts && atts.length ? { attachments: atts } : undefined)}
           onStop={() => stream?.requestId && api.stop(stream.requestId)}
           onAddDocs={docsMode ? addDocs : undefined}
-          onPickFiles={docsMode ? undefined : api.pickFiles}
-          onSavePastedImage={docsMode ? undefined : api.savePastedImage}
+          onPickFiles={api.pickFiles}
+          onSavePastedImage={api.savePastedImage}
           web={web}
           onToggleWeb={docsMode ? undefined : () => setWeb((v) => !v)}
           streaming={!!stream && !stream.error}

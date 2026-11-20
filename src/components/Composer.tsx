@@ -77,7 +77,7 @@ export function Composer({
   };
 
   const onPaste = async (e: ClipboardEvent<HTMLTextAreaElement>) => {
-    if (docsMode || !onSavePastedImage) return;
+    if (!onSavePastedImage) return;
     const imgs = Array.from(e.clipboardData.items).filter((it) => it.kind === "file" && it.type.startsWith("image/"));
     if (!imgs.length) return;
     e.preventDefault();
@@ -140,8 +140,8 @@ export function Composer({
           </div>
         )}
         <div className="composer-row">
-          {!docsMode && onPickFiles && (
-            <button type="button" className="icon-btn bordered" aria-label="แนบไฟล์หรือรูป" title="แนบไฟล์หรือรูป (อ่านเฉพาะคำถามนี้ ไม่บันทึก)" onClick={pickFiles} disabled={picking}>
+          {onPickFiles && (
+            <button type="button" className="icon-btn bordered" aria-label="แนบไฟล์หรือรูป" title="แนบไฟล์หรือรูปเฉพาะคำถามนี้ (อ่านสด/OCR ไม่บันทึกเข้า service)" onClick={pickFiles} disabled={picking}>
               <Paperclip size={16} strokeWidth={2} />
             </button>
           )}
