@@ -66,6 +66,10 @@ pub fn start_in_tray(app: &AppHandle) {
 /// Window events: hide instead of close while indexing.
 pub fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
     let WindowEvent::CloseRequested { api, .. } = event else { return };
+    // only the main window hides-to-tray; hidden helper windows (web-research render) close normally
+    if window.label() != "main" {
+        return;
+    }
     let app = window.app_handle();
     if !app.state::<AppState>().indexer.any_running() {
         return; // nothing to finish → close normally

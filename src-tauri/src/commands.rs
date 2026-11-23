@@ -898,6 +898,7 @@ impl AskJob {
             // collect sources, then answer citing them. Trouble just yields fewer/zero sources.
             if self.web {
                 let backend = WebAgent {
+                    app: &self.app,
                     model: &self.model,
                     key: self.key.as_str(),
                     effort: None,
@@ -1398,21 +1399,45 @@ impl crate::agent::Backend for AgentBackend<'_> {
 
 /// Backend for the web-research loop: a Gateway tool round plus the DuckDuckGo tools.
 struct WebAgent<'a> {
+    app: &'a AppHandle,
     model: &'a ModelConfig,
     key: &'a str,
     effort: Option<&'a str>,
     tools_max: u64,
 }
 
+/// A static fetch under this many characters is treated as "thin" — likely a JS-rendered page —
+/// so we re-read it with the headless renderer.
+const THIN_PAGE: usize = 400;
+
 impl crate::web_research::WebBackend for WebAgent<'_> {
     async fn complete(&self, messages: &serde_json::Value, tools: &serde_json::Value) -> AppResult<llm::Reply> {
         llm::complete_tools(&self.model.url, self.key, &self.model.id, self.effort, self.tools_max, messages, tools, crate::web_research::PER_CALL).await
     }
     async fn search_web(&self, query: &str) -> Vec<crate::websearch::WebHit> {
-        crate::websearch::search(query, crate::web_research::SEARCH_RESULTS).await.unwrap_or_default()
+        // fast path: keyless HTTP search. Works until DuckDuckGo bot-blocks the IP (HTTP 202).
+        if let Ok(hits) = crate::websearch::search(query, crate::web_research::SEARCH_RESULTS).await {
+            if !hits.is_empty() {
+                return hits;
+            }
+        }
+        // blocked/empty → run the search in a real browser, which passes the anomaly challenge
+        crate::headless::ddg_search(self.app, query, crate::web_research::SEARCH_RESULTS).await.unwrap_or_default()
     }
     async fn read_url(&self, url: &str) -> Option<String> {
-        crate::websearch::fetch_text(url, crate::web_research::PAGE_CHARS).await.ok()
+        // fast path: plain HTTP fetch + readable-text pass
+        let statik = crate::websearch::fetch_text(url, crate::web_research::PAGE_CHARS).await.ok();
+        let thin = statik.as_ref().map(|t| t.chars().count() < THIN_PAGE).unwrap_or(true);
+        // only pay the render cost when the static text looks empty/JS-rendered
+        if thin {
+            if let Ok(rendered) = crate::headless::render_text(self.app, url, crate::web_research::PAGE_CHARS).await {
+                return Some(match statik {
+                    Some(s) if s.chars().count() >= rendered.chars().count() => s,
+                    _ => rendered,
+                });
+            }
+        }
+        statik
     }
 }
 

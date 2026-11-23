@@ -1,6 +1,6 @@
 [package]
 name = "docask"
-version = "0.23.0"
+version = "0.24.0"
 description = "DocAsk — ถามตอบจากเอกสารในเครื่อง (RAG) ผ่าน Gosoft Agent Gateway"
 edition = "2021"
 rust-version = "1.77"
@@ -64,6 +64,10 @@ tauri-plugin-single-instance = "2"
 [target.'cfg(windows)'.dependencies]
 # docask:// setup links (HKCU\Software\Classes) — same version the autostart plugin uses
 winreg = "0.56"
+# headless WebView2 render for "ค้นเว็บ": read innerText from a hidden window via ExecuteScript.
+# Versions pinned to what tauri 2.12 links, so the COM types unify with PlatformWebview::controller().
+webview2-com = "0.39"
+windows = "0.62"
 
 [dev-dependencies]
 tempfile = "3"

@@ -15,6 +15,7 @@ pub mod gateway_test;
 pub mod ingest;
 pub mod knowledge;
 pub mod followup;
+pub mod headless;
 pub mod team;
 pub mod connect;
 pub mod memory;

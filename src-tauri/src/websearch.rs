@@ -1,18 +1,29 @@
 //! Keyless web search for the "ค้นเว็บ" toggle in a general chat. Uses DuckDuckGo's HTML
-//! endpoint (no API key) and a plain HTML→text pass for pages. Unofficial endpoint, so treat as
-//! best-effort: a failed search/fetch returns an error the caller turns into "ค้นเว็บไม่ได้"
-//! rather than failing the whole question. Never logs the query, the page text, or the answer —
-//! only hosts, counts, and error codes.
+//! endpoint (no API key), falling back to the Lite endpoint when the HTML one rate-limits, plus a
+//! plain HTML→text pass for pages (structured data + tables + article text). Unofficial endpoints,
+//! so treat as best-effort: a failed search/fetch returns an error the caller turns into
+//! "ค้นเว็บไม่ได้" rather than failing the whole question. Never logs the query, the page text, or
+//! the answer — only hosts, counts, and error codes.
 
 use crate::errors::{AppError, AppResult};
+use std::collections::HashSet;
 use std::time::Duration;
 
 /// A generic browser-like UA — never carries user/account details (privacy rule).
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+/// Primary SERP (rich HTML). When it rate-limits we fall back to the Lite one below.
 const SEARCH_URL: &str = "https://html.duckduckgo.com/html/";
+/// Lite SERP: a plain table of results that survives when the HTML endpoint throttles us.
+const LITE_URL: &str = "https://lite.duckduckgo.com/lite/";
 const REQ_TIMEOUT: Duration = Duration::from_secs(12);
 /// Cap a fetched page's raw HTML before parsing, so a giant page can't blow up memory.
 const BODY_CAP: usize = 2_000_000;
+/// JSON-LD keys worth surfacing as readable text (news/articles, products/prices, places).
+const LD_KEYS: &[&str] = &[
+    "name", "headline", "alternativeheadline", "description", "articlebody", "text",
+    "datepublished", "datemodified", "price", "pricecurrency", "lowprice", "highprice",
+    "value", "unittext", "availability", "address", "telephone", "author", "publisher",
+];
 
 /// One search result.
 #[derive(Debug, Clone, PartialEq)]
@@ -27,10 +38,31 @@ pub fn host_of(u: &str) -> String {
     url::Url::parse(u).ok().and_then(|p| p.host_str().map(|h| h.to_string())).unwrap_or_else(|| "เว็บ".to_string())
 }
 
-/// Search DuckDuckGo and return up to `max` results. Error = couldn't reach/parse the endpoint.
+/// Search DuckDuckGo and return up to `max` results. Tries the HTML endpoint, then the Lite one.
+/// Error = couldn't reach/parse either endpoint; `Ok(empty)` = reached one but it had no results.
 pub async fn search(query: &str, max: usize) -> AppResult<Vec<WebHit>> {
+    let mut last_err: Option<AppError> = None;
+    // 1) rich HTML endpoint
+    match fetch_serp(SEARCH_URL, query).await {
+        Ok(html) => {
+            let hits = parse_serp(&html, max);
+            if !hits.is_empty() {
+                return Ok(hits);
+            }
+        }
+        Err(e) => last_err = Some(e),
+    }
+    // 2) Lite endpoint (different markup; holds up when the HTML one throttles)
+    match fetch_serp(LITE_URL, query).await {
+        Ok(html) => Ok(parse_lite(&html, max)),
+        Err(e) => Err(last_err.unwrap_or(e)),
+    }
+}
+
+/// GET a SERP endpoint and return its HTML, or an error with just the status code.
+async fn fetch_serp(endpoint: &str, query: &str) -> AppResult<String> {
     let resp = crate::llm::CLIENT
-        .get(SEARCH_URL)
+        .get(endpoint)
         .query(&[("q", query), ("kl", "th-th")])
         .header(reqwest::header::USER_AGENT, UA)
         .timeout(REQ_TIMEOUT)
@@ -40,8 +72,7 @@ pub async fn search(query: &str, max: usize) -> AppResult<Vec<WebHit>> {
     if !resp.status().is_success() {
         return Err(AppError::new("web_search", format!("ค้นเว็บไม่สำเร็จ (HTTP {})", resp.status().as_u16())));
     }
-    let html = resp.text().await.map_err(AppError::from)?;
-    Ok(parse_serp(&html, max))
+    resp.text().await.map_err(AppError::from)
 }
 
 /// Fetch a page and return its readable text, trimmed to `cap` characters.
@@ -100,6 +131,31 @@ fn parse_serp(html: &str, max: usize) -> Vec<WebHit> {
     out
 }
 
+/// Pull results out of the DuckDuckGo Lite SERP (a flat table: links then snippets in order).
+fn parse_lite(html: &str, max: usize) -> Vec<WebHit> {
+    use scraper::{Html, Selector};
+    let doc = Html::parse_document(html);
+    let (Ok(a_sel), Ok(snip_sel)) =
+        (Selector::parse("a.result-link"), Selector::parse("td.result-snippet")) else {
+        return Vec::new();
+    };
+    let snippets: Vec<String> = doc.select(&snip_sel).map(|s| collapse_ws(&s.text().collect::<String>())).collect();
+    let mut out = Vec::new();
+    for (i, a) in doc.select(&a_sel).enumerate() {
+        let title = collapse_ws(&a.text().collect::<String>());
+        let Some(url) = a.value().attr("href").and_then(clean_ddg_url) else { continue };
+        if title.is_empty() {
+            continue;
+        }
+        let snippet = snippets.get(i).cloned().unwrap_or_default();
+        out.push(WebHit { title, url, snippet });
+        if out.len() >= max {
+            break;
+        }
+    }
+    out
+}
+
 /// Turn a DuckDuckGo result href into the real destination URL. Handles both the `/l/?uddg=…`
 /// redirect (protocol-relative too) and a direct link. Returns `None` for anything not http(s).
 fn clean_ddg_url(href: &str) -> Option<String> {
@@ -115,23 +171,117 @@ fn clean_ddg_url(href: &str) -> Option<String> {
     None
 }
 
-/// A rough readable-text pass: the text of the usual content blocks, de-scripted by construction
-/// (script/style are not among the selected tags). Short/boilerplate lines are dropped.
+/// A readable-text pass over a page: structured data (JSON-LD, meta) first, then table rows joined
+/// cell-by-cell (so price tables keep their numbers), then the usual article/body text blocks.
+/// Script/style never appear (they are not among the selected tags). Short/boilerplate lines drop.
 fn html_to_text(html: &str, cap: usize) -> String {
     use scraper::{Html, Selector};
     let doc = Html::parse_document(html);
-    let Ok(sel) = Selector::parse("p, h1, h2, h3, h4, li, td, blockquote") else {
-        return String::new();
-    };
     let mut parts: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for el in doc.select(&sel) {
-        let t = collapse_ws(&el.text().collect::<String>());
-        if t.chars().count() >= 20 && seen.insert(t.clone()) {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut add = |t: String, min: usize| {
+        if t.chars().count() >= min && seen.insert(t.clone()) {
             parts.push(t);
         }
+    };
+
+    // 1) structured data — the most reliable place to find a headline, a price, a published date
+    for bit in structured_bits(&doc) {
+        add(bit, 3);
     }
+
+    // 2) table rows: join a row's cells so "ทองแท่ง | 42,100 | 42,200" survives as one line
+    if let Ok(tr_sel) = Selector::parse("tr") {
+        if let Ok(cell_sel) = Selector::parse("td, th") {
+            for tr in doc.select(&tr_sel) {
+                let cells: Vec<String> = tr
+                    .select(&cell_sel)
+                    .map(|c| collapse_ws(&c.text().collect::<String>()))
+                    .filter(|c| !c.is_empty())
+                    .collect();
+                if cells.len() >= 2 {
+                    add(cells.join(" | "), 8);
+                }
+            }
+        }
+    }
+
+    // 3) article/body text blocks
+    if let Ok(sel) = Selector::parse("p, h1, h2, h3, h4, li, blockquote, dd, caption, figcaption") {
+        for el in doc.select(&sel) {
+            add(collapse_ws(&el.text().collect::<String>()), 20);
+        }
+    }
+
     cap_text(&parts.join("\n"), cap)
+}
+
+/// Readable values from `<meta>` description/OpenGraph tags and JSON-LD blocks.
+fn structured_bits(doc: &scraper::Html) -> Vec<String> {
+    use scraper::Selector;
+    let mut out = Vec::new();
+    if let Ok(meta_sel) = Selector::parse(
+        r#"meta[name="description"], meta[property="og:title"], meta[property="og:description"]"#,
+    ) {
+        for m in doc.select(&meta_sel) {
+            if let Some(c) = m.value().attr("content") {
+                let c = collapse_ws(c);
+                if !c.is_empty() {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    if let Ok(ld_sel) = Selector::parse(r#"script[type="application/ld+json"]"#) {
+        for s in doc.select(&ld_sel) {
+            let raw = s.text().collect::<String>();
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                let mut vals = Vec::new();
+                collect_ld(&v, &mut vals);
+                out.extend(vals);
+            }
+        }
+    }
+    out
+}
+
+/// Walk a JSON-LD value and collect the string/number values under the keys we care about.
+/// Bounded so a pathological document can't dump unbounded text.
+fn collect_ld(v: &serde_json::Value, out: &mut Vec<String>) {
+    use serde_json::Value;
+    const MAX_LD: usize = 40;
+    match v {
+        Value::Object(map) => {
+            for (k, val) in map {
+                if out.len() >= MAX_LD {
+                    return;
+                }
+                if LD_KEYS.contains(&k.to_lowercase().as_str()) {
+                    match val {
+                        Value::String(s) => {
+                            let s = collapse_ws(s);
+                            if !s.is_empty() {
+                                out.push(format!("{k}: {s}"));
+                            }
+                        }
+                        Value::Number(n) => out.push(format!("{k}: {n}")),
+                        _ => collect_ld(val, out),
+                    }
+                } else {
+                    collect_ld(val, out);
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr {
+                if out.len() >= MAX_LD {
+                    return;
+                }
+                collect_ld(item, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn collapse_ws(s: &str) -> String {
@@ -166,6 +316,15 @@ mod tests {
         </div>
       </body></html>"#;
 
+    // Lite SERP: links and snippets live in separate rows, matched positionally.
+    const LITE: &str = r#"
+      <html><body><table>
+        <tr><td>1.&nbsp;</td><td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fa.com%2Fx&rut=1" class="result-link">ผลแรก A</a></td></tr>
+        <tr><td></td><td class="result-snippet">ตัวอย่างของผลแรกที่ยาวพอ</td></tr>
+        <tr><td>2.&nbsp;</td><td><a rel="nofollow" href="https://b.com/y" class="result-link">ผลสอง B</a></td></tr>
+        <tr><td></td><td class="result-snippet">ตัวอย่างของผลสอง</td></tr>
+      </table></body></html>"#;
+
     #[test]
     fn parses_serp_and_decodes_uddg() {
         let hits = parse_serp(SERP, 10);
@@ -179,6 +338,16 @@ mod tests {
     #[test]
     fn serp_respects_max() {
         assert_eq!(parse_serp(SERP, 1).len(), 1);
+    }
+
+    #[test]
+    fn parses_lite_serp() {
+        let hits = parse_lite(LITE, 10);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].url, "https://a.com/x");
+        assert!(hits[0].title.contains("ผลแรก"));
+        assert!(hits[0].snippet.contains("ยาวพอ"), "snippet matched to its link by position");
+        assert_eq!(hits[1].url, "https://b.com/y");
     }
 
     #[test]
@@ -208,6 +377,26 @@ mod tests {
         assert!(!text.contains("secret"), "script contents must not appear");
         assert!(!text.contains("color:red"), "style contents must not appear");
         assert!(!text.contains("สั้น"), "too-short lines are dropped");
+    }
+
+    #[test]
+    fn html_to_text_keeps_table_rows_and_structured_data() {
+        let html = r#"<html><head>
+              <meta name="description" content="ราคาทองประจำวัน อัปเดตล่าสุด">
+              <script type="application/ld+json">
+                {"@type":"Article","headline":"ราคาทองวันนี้ปรับขึ้น","datePublished":"2026-11-20","price":42200}
+              </script>
+            </head><body>
+              <table>
+                <tr><th>ประเภท</th><th>รับซื้อ</th><th>ขายออก</th></tr>
+                <tr><td>ทองคำแท่ง</td><td>42,100</td><td>42,200</td></tr>
+              </table>
+            </body></html>"#;
+        let text = html_to_text(html, 10_000);
+        assert!(text.contains("ราคาทองประจำวัน"), "meta description surfaced");
+        assert!(text.contains("ราคาทองวันนี้ปรับขึ้น"), "JSON-LD headline surfaced");
+        assert!(text.contains("42200") || text.contains("price: 42200"), "JSON-LD price surfaced");
+        assert!(text.contains("ทองคำแท่ง | 42,100 | 42,200"), "table row joined cell-by-cell");
     }
 
     #[test]
