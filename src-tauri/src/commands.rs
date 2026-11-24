@@ -823,7 +823,7 @@ struct AskJob {
     /// the last good answer and its sources, for follow-up questions
     previous: Option<(String, Vec<SourceRef>)>,
     search_query: Option<String>,
-    /// the agentic gather step's activity, saved with the answer
+    /// the web-research / coding loop's live activity, saved with the answer
     steps: Vec<crate::agent::Step>,
     /// file paths attached to this question (general chat only); read fresh, never saved
     attachments: Vec<String>,
@@ -1014,7 +1014,7 @@ impl AskJob {
             }
         }
 
-        let mut sources = match retrieve(&self.app, &svc, self.all, &queries, &carried).await {
+        let sources = match retrieve(&self.app, &svc, self.all, &queries, &carried).await {
             Ok(s) => s,
             Err(e) => {
                 self.fail(e, &[], elapsed());
@@ -1022,35 +1022,6 @@ impl AskJob {
                 return;
             }
         };
-
-        // agentic gather: when the first passages fall short (a table name behind a field code,
-        // a schema in another document), let the model search again a few bounded rounds. Only
-        // for a tool-calling model, a single service, and when the setting is on.
-        let agentic = self.model.tool_calling && !self.all && self.app.state::<AppState>().settings.lock().agentic;
-        if agentic && !self.token.is_cancelled() {
-            // inner scope so `backend` (which borrows &self) is dropped before we touch self.steps
-            let (gathered, collected) = {
-                let backend = AgentBackend {
-                    app: &self.app, svc: &svc, model: &self.model, key: self.key.as_str(),
-                    effort: None, tools_max: self.model.max_output_tokens.min(2000),
-                };
-                let (rid, cid, app2) = (self.request_id.clone(), self.chat_id.clone(), self.app.clone());
-                let mut collected: Vec<crate::agent::Step> = Vec::new();
-                let gathered = crate::agent::gather(&backend, &self.question, &sources, &self.token, |step| {
-                    let _ = app2.emit("chat-step", ChatEvent { request_id: rid.clone(), chat_id: cid.clone(), data: StepEvent { step: step.clone() } });
-                    collected.push(step);
-                })
-                .await;
-                (gathered, collected)
-            };
-            self.steps = collected;
-            if !gathered.added.is_empty() {
-                sources.extend(gathered.added);
-                for (i, s) in sources.iter_mut().enumerate() {
-                    s.n = i + 1;
-                }
-            }
-        }
 
         self.emit("chat-sources", Sources { sources: sources.clone(), search_query: self.search_query.clone() });
 
@@ -1447,40 +1418,6 @@ async fn retrieve(app: &AppHandle, svc: &Service, all: bool, queries: &[String],
             text: h.text,
         })
         .collect())
-}
-
-/// Wires the agentic gather step (agent.rs) to the Gateway and this PC's retrieval.
-struct AgentBackend<'a> {
-    app: &'a AppHandle,
-    svc: &'a Service,
-    model: &'a ModelConfig,
-    key: &'a str,
-    effort: Option<&'a str>,
-    tools_max: u64,
-}
-
-impl crate::agent::Backend for AgentBackend<'_> {
-    async fn complete(&self, messages: &serde_json::Value, tools: &serde_json::Value) -> AppResult<llm::Reply> {
-        llm::complete_tools(&self.model.url, self.key, &self.model.id, self.effort, self.tools_max, messages, tools, crate::agent::PER_CALL).await
-    }
-    async fn search(&self, queries: &[String]) -> Vec<SourceRef> {
-        // the same service only (never "all services"); whole-note expansion applies here too
-        retrieve(self.app, self.svc, false, queries, &[]).await.unwrap_or_default()
-    }
-    async fn read_around(&self, src: &SourceRef) -> Option<String> {
-        let state = self.app.state::<AppState>();
-        let ords = [src.ord - 1, src.ord + 1];
-        let mut got = state.stores.get(&src.service_id).ok().and_then(|st| st.lock().chunk_texts_at(&src.doc_path, &ords).ok()).unwrap_or_default();
-        if got.is_empty() && self.svc.shared {
-            got = crate::team::neighbours(&src.service_id, &src.doc_path, &ords).await.unwrap_or_default();
-        }
-        let before = got.iter().find(|(o, _)| *o == src.ord - 1).map(|(_, t)| t.as_str());
-        let after = got.iter().find(|(o, _)| *o == src.ord + 1).map(|(_, t)| t.as_str());
-        if before.is_none() && after.is_none() {
-            return None;
-        }
-        Some(crate::context::widen(before, &src.text, after))
-    }
 }
 
 /// Backend for the web-research loop: a Gateway tool round plus the DuckDuckGo tools.

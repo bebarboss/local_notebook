@@ -101,7 +101,7 @@ export function createMockBackend(): Backend {
   let settings: Settings = {
     theme: "system", userName: "navaritrod", setupDone: false, historyTurns: 20, autoDeleteDays: 0,
     topK: 5, threshold: 0.3, chunkSize: 1000, chunkOverlap: 150, embeddingModel: "bge-m3", teamServer: false, lastServiceId: "hr",
-    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true, rerank: true, hybrid: true, indexLoad: "normal", font: "looped", textSize: "m", startHidden: true, knowledgeDupCheck: true, knowledgeDupThreshold: 0.85, agentic: true,
+    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true, rerank: true, hybrid: true, indexLoad: "normal", font: "looped", textSize: "m", startHidden: true, knowledgeDupCheck: true, knowledgeDupThreshold: 0.85,
   };
   try {
     const saved = localStorage.getItem("docask-mock-settings");
@@ -418,17 +418,7 @@ export function createMockBackend(): Backend {
         const prevQ = messages[cid].filter((m) => m.role === "user").slice(-2, -1)[0]?.content;
         const searchQuery = prevQ && req.question.trim().length < 60 ? `${prevQ} ${req.question.trim()}` : undefined;
         await wait(400);
-        // mock the agentic gather step for questions that mention a field/table-ish token
         const steps: AgentStep[] = [];
-        if (settings.agentic && /[A-Z]{2,}_[A-Z]/.test(req.question)) {
-          const term = req.question.match(/[A-Z][A-Z_]{2,}/)?.[0] ?? "PS_X";
-          await wait(500);
-          steps.push({ kind: "search", detail: term, found: 2 });
-          emit("chat-step", { requestId, chatId: cid, step: steps[steps.length - 1] });
-          await wait(500);
-          steps.push({ kind: "done", detail: "", found: 0 });
-          emit("chat-step", { requestId, chatId: cid, step: steps[steps.length - 1] });
-        }
         emit("chat-sources", { requestId, chatId: cid, sources: srcs, searchQuery });
         let out = "";
         const parts = text.match(/.{1,6}/gsu) ?? [];

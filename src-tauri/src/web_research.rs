@@ -1,4 +1,4 @@
-//! Bounded web-research loop for the "ค้นเว็บ" toggle. Mirrors `agent::gather` but the tools are
+//! Bounded web-research loop for the "ค้นเว็บ" toggle. A bounded tool-calling loop whose tools are
 //! `web_search` (DuckDuckGo) and `read_url` (fetch a page as text). Hard limits: `MAX_ROUNDS`,
 //! a wall-clock budget, and a cap on pages collected. On any trouble (no tool call, an error, a
 //! cancel) the loop ends and we answer on what we have. Reuses `agent::Step` so the UI shows the

@@ -261,8 +261,6 @@ export interface Settings {
   knowledgeDupCheck: boolean;
   /** how alike (0.5–0.99) counts as the same problem */
   knowledgeDupThreshold: number;
-  /** let the model search again when the first passages fall short (skipped for non-tool models) */
-  agentic: boolean;
 }
 
 

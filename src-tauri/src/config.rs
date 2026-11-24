@@ -78,9 +78,6 @@ pub struct Settings {
     pub knowledge_dup_check: bool,
     /// how alike two notes must be (cosine of their first chunks) to be called the same
     pub knowledge_dup_threshold: f32,
-    /// let the model search again when the first passages fall short (agent.rs); skipped for
-    /// a model that can't call tools
-    pub agentic: bool,
 }
 
 /// The server that came with this build, else bge-m3 on this PC.
@@ -121,7 +118,6 @@ impl Default for Settings {
             start_hidden: true,
             knowledge_dup_check: true,
             knowledge_dup_threshold: 0.85,
-            agentic: true,
         }
     }
 }
