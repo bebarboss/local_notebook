@@ -43,8 +43,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           DOCASK_UPDATE_URL: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
           # the home server's URL only — never its token: the installer is public and the
-          # server now holds the team's documents and chats (server/embed/README.md)
-          DOCASK_EMBED_URL: ${{ secrets.DOCASK_EMBED_URL }}
+          # server now holds the team's documents and chats (server/embed/README.md).
+          # A public, stable URL, so it lives here rather than in a secret.
+          DOCASK_EMBED_URL: https://docask.cobie.online
         with:
           tagName: ${{ github.ref_name }}
           releaseName: DocAsk ${{ github.ref_name }}
