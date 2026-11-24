@@ -3,9 +3,11 @@
 //! Two uses:
 //!   * `render_text` — read `document.body.innerText` of a page (values a site renders with JS that
 //!     a plain HTTP fetch would miss: live prices, scores).
-//!   * `ddg_search` — run the DuckDuckGo search *in a real browser*, which passes the bot/anomaly
-//!     challenge that blocks keyless HTTP scraping (DDG returns HTTP 202 + a challenge page to bare
-//!     requests). This keeps web search working without any API key.
+//!   * `browser_search` — run a web search *in a real browser*, which passes the bot/anomaly
+//!     challenge that blocks keyless HTTP scraping (DuckDuckGo returns HTTP 202 + a challenge page
+//!     to bare requests). It renders the server-rendered result page and parses it with the tested
+//!     parsers in `websearch`. Tries DuckDuckGo's HTML endpoint first, then Bing (a second, mostly
+//!     unblocked engine) when DDG returns nothing — e.g. when DDG rate-limits. No API key.
 //!
 //! Safety: the hidden window uses a one-off label that no capability targets, so the external page
 //! it loads cannot invoke any app/plugin/core command — we only pull data out from Rust, never
@@ -28,6 +30,8 @@ const READ_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// JS that reads the visible text of the page.
 const INNER_TEXT_JS: &str = "document.body ? document.body.innerText : ''";
+/// JS that reads the rendered HTML of the page body (for parsing a search-results page in Rust).
+const INNER_HTML_JS: &str = "document.body ? document.body.innerHTML : ''";
 
 /// Load `url` in a hidden WebView2, wait for JS to render, and return `document.body.innerText`
 /// trimmed to `cap` characters. Windows only; returns an error on other platforms.
@@ -39,52 +43,41 @@ pub async fn render_text(app: &AppHandle, url: &str, cap: usize) -> AppResult<St
     Ok(cap_chars(&text, cap))
 }
 
-/// Search DuckDuckGo inside a real browser and return up to `max` results. This is the fallback for
-/// when the keyless HTTP endpoints are bot-blocked (HTTP 202 challenge). Snippets are left empty —
-/// the research loop reads the promising links for their content.
-pub async fn ddg_search(app: &AppHandle, query: &str, max: usize) -> AppResult<Vec<WebHit>> {
-    let search_url = url::Url::parse_with_params(
-        "https://duckduckgo.com/",
-        &[("q", query), ("kl", "th-th"), ("ia", "web")],
+/// Search inside a real browser and return up to `max` results. The fallback for when the keyless
+/// HTTP endpoints are bot-blocked (HTTP 202 challenge). Renders a server-rendered results page and
+/// parses it with the tested parsers in `websearch`. DuckDuckGo's HTML endpoint first; Bing if DDG
+/// comes back empty (rate-limited). Returns an error only when neither page could be rendered.
+pub async fn browser_search(app: &AppHandle, query: &str, max: usize) -> AppResult<Vec<WebHit>> {
+    let ddg = url::Url::parse_with_params(
+        "https://html.duckduckgo.com/html/",
+        &[("q", query), ("kl", "th-th")],
     )
     .map_err(|_| AppError::new("web_render", "คำค้นไม่ถูกต้อง"))?
     .to_string();
 
-    // collect result links from whichever DuckDuckGo result markup rendered, as a JSON array
-    let script = format!(
-        r#"(function(){{
-            var sels=['a[data-testid="result-title-a"]','a.result__a','.result__title a','h2 a[href^="http"]'];
-            var out=[],seen={{}};
-            for(var i=0;i<sels.length;i++){{
-                document.querySelectorAll(sels[i]).forEach(function(a){{
-                    var u=a.href||'';
-                    if(!u||seen[u]) return;
-                    if(u.indexOf('duckduckgo.com')>-1) return;
-                    if(u.indexOf('http')!==0) return;
-                    seen[u]=1;
-                    out.push({{title:(a.innerText||'').replace(/\s+/g,' ').trim(),url:u}});
-                }});
-                if(out.length) break;
-            }}
-            return JSON.stringify(out.slice(0,{max}));
-        }})()"#
-    );
+    // 1) DuckDuckGo HTML endpoint (same markup our tested parse_serp handles)
+    let mut last_err: Option<AppError> = None;
+    match eval_on_page(app, &ddg, INNER_HTML_JS, SEARCH_SETTLE).await {
+        Ok(html) => {
+            let hits = crate::websearch::parse_serp(&html, max);
+            if !hits.is_empty() {
+                return Ok(hits);
+            }
+        }
+        Err(e) => last_err = Some(e),
+    }
 
-    let json = eval_on_page(app, &search_url, &script, SEARCH_SETTLE).await?;
-    let raw: Vec<RawHit> = serde_json::from_str(&json).unwrap_or_default();
-    Ok(raw
-        .into_iter()
-        .filter(|h| !h.url.is_empty())
-        .map(|h| WebHit { title: h.title, url: h.url, snippet: String::new() })
-        .collect())
-}
-
-#[derive(serde::Deserialize)]
-struct RawHit {
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    url: String,
+    // 2) Bing (a second engine that is rarely blocked; direct links)
+    let bing = url::Url::parse_with_params(
+        "https://www.bing.com/search",
+        &[("q", query), ("setlang", "th")],
+    )
+    .map_err(|_| AppError::new("web_render", "คำค้นไม่ถูกต้อง"))?
+    .to_string();
+    match eval_on_page(app, &bing, INNER_HTML_JS, SEARCH_SETTLE).await {
+        Ok(html) => Ok(crate::websearch::parse_bing(&html, max)),
+        Err(e) => Err(last_err.unwrap_or(e)),
+    }
 }
 
 /// Build a hidden window at `url`, let it settle, run `script`, and return its (decoded) string

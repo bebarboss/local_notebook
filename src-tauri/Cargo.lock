@@ -1194,12 +1194,13 @@ dependencies = [
 
 [[package]]
 name = "docask"
-version = "0.24.0"
+version = "0.24.1"
 dependencies = [
  "base64 0.22.1",
  "calamine",
  "csv",
  "dirs 5.0.1",
+ "ego-tree",
  "futures-util",
  "hex",
  "image",

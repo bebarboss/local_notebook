@@ -1421,8 +1421,8 @@ impl crate::web_research::WebBackend for WebAgent<'_> {
                 return hits;
             }
         }
-        // blocked/empty → run the search in a real browser, which passes the anomaly challenge
-        crate::headless::ddg_search(self.app, query, crate::web_research::SEARCH_RESULTS).await.unwrap_or_default()
+        // blocked/empty → run the search in a real browser (DDG HTML endpoint, then Bing)
+        crate::headless::browser_search(self.app, query, crate::web_research::SEARCH_RESULTS).await.unwrap_or_default()
     }
     async fn read_url(&self, url: &str) -> Option<String> {
         // fast path: plain HTTP fetch + readable-text pass

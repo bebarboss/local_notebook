@@ -103,8 +103,9 @@ pub async fn fetch_text(page_url: &str, cap: usize) -> AppResult<String> {
     Ok(text)
 }
 
-/// Pull result blocks out of the DuckDuckGo HTML SERP.
-fn parse_serp(html: &str, max: usize) -> Vec<WebHit> {
+/// Pull result blocks out of the DuckDuckGo HTML SERP. `pub(crate)` so the headless browser
+/// search can reuse it on the HTML endpoint it renders.
+pub(crate) fn parse_serp(html: &str, max: usize) -> Vec<WebHit> {
     use scraper::{Html, Selector};
     let doc = Html::parse_document(html);
     let (Ok(result_sel), Ok(a_sel), Ok(snip_sel)) = (
@@ -156,6 +157,44 @@ fn parse_lite(html: &str, max: usize) -> Vec<WebHit> {
     out
 }
 
+/// Pull organic results out of a Bing SERP (`<li class="b_algo"><h2><a href=…>` with a
+/// `.b_caption` snippet). Bing links are direct URLs, no redirect. Used as the second engine the
+/// headless browser renders when DuckDuckGo returns nothing (e.g. rate-limited). `pub(crate)`.
+pub(crate) fn parse_bing(html: &str, max: usize) -> Vec<WebHit> {
+    use scraper::{Html, Selector};
+    let doc = Html::parse_document(html);
+    let (Ok(item_sel), Ok(a_sel), Ok(cap_sel)) = (
+        Selector::parse("li.b_algo"),
+        Selector::parse("h2 a"),
+        Selector::parse(".b_caption p, .b_caption, p"),
+    ) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for item in doc.select(&item_sel) {
+        let Some(a) = item.select(&a_sel).next() else { continue };
+        let Some(href) = a.value().attr("href") else { continue };
+        if !matches!(url::Url::parse(href).ok().as_ref().map(|u| u.scheme()), Some("http") | Some("https")) {
+            continue;
+        }
+        let host = host_of(href);
+        if host == "www.bing.com" || host == "bing.com" {
+            continue; // skip Bing's own "see more"/translate links
+        }
+        let title = collapse_ws(&a.text().collect::<String>());
+        if title.is_empty() || !seen.insert(href.to_string()) {
+            continue;
+        }
+        let snippet = item.select(&cap_sel).next().map(|s| collapse_ws(&s.text().collect::<String>())).unwrap_or_default();
+        out.push(WebHit { title, url: href.to_string(), snippet });
+        if out.len() >= max {
+            break;
+        }
+    }
+    out
+}
+
 /// Turn a DuckDuckGo result href into the real destination URL. Handles both the `/l/?uddg=…`
 /// redirect (protocol-relative too) and a direct link. Returns `None` for anything not http(s).
 fn clean_ddg_url(href: &str) -> Option<String> {
@@ -172,8 +211,10 @@ fn clean_ddg_url(href: &str) -> Option<String> {
 }
 
 /// A readable-text pass over a page: structured data (JSON-LD, meta) first, then table rows joined
-/// cell-by-cell (so price tables keep their numbers), then the usual article/body text blocks.
-/// Script/style never appear (they are not among the selected tags). Short/boilerplate lines drop.
+/// cell-by-cell (so price tables keep their numbers), then a block-aware walk of the rest of the
+/// page. The walk emits one line per block element and keeps inline text (so modern `<div>`/`<span>`
+/// card layouts — price boxes, scores, Tailwind sites — survive, which selecting only `<p>`/`<li>`
+/// would miss). Script/style/nav/footer and the already-handled tables are skipped. Short lines drop.
 fn html_to_text(html: &str, cap: usize) -> String {
     use scraper::{Html, Selector};
     let doc = Html::parse_document(html);
@@ -206,14 +247,71 @@ fn html_to_text(html: &str, cap: usize) -> String {
         }
     }
 
-    // 3) article/body text blocks
-    if let Ok(sel) = Selector::parse("p, h1, h2, h3, h4, li, blockquote, dd, caption, figcaption") {
-        for el in doc.select(&sel) {
-            add(collapse_ws(&el.text().collect::<String>()), 20);
-        }
+    // 3) the rest of the page, one line per block element (keeps div/span card text)
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    walk_text(doc.tree.root(), 0, &mut cur, &mut lines);
+    flush_line(&mut cur, &mut lines);
+    for line in lines {
+        add(line, 8);
     }
 
     cap_text(&parts.join("\n"), cap)
+}
+
+/// Tags whose whole subtree is skipped: non-content, boilerplate, or handled elsewhere (tables).
+fn is_skip(name: &str) -> bool {
+    matches!(
+        name,
+        "script" | "style" | "noscript" | "template" | "svg" | "head" | "iframe" | "nav"
+            | "footer" | "aside" | "table"
+    )
+}
+
+/// Block-level tags: a line break starts before and after them so their text doesn't glue to siblings.
+fn is_block(name: &str) -> bool {
+    matches!(
+        name,
+        "p" | "div" | "section" | "article" | "main" | "header" | "li" | "ul" | "ol" | "dl" | "dt"
+            | "dd" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "br" | "blockquote" | "figure"
+            | "figcaption" | "caption" | "hr" | "pre" | "address" | "details" | "summary"
+    )
+}
+
+/// Recursively collect visible text: append inline text into `cur`, and flush `cur` as a line at
+/// each block boundary. Bounded depth so a pathological document can't overflow the stack.
+fn walk_text(node: ego_tree::NodeRef<'_, scraper::Node>, depth: usize, cur: &mut String, out: &mut Vec<String>) {
+    if depth > 500 {
+        return;
+    }
+    for child in node.children() {
+        match child.value() {
+            scraper::Node::Text(t) => cur.push_str(t),
+            scraper::Node::Element(el) => {
+                let name = el.name();
+                if is_skip(name) {
+                    continue;
+                }
+                if is_block(name) {
+                    flush_line(cur, out);
+                    walk_text(child, depth + 1, cur, out);
+                    flush_line(cur, out);
+                } else {
+                    walk_text(child, depth + 1, cur, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Collapse the buffered text into one line and push it (if non-empty), then clear the buffer.
+fn flush_line(cur: &mut String, out: &mut Vec<String>) {
+    let line = collapse_ws(cur);
+    cur.clear();
+    if !line.is_empty() {
+        out.push(line);
+    }
 }
 
 /// Readable values from `<meta>` description/OpenGraph tags and JSON-LD blocks.
@@ -350,6 +448,31 @@ mod tests {
         assert_eq!(hits[1].url, "https://b.com/y");
     }
 
+    // Bing SERP: organic results are <li class="b_algo"> with a direct link and a caption.
+    const BING: &str = r#"
+      <html><body><ol id="b_results">
+        <li class="b_algo"><h2><a href="https://example.com/ai">10 โปรเจค AI น่าสร้าง</a></h2>
+          <div class="b_caption"><p>รวมไอเดียโปรเจค AI ที่ลงมือทำได้จริง</p></div></li>
+        <li class="b_algo"><h2><a href="https://www.bing.com/translator">ตัวแปลภาษา Bing</a></h2></li>
+        <li class="b_algo"><h2><a href="https://foo.org/rag">สร้างระบบ RAG</a></h2>
+          <div class="b_caption"><p>คู่มือทำ RAG chatbot</p></div></li>
+      </ol></body></html>"#;
+
+    #[test]
+    fn parses_bing_serp() {
+        let hits = parse_bing(BING, 10);
+        assert_eq!(hits.len(), 2, "two organic results; Bing's own translate link dropped");
+        assert_eq!(hits[0].url, "https://example.com/ai");
+        assert!(hits[0].title.contains("โปรเจค AI"));
+        assert!(hits[0].snippet.contains("ลงมือทำได้จริง"));
+        assert_eq!(hits[1].url, "https://foo.org/rag");
+    }
+
+    #[test]
+    fn bing_respects_max() {
+        assert_eq!(parse_bing(BING, 1).len(), 1);
+    }
+
     #[test]
     fn clean_url_handles_redirect_and_direct() {
         assert_eq!(
@@ -397,6 +520,25 @@ mod tests {
         assert!(text.contains("ราคาทองวันนี้ปรับขึ้น"), "JSON-LD headline surfaced");
         assert!(text.contains("42200") || text.contains("price: 42200"), "JSON-LD price surfaced");
         assert!(text.contains("ทองคำแท่ง | 42,100 | 42,200"), "table row joined cell-by-cell");
+    }
+
+    #[test]
+    fn html_to_text_keeps_div_span_cards() {
+        // modern layout (e.g. goldtraders.or.th): price lives in div/span cards, no <table>/<p>
+        let html = r#"<html><body>
+              <nav><a href="/menu">เมนูหลักของเว็บไซต์ที่ยาวพอจะถูกตัด</a></nav>
+              <main>
+                <div class="flex"><span>รับซื้อ</span><span>58,150.00</span></div>
+                <div class="flex"><span>ขายออก</span><span>58,350.00</span></div>
+              </main>
+            </body></html>"#;
+        let text = html_to_text(html, 10_000);
+        assert!(
+            text.contains("รับซื้อ 58,150.00") || text.contains("รับซื้อ58,150.00"),
+            "price card kept as one line: {text}"
+        );
+        assert!(text.contains("ขายออก"), "second card kept");
+        assert!(!text.contains("เมนูหลัก"), "nav boilerplate is skipped");
     }
 
     #[test]
