@@ -10,16 +10,15 @@ import { MessageList, type StreamingState } from "../components/MessageList";
 import { KnowledgeDialog } from "../components/KnowledgeDialog";
 import { ErrorState, Skeleton } from "../components/ui";
 
-interface Stream extends StreamingState { requestId: string | null; chatId: string | null }
-
 export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; initial?: AskRequest; onMenu: () => void }) {
   const app = useApp();
-  const { services, stats, gateway, go, models: allModels, setActiveServiceId, setAppMode, bumpChats } = app;
+  const { services, stats, gateway, go, models: allModels, setActiveServiceId, setAppMode, bumpChats, live, startLive, failLive, clearLive } = app;
   const models = visibleModels(allModels);
   const [chat, setChat] = useState<ChatT | null>(null);
   const [messages, setMessages] = useState<Message[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [stream, setStream] = useState<Stream | null>(null);
+  // a synchronous failure of ask() itself (before any job/event), e.g. gateway down on a brand-new chat
+  const [askError, setAskError] = useState<string | null>(null);
   const [showDocs, setShowDocs] = useState(() => window.innerWidth > 1100);
   const [model, setModel] = useState(initial?.model ?? "");
   const [effort, setEffort] = useState<Effort>(initial?.effort ?? "medium");
@@ -29,8 +28,10 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
   const [projectDir, setProjectDir] = useState<string | null>(initial?.projectDir ?? null);
   const scroller = useRef<HTMLDivElement>(null);
   const started = useRef(false);
-  const streamRef = useRef<Stream | null>(null);
-  streamRef.current = stream;
+  // the chat id this page just created via send() → don't wipe its state on the "new"→id transition
+  const justCreated = useRef<string | null>(null);
+  const liveRef = useRef(live);
+  liveRef.current = live;
 
   const serviceId = chat?.serviceId ?? initial?.serviceId ?? null;
   const service = services.find((s) => s.id === serviceId) ?? null;
@@ -40,6 +41,11 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
   // folder: a re-pick in this session wins; otherwise the one persisted on the chat (or from `initial`)
   const projectFolder = projectDir ?? chat?.projectDir ?? null;
 
+  // the in-flight generation for this chat is kept at app level, so it survives leaving/returning
+  const liveStream = chatId !== "new" ? live[chatId] : undefined;
+  const activeStream = liveStream && !liveStream.done ? liveStream : undefined;
+  const stream: StreamingState | null = activeStream ?? (askError ? { content: "", sources: [], error: askError } : null);
+
   // keep the sidebar workspace in sync with the chat being viewed
   useEffect(() => { setAppMode(mode); }, [mode, setAppMode]);
 
@@ -47,6 +53,10 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
   const load = useCallback(async () => {
     if (chatId === "new") return;
     setLoadError(null);
+    setAskError(null);
+    // a turn that finished (done/errored) while we were away is already saved to DB — drop its live
+    const l = liveRef.current[chatId];
+    if (l && (l.done || l.error)) clearLive(chatId);
     try {
       const [c, m] = await Promise.all([api.getChat(chatId), api.getMessages(chatId)]);
       setChat(c);
@@ -59,49 +69,33 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
     } catch (e) {
       setLoadError((e as { message: string }).message);
     }
-  }, [chatId, services, setActiveServiceId]);
+  }, [chatId, services, setActiveServiceId, clearLive]);
 
   const shownChat = useRef<string | null>(null);
   useEffect(() => {
     // only reset when the chat really changes (StrictMode re-runs effects)
     if (shownChat.current === chatId) return;
     shownChat.current = chatId;
-    if (chatId !== "new" && streamRef.current?.chatId === chatId) return; // just created by us
+    if (chatId !== "new" && justCreated.current === chatId) { justCreated.current = null; return; } // just created by us
     setMessages(chatId === "new" ? [] : null);
     setChat(null);
-    setStream(null);
+    setAskError(null);
     setModel(initial?.model ?? "");
     setAllServices(initial?.allServices ?? false);
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId]);
 
-  // ---- streaming events
-  // Subscribe ONCE. Re-subscribing on every context change (e.g. a gateway-status
-  // event) leaves a gap in which chat-done can be lost and the UI stays "streaming".
-  const appRef = useRef(app);
-  appRef.current = app;
+  // when the running turn finishes, fold its saved message into the list and drop the live stream
   useEffect(() => {
-    const offs = [
-      api.on("chat-sources", (p) => setStream((s) => (s && s.requestId === p.requestId ? { ...s, sources: p.sources, searchQuery: p.searchQuery } : s))),
-      api.on("chat-step", (p) => setStream((s) => (s && s.requestId === p.requestId ? { ...s, steps: [...(s.steps ?? []), p.step] } : s))),
-      api.on("chat-changes", (p) => setStream((s) => (s && s.requestId === p.requestId ? { ...s, changes: p.changes } : s))),
-      api.on("chat-delta", (p) => setStream((s) => (s && s.requestId === p.requestId ? { ...s, content: s.content + p.delta } : s))),
-      api.on("chat-done", (p) => {
-        if (streamRef.current?.requestId !== p.requestId) return;
-        setMessages((m) => [...(m ?? []), p.message]);
-        setStream(null);
-        appRef.current.bumpChats();
-      }),
-      api.on("chat-error", (p) => {
-        if (streamRef.current?.requestId !== p.requestId) return;
-        setStream((s) => (s ? { ...s, error: p.error.message } : s));
-        appRef.current.bumpChats();
-        if (p.error.code === "gateway_unreachable") appRef.current.recheckGateway();
-      }),
-    ];
-    return () => offs.forEach((o) => o.then((f) => f()));
-  }, []);
+    if (chatId === "new") return;
+    const l = live[chatId];
+    if (l?.done) {
+      const msg = l.done;
+      setMessages((m) => ((m ?? []).some((x) => x.id === msg.id) ? (m ?? []) : [...(m ?? []), msg]));
+      clearLive(chatId);
+    }
+  }, [live, chatId, clearLive]);
 
   // keep scrolled to bottom while streaming
   useEffect(() => {
@@ -112,34 +106,36 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
   const send = useCallback(
     async (question: string, override?: Partial<AskRequest>) => {
       if (docsMode && !serviceId) return;
+      // requestId known before the call, so no early delta/done event can be missed
+      const requestId = crypto.randomUUID();
+      const existingId = chat?.id ?? (chatId === "new" ? null : chatId);
       const req: AskRequest = {
-        chatId: chat?.id ?? (chatId === "new" ? null : chatId),
+        chatId: existingId,
         serviceId, question, model, effort, mode, allServices,
         web: mode === "chat" ? web : false, code: codeMode, projectDir: codeMode ? projectFolder : null, ...override,
-        // known before the call, so no early delta/done event can be missed
-        requestId: crypto.randomUUID(),
+        requestId,
       };
-      const fresh: Stream = { requestId: req.requestId!, chatId: req.chatId, content: "", sources: [], error: null };
-      streamRef.current = fresh;
-      setStream(fresh);
+      setAskError(null);
+      if (existingId) startLive(existingId, requestId); // show "thinking" right away for an existing chat
       try {
         const r = await api.ask(req);
-        setStream((s) => (s && s.requestId === r.requestId ? { ...s, chatId: r.chatId } : s));
         setMessages((m) => [...(m ?? []), r.userMessage]);
-        if (!req.chatId) {
+        if (!existingId) {
+          startLive(r.chatId, requestId);
+          justCreated.current = r.chatId; // the reset effect must not wipe this freshly-created chat
           const c = await api.getChat(r.chatId).catch(() => null);
           if (c) setChat(c);
-          streamRef.current = { ...(streamRef.current as Stream), chatId: r.chatId };
           bumpChats();
           go({ name: "chat", chatId: r.chatId });
         }
       } catch (e) {
         const err = e as { code: string; message: string };
-        setStream({ requestId: null, chatId: req.chatId, content: "", sources: [], error: err.message });
+        if (existingId) failLive(existingId, err.message);
+        else setAskError(err.message);
         if (err.code === "gateway_unreachable") app.recheckGateway();
       }
     },
-    [serviceId, docsMode, codeMode, mode, chat, chatId, model, effort, allServices, web, projectFolder, bumpChats, go, app],
+    [serviceId, docsMode, codeMode, mode, chat, chatId, model, effort, allServices, web, projectFolder, bumpChats, go, app, startLive, failLive],
   );
 
   // first question coming from NewChat
@@ -243,7 +239,7 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
           allServices={allServices}
           onToggleAll={() => setAllServices((v) => !v)}
           onSend={(q, atts) => send(q, atts && atts.length ? { attachments: atts } : undefined)}
-          onStop={() => stream?.requestId && api.stop(stream.requestId)}
+          onStop={() => activeStream?.requestId && api.stop(activeStream.requestId)}
           onAddDocs={docsMode ? addDocs : undefined}
           onPickFiles={api.pickFiles}
           onSavePastedImage={api.savePastedImage}

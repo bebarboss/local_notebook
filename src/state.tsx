@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./lib/api";
-import type { AskRequest, GatewayStatus, ModelConfig, Service, ServiceStats, Settings } from "./lib/types";
+import type { AgentStep, AskRequest, CodeChange, GatewayStatus, Message, ModelConfig, Service, ServiceStats, Settings, Source } from "./lib/types";
 
 export type Page =
   | { name: "chat"; chatId: string; initial?: AskRequest }
@@ -15,6 +15,20 @@ export type Page =
 export type AppMode = "docs" | "chat" | "code";
 
 export type SettingsSection = "gateway" | "models" | "embedding" | "search" | "history" | "theme" | "startup" | "trouble" | "about";
+
+/** An in-flight generation, kept at app level (keyed by chatId) so it survives page changes:
+ * the background job keeps running and its events land here even when the chat page is unmounted. */
+export interface Live {
+  requestId: string;
+  content: string;
+  sources: Source[];
+  searchQuery?: string;
+  steps?: AgentStep[];
+  changes?: CodeChange[];
+  error: string | null;
+  /** the saved assistant message, set once the turn finishes */
+  done?: Message;
+}
 
 interface Ctx {
   ready: boolean;
@@ -38,6 +52,11 @@ interface Ctx {
   setActiveServiceId: (id: string | null) => void;
   chatsVersion: number;
   bumpChats: () => void;
+  /** in-flight generations by chatId — survive navigating between pages */
+  live: Record<string, Live>;
+  startLive: (chatId: string, requestId: string) => void;
+  failLive: (chatId: string, message: string) => void;
+  clearLive: (chatId: string) => void;
   toast: (msg: string) => void;
   reload: () => Promise<void>;
 }
@@ -87,8 +106,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
     try { localStorage.setItem("appMode", m); } catch { /* private mode */ }
   }, []);
   const [chatsVersion, setChatsVersion] = useState(0);
+  const [live, setLive] = useState<Record<string, Live>>({});
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const toastTimer = useRef<number>();
+
+  const startLive = useCallback((chatId: string, requestId: string) => {
+    setLive((prev) => ({ ...prev, [chatId]: { requestId, content: "", sources: [], error: null } }));
+  }, []);
+  const failLive = useCallback((chatId: string, message: string) => {
+    setLive((prev) => ({ ...prev, [chatId]: { ...(prev[chatId] ?? { requestId: "", content: "", sources: [] }), error: message, done: undefined } }));
+  }, []);
+  const clearLive = useCallback((chatId: string) => {
+    setLive((prev) => { if (!(chatId in prev)) return prev; const n = { ...prev }; delete n[chatId]; return n; });
+  }, []);
 
   const refreshServices = useCallback(async () => {
     const [svcs, st] = await Promise.all([api.listServices(), api.serviceStats()]);
@@ -153,6 +183,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, [refreshServices, settings.setupDone]);
 
+  // chat generation events — subscribed ONCE at app level so a running answer keeps updating even
+  // after the user leaves the chat page, and is still there (or finished) when they come back.
+  const recheckRef = useRef(recheckGateway);
+  recheckRef.current = recheckGateway;
+  useEffect(() => {
+    const patch = (chatId: string, requestId: string, fn: (l: Live) => Live) =>
+      setLive((prev) => { const cur = prev[chatId]; return !cur || cur.requestId !== requestId ? prev : { ...prev, [chatId]: fn(cur) }; });
+    const offs = [
+      api.on("chat-sources", (p) => patch(p.chatId, p.requestId, (s) => ({ ...s, sources: p.sources, searchQuery: p.searchQuery }))),
+      api.on("chat-step", (p) => patch(p.chatId, p.requestId, (s) => ({ ...s, steps: [...(s.steps ?? []), p.step] }))),
+      api.on("chat-changes", (p) => patch(p.chatId, p.requestId, (s) => ({ ...s, changes: p.changes }))),
+      api.on("chat-delta", (p) => patch(p.chatId, p.requestId, (s) => ({ ...s, content: s.content + p.delta }))),
+      api.on("chat-done", (p) => { patch(p.chatId, p.requestId, (s) => ({ ...s, done: p.message, error: null })); setChatsVersion((v) => v + 1); }),
+      api.on("chat-error", (p) => {
+        patch(p.chatId, p.requestId, (s) => ({ ...s, error: p.error.message }));
+        setChatsVersion((v) => v + 1);
+        if (p.error.code === "gateway_unreachable") recheckRef.current();
+      }),
+    ];
+    return () => offs.forEach((o) => o.then((f) => f()));
+  }, []);
+
   const updateSettings = useCallback(
     async (patch: Partial<Settings>) => {
       const next = { ...settings, ...patch };
@@ -183,9 +235,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     () => ({
       ready, loadError, settings, updateSettings, services, stats, refreshServices, models, refreshModels,
       gateway, recheckGateway, page, go: setPage, appMode, setAppMode, activeServiceId, setActiveServiceId,
-      chatsVersion, bumpChats: () => setChatsVersion((v) => v + 1), toast, reload,
+      chatsVersion, bumpChats: () => setChatsVersion((v) => v + 1), live, startLive, failLive, clearLive, toast, reload,
     }),
-    [ready, loadError, settings, updateSettings, services, stats, refreshServices, models, refreshModels, gateway, recheckGateway, page, appMode, setAppMode, activeServiceId, chatsVersion, toast, reload],
+    [ready, loadError, settings, updateSettings, services, stats, refreshServices, models, refreshModels, gateway, recheckGateway, page, appMode, setAppMode, activeServiceId, chatsVersion, live, startLive, failLive, clearLive, toast, reload],
   );
 
   return (
