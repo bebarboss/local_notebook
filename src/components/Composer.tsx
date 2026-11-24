@@ -68,7 +68,8 @@ export function Composer({
 
   // coding mode needs a project folder before it can send
   const blockReason = sendBlockedReason ?? (code && !projectDir ? "เลือกโฟลเดอร์โปรเจคก่อนใช้โหมดเขียนโค้ด" : null);
-  const canSend = !disabled && !streaming && !blockReason && text.trim().length > 0 && !!model;
+  // an attachment on its own is enough to search (its text/OCR becomes the query) — no typing needed
+  const canSend = !disabled && !streaming && !blockReason && (text.trim().length > 0 || attached.length > 0) && !!model;
   const submit = () => {
     if (!canSend) return;
     onSend(text.trim(), attached.length ? attached : undefined);

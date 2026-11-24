@@ -335,13 +335,16 @@ export function createMockBackend(): Backend {
       const floating = isChat || isCode;
       const svc = floating ? null : services.find((s) => s.id === req.serviceId)!;
       const projectDir = isCode ? (req.projectDir ?? existing?.projectDir ?? "D:\\proj") : null;
+      // only an attachment, no text: the backend uses its OCR as the query and shows a short label
+      const fromAttachment = !req.question.trim() && !!(req.attachments && req.attachments.length);
+      const shownContent = fromAttachment ? "ค้นหาจากรูป/ไฟล์ที่แนบ" : req.question;
       let chatId = req.chatId;
       if (!chatId) {
         chatId = uid("chat");
-        chats.push({ id: chatId, serviceId: svc?.id ?? null, title: req.question.trim().slice(0, 40), createdAt: now(), updatedAt: now(), mode: chatMode, projectDir });
+        chats.push({ id: chatId, serviceId: svc?.id ?? null, title: shownContent.trim().slice(0, 40), createdAt: now(), updatedAt: now(), mode: chatMode, projectDir });
         messages[chatId] = [];
       }
-      const userMessage: Message = { id: ++seq, chatId, role: "user", content: req.question, model: null, reasoningEffort: null, sources: [], elapsedMs: null, error: null, createdAt: now() };
+      const userMessage: Message = { id: ++seq, chatId, role: "user", content: shownContent, model: null, reasoningEffort: null, sources: [], elapsedMs: null, error: null, createdAt: now() };
       messages[chatId].push(userMessage);
       const requestId = req.requestId ?? uid("req");
       const st = { stopped: false };

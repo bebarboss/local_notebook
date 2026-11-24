@@ -4,6 +4,7 @@ import { Fragment, useState, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
 import type { Source } from "../lib/types";
 import { CitationChip } from "./CitationChip";
+import { BlockImages } from "./SourceImages";
 
 /** Code / SQL from the documents, with a copy button (copies the code only). */
 function CodeBlock({ text }: { text: string }) {
@@ -142,18 +143,46 @@ function inline(text: string, sources: Source[], key: string): ReactNode[] {
   );
 }
 
+/** The `[n]` citation numbers that appear in a block's text (code blocks carry none). */
+function citeNums(b: Block): number[] {
+  const text = b.t === "p" || b.t === "h" ? b.text
+    : b.t === "ul" || b.t === "ol" ? b.items.join("\n")
+    : b.t === "table" ? [...b.head, ...b.rows.flat()].join("\n")
+    : "";
+  return [...text.matchAll(/\[(\d{1,3})\]/g)].map((m) => Number(m[1]));
+}
+
 export function Markdown({ text, sources, trailing }: { text: string; sources: Source[]; trailing?: ReactNode }) {
   const blocks = parseBlocks(text);
+  // each document picture shows once, under the first block that cites it — so it sits with the
+  // related text, not hidden behind a citation. Grouped by page (a page's images repeat across its
+  // chunks), web sources skipped (no pictures).
+  const ownerBlock = new Map<string, number>();
+  const repSource = new Map<string, Source>();
+  blocks.forEach((b, i) => {
+    for (const n of citeNums(b)) {
+      const s = sources.find((x) => x.n === n);
+      if (!s || s.web) continue;
+      const k = s.page != null ? `${s.serviceId}|${s.docPath}|p${s.page}` : `${s.serviceId}|${s.docPath}|o${s.ord}`;
+      if (!ownerBlock.has(k)) { ownerBlock.set(k, i); repSource.set(k, s); }
+    }
+  });
+  const imagesForBlock = (i: number): Source[] =>
+    [...ownerBlock.entries()].filter(([, bi]) => bi === i).map(([k]) => repSource.get(k)!);
+
   return (
     <div className="ai-text">
       {blocks.map((b, i) => {
         const tail = i === blocks.length - 1 ? trailing : null;
+        const imgs = imagesForBlock(i);
+        const after = imgs.length ? <BlockImages sources={imgs} /> : null;
+        let el: ReactNode;
         switch (b.t) {
-          case "p": return <p key={i}>{inline(b.text, sources, `p${i}`)}{tail}</p>;
-          case "h": return <p key={i}><strong>{inline(b.text, sources, `h${i}`)}</strong>{tail}</p>;
-          case "code": return <Fragment key={i}><CodeBlock text={b.text} />{tail}</Fragment>;
-          case "table": return (
-            <Fragment key={i}>
+          case "p": el = <p>{inline(b.text, sources, `p${i}`)}{tail}</p>; break;
+          case "h": el = <p><strong>{inline(b.text, sources, `h${i}`)}</strong>{tail}</p>; break;
+          case "code": el = <><CodeBlock text={b.text} />{tail}</>; break;
+          case "table": el = (
+            <>
               <div className="md-table" role="region" aria-label="ตาราง" tabIndex={0}>
                 <table>
                   <thead>
@@ -167,17 +196,18 @@ export function Markdown({ text, sources, trailing }: { text: string; sources: S
                 </table>
               </div>
               {tail}
-            </Fragment>
-          );
+            </>
+          ); break;
           default: {
             const L = b.t;
-            return (
-              <L key={i}>
+            el = (
+              <L>
                 {b.items.map((it, j) => <li key={j}>{inline(it, sources, `l${i}-${j}`)}{j === b.items.length - 1 ? tail : null}</li>)}
               </L>
             );
           }
         }
+        return <Fragment key={i}>{el}{after}</Fragment>;
       })}
       {blocks.length === 0 && trailing}
     </div>

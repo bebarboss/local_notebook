@@ -140,5 +140,19 @@ export function SourceImageGrid({ source }: { source: Source }) {
   );
 }
 
+/** Pictures of the sources first cited in one answer block, shown inline in the answer (right after
+ *  the related text) so the reader sees them without opening a citation. Null when there are none. */
+export function BlockImages({ sources }: { sources: Source[] }) {
+  const items = useSourceImages(sources, 8);
+  const [open, setOpen] = useState<number | null>(null);
+  if (!items.length) return null;
+  return (
+    <div className="thumbs md-thumbs" aria-label="รูปจากเอกสารที่เกี่ยวข้อง">
+      {items.map((img, i) => <Thumb key={img.key} img={img} onOpen={() => setOpen(i)} size={88} />)}
+      {open != null && <Lightbox items={items} index={open} onIndex={setOpen} onClose={() => setOpen(null)} />}
+    </div>
+  );
+}
+
 // picture ids change when a document is re-indexed → forget the lists
 api.on("index-progress", (p) => { if (p.phase === "done") listCache.clear(); }).catch(() => {});

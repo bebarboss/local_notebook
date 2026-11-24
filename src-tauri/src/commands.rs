@@ -710,10 +710,14 @@ struct CodeChangesEvent {
 
 #[tauri::command]
 pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<AskStarted> {
-    let question = req.question.trim().to_string();
-    if question.is_empty() {
-        return Err(AppError::new("invalid", "กรุณาพิมพ์คำถาม"));
+    let typed = req.question.trim().to_string();
+    // a question with only an attachment and no text: the image/file's own text (OCR) becomes the
+    // query — see AskJob::run. The stored message shows a short label instead of the raw OCR text.
+    let from_attachment = typed.is_empty() && !req.attachments.is_empty();
+    if typed.is_empty() && !from_attachment {
+        return Err(AppError::new("invalid", "กรุณาพิมพ์คำถาม หรือแนบรูป/ไฟล์"));
     }
+    let question = if from_attachment { "ค้นหาจากรูป/ไฟล์ที่แนบ".to_string() } else { typed };
     let key = secrets::require_key()?;
     let model = state
         .models
@@ -793,7 +797,7 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
     let web = chat.mode == "chat" && req.web && model.tool_calling;
     // extra commands the coding agent may run, beyond the ones auto-detected from the project
     let code_commands = if code { state.settings.lock().code_commands.clone() } else { Vec::new() };
-    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, docs, model, effort: req.effort, all: req.all_services, question, history, summary, turns, previous, search_query: None, steps: Vec::new(), attachments, now, web, code, project_dir, code_commands, changes: None, key, token };
+    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, docs, model, effort: req.effort, all: req.all_services, question, history, summary, turns, previous, search_query: None, steps: Vec::new(), attachments, from_attachment, now, web, code, project_dir, code_commands, changes: None, key, token };
     tauri::async_runtime::spawn(job.run());
 
     Ok(AskStarted { request_id, chat_id: chat.id, user_message })
@@ -829,6 +833,9 @@ struct AskJob {
     steps: Vec<crate::agent::Step>,
     /// file paths attached to this question (general chat only); read fresh, never saved
     attachments: Vec<String>,
+    /// the box was empty and only an attachment was sent: use the attachment's text (OCR) as the
+    /// question/query instead of injecting it as extra context (see `run`)
+    from_attachment: bool,
     /// current date/time from the user's clock, injected into the system prompt
     now: Option<String>,
     /// general chat only: run the web-research step before answering
@@ -920,7 +927,7 @@ impl AskJob {
         // files/images attached to this one question (both modes): read fresh (OCR for images) as
         // extra context, never indexed or saved. In docs mode they sit alongside the retrieved
         // passages; in general mode they are the only context.
-        let attached = if self.attachments.is_empty() {
+        let mut attached = if self.attachments.is_empty() {
             None
         } else {
             let opts = {
@@ -934,6 +941,20 @@ impl AskJob {
                 _ => None,
             }
         };
+
+        // the box was empty and only an attachment was sent (e.g. a pasted screenshot): its own
+        // text (OCR) is the query — not extra context, so `take` it out of `attached`. No text in
+        // the image/file → nothing to search with.
+        if self.from_attachment {
+            match attached.take().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+                Some(t) => self.question = cap_chars(&t, ATTACH_QUERY_CAP),
+                None => {
+                    self.fail(AppError::new("invalid", "รูป/ไฟล์ที่แนบไม่มีตัวอักษรให้ค้นหา — พิมพ์คำถามแทน"), &[], elapsed());
+                    self.cleanup();
+                    return;
+                }
+            }
+        }
 
         // general (floating) chat: no documents, no retrieval — just answer with the model's
         // own knowledge, keeping the chat's own history.
@@ -1127,6 +1148,11 @@ fn cap_chars(s: &str, max: usize) -> String {
 
 /// Total characters of attached-file text handed to a general chat, across all files.
 const ATTACH_CAP: usize = 24000;
+
+/// When a question is only an attachment (no typed text), how much of its text (OCR) to use as the
+/// query. The embed server truncates a query to its own token limit anyway; this keeps the model's
+/// user turn sane when a scanned page holds a lot of text.
+const ATTACH_QUERY_CAP: usize = 4000;
 
 /// Read the text of each attached file (images via OCR) for a general chat, as one context
 /// block with a header per file. Runs on a blocking thread. Never logs file contents — only an
