@@ -4,6 +4,7 @@ pub mod agent;
 pub mod background;
 pub mod chats;
 pub mod codefs;
+pub mod coderun;
 pub mod coding;
 pub mod commands;
 pub mod config;

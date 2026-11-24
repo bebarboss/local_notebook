@@ -261,6 +261,8 @@ export interface Settings {
   knowledgeDupCheck: boolean;
   /** how alike (0.5–0.99) counts as the same problem */
   knowledgeDupThreshold: number;
+  /** coding mode: extra command prefixes the agent may run (on top of project defaults) */
+  codeCommands: string[];
 }
 
 

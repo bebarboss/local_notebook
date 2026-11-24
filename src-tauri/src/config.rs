@@ -78,6 +78,9 @@ pub struct Settings {
     pub knowledge_dup_check: bool,
     /// how alike two notes must be (cosine of their first chunks) to be called the same
     pub knowledge_dup_threshold: f32,
+    /// coding mode: extra command prefixes the agent may run, on top of the ones auto-detected from
+    /// the project (e.g. "cargo test", "npm run build"). Each is matched by leading tokens.
+    pub code_commands: Vec<String>,
 }
 
 /// The server that came with this build, else bge-m3 on this PC.
@@ -118,6 +121,7 @@ impl Default for Settings {
             start_hidden: true,
             knowledge_dup_check: true,
             knowledge_dup_threshold: 0.85,
+            code_commands: Vec::new(),
         }
     }
 }
@@ -164,6 +168,19 @@ impl Settings {
         if !matches!(self.auto_delete_days, 0 | 30 | 90) {
             self.auto_delete_days = 0;
         }
+        // extra allowed coding commands: trim, keep only ones with safe characters (same rule the
+        // runner enforces), drop blanks/dups, and cap the list.
+        let mut cmds: Vec<String> = Vec::new();
+        for c in std::mem::take(&mut self.code_commands) {
+            let c = c.trim().to_string();
+            if !c.is_empty() && crate::coderun::sanitize(&c).is_ok() && !cmds.contains(&c) {
+                cmds.push(c);
+            }
+            if cmds.len() >= 40 {
+                break;
+            }
+        }
+        self.code_commands = cmds;
         self.user_name = self.user_name.chars().take(60).collect();
         self.update_url = self.update_url.trim().to_string();
         if !self.update_url.is_empty() && !self.update_url.starts_with("https://") {

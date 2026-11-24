@@ -17,6 +17,7 @@ const SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: "embedding", label: "Embedding และ Index" },
   { id: "search", label: "การค้นหา" },
   { id: "history", label: "ประวัติแชต" },
+  { id: "code", label: "เขียนโค้ด" },
   { id: "theme", label: "ธีม" },
   { id: "startup", label: "เปิดโปรแกรม" },
   { id: "trouble", label: "วิธีแก้ปัญหา" },
@@ -46,6 +47,7 @@ export default function SettingsPage({ section = "gateway" }: { section?: Settin
             {cur === "embedding" && <EmbeddingSection />}
             {cur === "search" && <SearchSection />}
             {cur === "history" && <HistorySection />}
+            {cur === "code" && <CodeSection />}
             {cur === "theme" && <section><h2>ธีม</h2><div className="list-card"><ThemeRow /><FontRow /><TextSizeRow /></div></section>}
             {cur === "startup" && <section><h2>เปิดโปรแกรม</h2><div className="list-card"><StartupRows /></div></section>}
             {cur === "trouble" && <section><h2>ตรวจสอบและแก้ปัญหา</h2><TroubleshootTable /></section>}
@@ -630,6 +632,58 @@ function KnowledgeDupRows() {
   );
 }
 
+
+/** Coding mode: which build/test commands the agent may run, on top of the auto-detected defaults. */
+function CodeSection() {
+  const { settings, updateSettings, toast } = useApp();
+  const saved = settings.codeCommands.join("\n");
+  const [text, setText] = useState(saved);
+  // re-sync only when the saved list actually changes (not on every unrelated settings update)
+  useEffect(() => { setText(saved); }, [saved]);
+  const dirty = text !== saved;
+  const save = async () => {
+    const list = Array.from(new Set(text.split("\n").map((l) => l.trim()).filter(Boolean))).slice(0, 40);
+    await updateSettings({ codeCommands: list });
+    setText(list.join("\n"));
+    toast("บันทึกรายการคำสั่งที่อนุญาตแล้ว");
+  };
+  return (
+    <section>
+      <h2>เขียนโค้ด</h2>
+      <p className="muted" style={{ marginTop: -4, marginBottom: 14, lineHeight: 1.6 }}>
+        ในโหมดเขียนโค้ด ผู้ช่วยรันคำสั่งตรวจงาน (build/test/lint) ในโฟลเดอร์โปรเจคเองเพื่อหา error มาแก้ ·
+        คำสั่งที่อนุญาต<strong>ตั้งให้อัตโนมัติตามชนิดโปรเจค</strong> (เจอ Cargo.toml → cargo, package.json → npm/node,
+        pyproject/requirements → python/pytest, go.mod → go) · คำสั่งนอกรายการจะถูกบล็อก ไม่รัน
+      </p>
+      <div className="list-card">
+        <div className="list-row" style={{ alignItems: "flex-start" }}>
+          <div className="l">
+            <span className="t">คำสั่งที่อนุญาตเพิ่มเติม</span>
+            <span className="d">
+              พิมพ์บรรทัดละคำสั่ง (เทียบจากคำขึ้นต้น) เช่น <code>make test</code> หรือ <code>deno task build</code> ·
+              เว้นว่างได้ถ้าใช้ค่าอัตโนมัติพอแล้ว · ห้ามใส่เครื่องหมายต่อคำสั่ง ( | &amp; ; &gt; )
+            </span>
+          </div>
+        </div>
+        <div style={{ padding: "0 16px 16px" }}>
+          <textarea
+            className="input mono"
+            aria-label="คำสั่งที่อนุญาตเพิ่มเติม"
+            rows={5}
+            spellCheck={false}
+            value={text}
+            placeholder={"make test\nmake build"}
+            onChange={(e) => setText(e.target.value)}
+            style={{ width: "100%", fontSize: 13, resize: "vertical" }}
+          />
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+            <button className="btn btn-primary" disabled={!dirty} onClick={save}>บันทึก</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
 
 function HybridRow() {
   const { settings, updateSettings, toast } = useApp();

@@ -96,6 +96,11 @@ impl Workspace {
         self.root.to_string_lossy().into_owned()
     }
 
+    /// The canonical project root, for the command runner (coderun.rs).
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Join `rel` onto the root, allowing only plain path segments (no `..`, no absolute/prefix), and
     /// verify the nearest existing ancestor still canonicalizes inside the root (catches symlinks).
     fn resolve(&self, rel: &str) -> AppResult<PathBuf> {

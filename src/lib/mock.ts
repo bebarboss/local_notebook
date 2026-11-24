@@ -101,7 +101,7 @@ export function createMockBackend(): Backend {
   let settings: Settings = {
     theme: "system", userName: "navaritrod", setupDone: false, historyTurns: 20, autoDeleteDays: 0,
     topK: 5, threshold: 0.3, chunkSize: 1000, chunkOverlap: 150, embeddingModel: "bge-m3", teamServer: false, lastServiceId: "hr",
-    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true, rerank: true, hybrid: true, indexLoad: "normal", font: "looped", textSize: "m", startHidden: true, knowledgeDupCheck: true, knowledgeDupThreshold: 0.85,
+    updateUrl: "https://docask.example.internal/latest.json", autoCheckUpdate: true, ocrEnabled: true, keepImages: true, rerank: true, hybrid: true, indexLoad: "normal", font: "looped", textSize: "m", startHidden: true, knowledgeDupCheck: true, knowledgeDupThreshold: 0.85, codeCommands: [],
   };
   try {
     const saved = localStorage.getItem("docask-mock-settings");
@@ -362,6 +362,8 @@ export function createMockBackend(): Backend {
             emit("chat-step", { requestId, chatId: cid, step: { kind: "coderead", detail: "main.py", found: 0 } });
             await wait(250);
             emit("chat-step", { requestId, chatId: cid, step: { kind: "codeedit", detail: "main.py", found: 0 } });
+            await wait(250);
+            emit("chat-step", { requestId, chatId: cid, step: { kind: "coderun", detail: "python main.py", found: 1 } });
             await wait(200);
             emit("chat-step", { requestId, chatId: cid, step: { kind: "done", detail: "", found: 0 } });
             const items = [
@@ -369,7 +371,7 @@ export function createMockBackend(): Backend {
               { path: "notes/new.txt", kind: "create" as const, before: null, after: "ไฟล์ตัวอย่าง (mock)\n" },
             ];
             emit("chat-changes", { requestId, chatId: cid, root: projectDir ?? "", changes: clone(items) });
-            const codeText = "แก้ให้แล้ว (mock): เปลี่ยน **main.py** ให้พิมพ์ world และสร้าง **notes/new.txt** — ตรวจ diff ด้านบน ถ้าไม่โอเคกดย้อนกลับได้";
+            const codeText = "แก้ให้แล้ว (mock): เปลี่ยน **main.py** ให้พิมพ์ world และสร้าง **notes/new.txt** · รัน `python main.py` ผ่าน — ตรวจ diff ด้านบน ถ้าไม่โอเคกดย้อนกลับได้";
             await wait(200);
             let cout = "";
             const cparts = codeText.match(/.{1,6}/gsu) ?? [];

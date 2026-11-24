@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BookMarked, BookOpen, Code2, Copy, Check, CircleAlert, Globe, RotateCcw, Search } from "lucide-react";
+import { BookMarked, BookOpen, Code2, Copy, Check, CircleAlert, Globe, RotateCcw, Search, Terminal } from "lucide-react";
 import type { AgentStep, CodeChange, Message, Source } from "../lib/types";
 import { th } from "../i18n/th";
 import { api } from "../lib/api";
@@ -51,6 +51,10 @@ function stepText(s: AgentStep): string {
       return `เขียนไฟล์: ${s.detail}`;
     case "codeedit":
       return `แก้ไฟล์: ${s.detail}`;
+    case "coderun":
+      return `รันคำสั่ง: ${s.detail}${s.found ? " — ผ่าน" : " — มีข้อผิดพลาด"}`;
+    case "codeblocked":
+      return `ไม่อนุญาตให้รัน: ${s.detail}`;
     case "done":
       return "เสร็จแล้ว";
     case "error":
@@ -64,6 +68,7 @@ function stepIcon(kind: string) {
   const p = { size: 12, strokeWidth: 2, "aria-hidden": true } as const;
   if (kind === "read") return <BookOpen {...p} />;
   if (kind === "websearch" || kind === "webread") return <Globe {...p} />;
+  if (kind === "coderun" || kind === "codeblocked") return <Terminal {...p} />;
   if (kind.startsWith("code")) return <Code2 {...p} />;
   if (kind === "done") return <Check {...p} />;
   if (kind === "error") return <CircleAlert {...p} />;

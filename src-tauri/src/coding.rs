@@ -24,8 +24,19 @@ pub const MAX_FILES: usize = 40;
 /// A tool result shown back to the model is trimmed to this many characters per call.
 const RESULT_CHARS: usize = 6000;
 
-/// What the host provides: a Gateway round and the project-scoped filesystem. A trait so the loop can
-/// be tested with scripted replies over a temp folder.
+/// Result of a `run_command` call. `blocked` means the command was refused for not being in the
+/// project's allowlist (the model is told so and should try an allowed one or stop); otherwise
+/// `exit_code`/`text` carry the real outcome. The allowlist check and the run both live in the host
+/// impl (CodeAgent), so the loop stays testable.
+#[derive(Debug, Clone)]
+pub struct RunResult {
+    pub blocked: bool,
+    pub exit_code: Option<i32>,
+    pub text: String,
+}
+
+/// What the host provides: a Gateway round, the project-scoped filesystem, and an allowlisted command
+/// runner. A trait so the loop can be tested with scripted replies over a temp folder.
 #[allow(async_fn_in_trait)]
 pub trait CodeBackend {
     async fn complete(&self, messages: &Value, tools: &Value) -> crate::errors::AppResult<Reply>;
@@ -34,6 +45,7 @@ pub trait CodeBackend {
     fn grep(&self, pattern: &str, sub: Option<&str>) -> crate::errors::AppResult<Vec<Hit>>;
     fn write_file(&self, path: &str, content: &str) -> crate::errors::AppResult<WriteOutcome>;
     fn edit_file(&self, path: &str, old: &str, new: &str) -> crate::errors::AppResult<WriteOutcome>;
+    async fn run_command(&self, command: &str) -> crate::errors::AppResult<RunResult>;
 }
 
 pub fn tools_schema() -> Value {
@@ -76,6 +88,13 @@ pub fn tools_schema() -> Value {
                 "old": {"type": "string", "description": "ข้อความเดิมที่จะถูกแทน (ต้องมีที่เดียว)"},
                 "new": {"type": "string", "description": "ข้อความใหม่"}
             }, "required": ["path", "old", "new"]}
+        }},
+        {"type": "function", "function": {
+            "name": "run_command",
+            "description": "รันคำสั่งตรวจงานในรากโปรเจค (build/test/lint/typecheck) แล้วอ่าน output กับข้อผิดพลาดกลับมาแก้จนผ่าน · รันได้เฉพาะคำสั่งในรายการที่อนุญาตของโปรเจคนี้ (เช่น cargo test, npm run build, pytest) คำสั่งนอกรายการจะถูกบล็อก · ทีละคำสั่งเท่านั้น ห้ามใช้ | & ; > หรือเครื่องหมายต่อคำสั่ง",
+            "parameters": {"type": "object", "properties": {
+                "command": {"type": "string", "description": "คำสั่งเดียว เช่น \"cargo test\" หรือ \"npm run build\""}
+            }, "required": ["command"]}
         }}
     ])
 }
@@ -88,7 +107,8 @@ fn system_prompt(now: Option<&str>) -> String {
          - แก้ไฟล์ที่มีอยู่ด้วย edit_file (old ต้องตรงอักขระเป๊ะและมีที่เดียว) · สร้างไฟล์ใหม่หรือเขียนใหม่ทั้งไฟล์ด้วย write_file\n\
          - ทำให้ตรงกับที่ผู้ใช้ขอ แก้เท่าที่จำเป็น รักษาสไตล์เดิม อย่าเดาพาธหรือชื่อที่ยังไม่ได้อ่าน\n\
          - ถ้าเครื่องมือคืน error ให้อ่านสาเหตุแล้วแก้วิธีเรียกใหม่\n\
-         - ทำงานได้สูงสุด {MAX_ROUNDS} รอบ พอแก้เสร็จแล้วให้ตอบสรุปสั้น ๆ ว่าแก้อะไรไปบ้าง (ไม่ต้องเรียกเครื่องมือ)"
+         - ตรวจงานด้วย run_command (เช่น cargo check / cargo test / npm run build / pytest) อ่าน error ที่ได้มาแก้แล้วรันซ้ำจนผ่าน · รันได้เฉพาะคำสั่งที่อนุญาต ถ้าคำสั่งถูกบล็อกให้ข้ามไป อย่าพยายามเลี่ยง\n\
+         - ทำงานได้สูงสุด {MAX_ROUNDS} รอบ พอแก้เสร็จแล้วให้ตอบสรุปสั้น ๆ ว่าแก้อะไรไปบ้างและผลการตรวจ (ไม่ต้องเรียกเครื่องมือ)"
     )
 }
 
@@ -200,7 +220,12 @@ pub async fn edit_codebase<B: CodeBackend>(
 
         for tc in &reply.tool_calls {
             let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
-            let (result, emitted) = run_tool(backend, &tc.name, &args, &mut changes);
+            // run_command is async (it spawns a process); the file tools are sync
+            let (result, emitted) = if tc.name == "run_command" {
+                run_command_tool(backend, &args).await
+            } else {
+                run_tool(backend, &tc.name, &args, &mut changes)
+            };
             if let Some(s) = emitted {
                 on_step(s);
             }
@@ -278,6 +303,29 @@ fn run_tool<B: CodeBackend>(backend: &B, name: &str, args: &Value, changes: &mut
     }
 }
 
+/// Run a `run_command` tool call: the host checks the allowlist and runs it. A blocked command and a
+/// failing command both come back as text for the model to act on; the step records the command and
+/// (for a command that ran) whether it exited cleanly — never the output.
+async fn run_command_tool<B: CodeBackend>(backend: &B, args: &Value) -> (String, Option<Step>) {
+    let Some(command) = arg(args, "command").map(str::trim).filter(|c| !c.is_empty()) else {
+        return ("ต้องระบุ command".into(), None);
+    };
+    match backend.run_command(command).await {
+        Ok(r) if r.blocked => (r.text, Some(step("codeblocked", command.to_string()))),
+        Ok(r) => {
+            let mut s = step("coderun", command.to_string());
+            s.found = usize::from(r.exit_code == Some(0));
+            let head = match r.exit_code {
+                Some(0) => "คำสั่งรันเสร็จ (exit 0)".to_string(),
+                Some(code) => format!("คำสั่งจบด้วย exit {code}"),
+                None => "คำสั่งถูกหยุด".to_string(),
+            };
+            (format!("{head}\n{}", r.text), Some(s))
+        }
+        Err(e) => (format!("รันคำสั่งไม่ได้: {}", e.message), Some(step("error", e.code))),
+    }
+}
+
 fn disp(path: &str) -> String {
     if path.trim().is_empty() { ".".into() } else { path.to_string() }
 }
@@ -294,6 +342,10 @@ mod tests {
         ws: Workspace,
         replies: RefCell<Vec<Reply>>,
         calls: RefCell<usize>,
+        /// scripted run_command outcomes, popped in order (empty → a clean exit-0)
+        cmd: RefCell<Vec<RunResult>>,
+        /// commands the loop asked to run, in order
+        ran: RefCell<Vec<String>>,
     }
     impl CodeBackend for Fake {
         async fn complete(&self, _m: &Value, _t: &Value) -> crate::errors::AppResult<Reply> {
@@ -315,13 +367,34 @@ mod tests {
         fn edit_file(&self, p: &str, old: &str, new: &str) -> crate::errors::AppResult<WriteOutcome> {
             self.ws.edit(p, old, new)
         }
+        async fn run_command(&self, command: &str) -> crate::errors::AppResult<RunResult> {
+            self.ran.borrow_mut().push(command.to_string());
+            Ok(self.cmd.borrow_mut().pop_front_or(RunResult { blocked: false, exit_code: Some(0), text: "ok".into() }))
+        }
+    }
+
+    // tiny helper so the Fake can pop the next scripted command result (or a default)
+    trait PopFront {
+        fn pop_front_or(&mut self, default: RunResult) -> RunResult;
+    }
+    impl PopFront for Vec<RunResult> {
+        fn pop_front_or(&mut self, default: RunResult) -> RunResult {
+            if self.is_empty() {
+                default
+            } else {
+                self.remove(0)
+            }
+        }
     }
 
     fn fake(replies: Vec<Reply>) -> (tempfile::TempDir, Fake) {
+        fake_with_cmds(replies, vec![])
+    }
+    fn fake_with_cmds(replies: Vec<Reply>, cmd: Vec<RunResult>) -> (tempfile::TempDir, Fake) {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("main.py"), "print('hi')\n").unwrap();
         let ws = Workspace::new(&dir.path().to_string_lossy()).unwrap();
-        (dir, Fake { ws, replies: RefCell::new(replies), calls: RefCell::new(0) })
+        (dir, Fake { ws, replies: RefCell::new(replies), calls: RefCell::new(0), cmd: RefCell::new(cmd), ran: RefCell::new(Vec::new()) })
     }
     fn tool(name: &str, args: &str) -> ToolCall {
         ToolCall { id: "c1".into(), name: name.into(), arguments: args.into() }
@@ -385,6 +458,40 @@ mod tests {
         ]);
         let (changes, _) = edit_codebase(&f, "q", None, &rt(), |_| {}).await;
         assert!(changes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn runs_a_command_and_feeds_the_output_back() {
+        let (_d, f) = fake_with_cmds(
+            vec![
+                Reply { content: String::new(), tool_calls: vec![tool("run_command", r#"{"command":"pytest -q"}"#)] },
+                Reply { content: "เทสต์ผ่านแล้ว".into(), tool_calls: vec![] },
+            ],
+            vec![RunResult { blocked: false, exit_code: Some(0), text: "2 passed".into() }],
+        );
+        let mut steps = Vec::new();
+        let (changes, answer) = edit_codebase(&f, "รันเทสต์", None, &rt(), |s| steps.push(s)).await;
+        assert!(changes.is_empty(), "running a command changes no files");
+        assert_eq!(f.ran.borrow().as_slice(), ["pytest -q"]);
+        let run_step = steps.iter().find(|s| s.kind == "coderun").expect("a coderun step was emitted");
+        assert_eq!(run_step.detail, "pytest -q");
+        assert_eq!(run_step.found, 1, "exit 0 → marked ok");
+        assert_eq!(answer, "เทสต์ผ่านแล้ว");
+    }
+
+    #[tokio::test]
+    async fn a_blocked_command_is_reported_not_run() {
+        let (_d, f) = fake_with_cmds(
+            vec![
+                Reply { content: String::new(), tool_calls: vec![tool("run_command", r#"{"command":"rm -rf ."}"#)] },
+                Reply { content: "ข้ามคำสั่งนั้น".into(), tool_calls: vec![] },
+            ],
+            vec![RunResult { blocked: true, exit_code: None, text: "คำสั่งนี้ไม่อยู่ในรายการที่อนุญาต".into() }],
+        );
+        let mut steps = Vec::new();
+        edit_codebase(&f, "ลบทิ้ง", None, &rt(), |s| steps.push(s)).await;
+        assert!(steps.iter().any(|s| s.kind == "codeblocked" && s.detail == "rm -rf ."));
+        assert!(!steps.iter().any(|s| s.kind == "coderun"), "a blocked command never becomes a coderun");
     }
 
     #[tokio::test]

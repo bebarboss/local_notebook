@@ -791,7 +791,9 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
     };
     let code = chat.mode == "code" && model.tool_calling && project_dir.is_some();
     let web = chat.mode == "chat" && req.web && model.tool_calling;
-    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, docs, model, effort: req.effort, all: req.all_services, question, history, summary, turns, previous, search_query: None, steps: Vec::new(), attachments, now, web, code, project_dir, changes: None, key, token };
+    // extra commands the coding agent may run, beyond the ones auto-detected from the project
+    let code_commands = if code { state.settings.lock().code_commands.clone() } else { Vec::new() };
+    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, docs, model, effort: req.effort, all: req.all_services, question, history, summary, turns, previous, search_query: None, steps: Vec::new(), attachments, now, web, code, project_dir, code_commands, changes: None, key, token };
     tauri::async_runtime::spawn(job.run());
 
     Ok(AskStarted { request_id, chat_id: chat.id, user_message })
@@ -833,6 +835,8 @@ struct AskJob {
     web: bool,
     /// general chat only: run the coding agent on `project_dir` before answering
     code: bool,
+    /// coding mode: extra allowed command prefixes from settings (merged with project defaults)
+    code_commands: Vec<String>,
     /// project folder for the coding agent (absolute path; set only when `code` is on)
     project_dir: Option<String>,
     /// files the coding turn changed, saved with the answer for undo
@@ -947,7 +951,7 @@ impl AskJob {
                         return;
                     }
                 };
-                let agent = CodeAgent { model: &self.model, key: self.key.as_str(), effort: None, tools_max: self.model.max_output_tokens, ws };
+                let agent = CodeAgent { model: &self.model, key: self.key.as_str(), effort: None, tools_max: self.model.max_output_tokens, ws, extra_allow: &self.code_commands };
                 let (rid, cid, app2) = (self.request_id.clone(), self.chat_id.clone(), self.app.clone());
                 let mut collected: Vec<crate::agent::Step> = Vec::new();
                 let (items, answer_text) = crate::coding::edit_codebase(&agent, &self.question, self.now.as_deref(), &self.token, |step| {
@@ -1436,6 +1440,8 @@ struct CodeAgent<'a> {
     effort: Option<&'a str>,
     tools_max: u64,
     ws: crate::codefs::Workspace,
+    /// extra allowed command prefixes from settings, merged with the project defaults
+    extra_allow: &'a [String],
 }
 
 impl crate::coding::CodeBackend for CodeAgent<'_> {
@@ -1456,6 +1462,24 @@ impl crate::coding::CodeBackend for CodeAgent<'_> {
     }
     fn edit_file(&self, path: &str, old: &str, new: &str) -> AppResult<crate::codefs::WriteOutcome> {
         self.ws.edit(path, old, new)
+    }
+    async fn run_command(&self, command: &str) -> AppResult<crate::coding::RunResult> {
+        use crate::coderun;
+        // bad characters are a usage error handed to the model (not a silent block)
+        coderun::sanitize(command)?;
+        let root = self.ws.root();
+        let mut allow = coderun::default_allow(root);
+        allow.extend(self.extra_allow.iter().cloned());
+        if !coderun::is_allowed(command, &allow) {
+            let list = if allow.is_empty() { "(ยังไม่มีคำสั่งที่อนุญาตสำหรับโปรเจคนี้)".to_string() } else { allow.join(", ") };
+            return Ok(crate::coding::RunResult {
+                blocked: true,
+                exit_code: None,
+                text: format!("คำสั่งนี้ไม่อยู่ในรายการที่อนุญาต จึงไม่รัน ให้ใช้คำสั่งตรวจงานที่อนุญาตแทน หรือข้ามขั้นนี้ · ที่อนุญาต: {list}"),
+            });
+        }
+        let out = coderun::run(root, command, coderun::PER_CMD).await?;
+        Ok(crate::coding::RunResult { blocked: false, exit_code: out.exit_code, text: out.output })
     }
 }
 
