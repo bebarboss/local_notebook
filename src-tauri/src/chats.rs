@@ -16,8 +16,12 @@ pub struct Chat {
     pub title: String,
     pub created_at: i64,
     pub updated_at: i64,
-    /// `"docs"` (RAG over a service) or `"chat"` (general, no documents) — locked at creation
+    /// `"docs"` (RAG over a service), `"chat"` (general, no documents), or `"code"` (coding agent
+    /// over a project folder) — locked at creation
     pub mode: String,
+    /// the project folder a `"code"` chat works in (absolute path); `None` for other modes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +69,9 @@ pub struct Message {
     /// the agentic gather step's activity (what it searched / read); empty when it didn't run
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<crate::agent::Step>,
+    /// files changed by the "เขียนโค้ด" (coding) turn — kept so they can be undone later
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes: Option<crate::codefs::Changeset>,
 }
 
 pub struct NewMessage<'a> {
@@ -78,6 +85,7 @@ pub struct NewMessage<'a> {
     pub error: Option<&'a str>,
     pub search_query: Option<&'a str>,
     pub steps: &'a [crate::agent::Step],
+    pub changes: Option<&'a crate::codefs::Changeset>,
 }
 
 /// (answer message id, question, answer)
@@ -155,6 +163,11 @@ impl ChatDb {
         if !has {
             conn.execute_batch("ALTER TABLE messages ADD COLUMN steps TEXT;")?;
         }
+        // v0.25: files changed by a "เขียนโค้ด" turn (codefs::Changeset), stored as JSON, for undo
+        let has: bool = conn.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name='changes'")?.exists([])?;
+        if !has {
+            conn.execute_batch("ALTER TABLE messages ADD COLUMN changes TEXT;")?;
+        }
         // v0.19: chat mode — "docs" (RAG, existing rows) or "chat" (general, no service)
         let has: bool = conn.prepare("SELECT 1 FROM pragma_table_info('chats') WHERE name='mode'")?.exists([])?;
         if !has {
@@ -190,11 +203,17 @@ impl ChatDb {
                  PRAGMA foreign_keys=ON;",
             )?;
         }
+        // v0.25: the project folder a "code" chat works in — after the rebuild above, which would
+        // otherwise drop a column added before it.
+        let has: bool = conn.prepare("SELECT 1 FROM pragma_table_info('chats') WHERE name='project_dir'")?.exists([])?;
+        if !has {
+            conn.execute_batch("ALTER TABLE chats ADD COLUMN project_dir TEXT;")?;
+        }
         Ok(Self { conn })
     }
 
     /// `service_id = None` + `mode = "chat"` makes a general (floating) chat; otherwise a docs chat.
-    pub fn create_chat(&self, service_id: Option<&str>, mode: &str, first_question: &str) -> AppResult<Chat> {
+    pub fn create_chat(&self, service_id: Option<&str>, mode: &str, first_question: &str, project_dir: Option<&str>) -> AppResult<Chat> {
         let now = now_ms();
         let c = Chat {
             id: uuid::Uuid::new_v4().to_string(),
@@ -203,35 +222,36 @@ impl ChatDb {
             created_at: now,
             updated_at: now,
             mode: mode.to_string(),
+            project_dir: project_dir.map(str::to_string),
         };
         self.conn.execute(
-            "INSERT INTO chats(id,service_id,title,created_at,updated_at,mode) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![c.id, c.service_id, c.title, c.created_at, c.updated_at, c.mode],
+            "INSERT INTO chats(id,service_id,title,created_at,updated_at,mode,project_dir) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![c.id, c.service_id, c.title, c.created_at, c.updated_at, c.mode, c.project_dir],
         )?;
         Ok(c)
     }
 
     fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Chat> {
-        Ok(Chat { id: r.get(0)?, service_id: r.get(1)?, title: r.get(2)?, created_at: r.get(3)?, updated_at: r.get(4)?, mode: r.get(5)? })
+        Ok(Chat { id: r.get(0)?, service_id: r.get(1)?, title: r.get(2)?, created_at: r.get(3)?, updated_at: r.get(4)?, mode: r.get(5)?, project_dir: r.get(6)? })
     }
 
     pub fn get_chat(&self, id: &str) -> AppResult<Chat> {
         self.conn
-            .query_row("SELECT id,service_id,title,created_at,updated_at,mode FROM chats WHERE id=?1", [id], Self::row)
+            .query_row("SELECT id,service_id,title,created_at,updated_at,mode,project_dir FROM chats WHERE id=?1", [id], Self::row)
             .optional()?
             .ok_or_else(|| AppError::new("not_found", "ไม่พบแชตนี้"))
     }
 
-    /// `service_id = Some(id)` lists that service's docs chats; `None` lists the general
-    /// (floating) chats (`mode='chat'`) — the two menus never mix.
-    pub fn list_chats(&self, service_id: Option<&str>, query: &str) -> AppResult<Vec<Chat>> {
+    /// `service_id = Some(id)` lists that service's docs chats; `None` lists the floating chats of
+    /// the given `floating_mode` (`"chat"` general, or `"code"` coding) — the menus never mix.
+    pub fn list_chats(&self, service_id: Option<&str>, floating_mode: &str, query: &str) -> AppResult<Vec<Chat>> {
         let like = format!("%{}%", query.trim().replace('%', "\\%").replace('_', "\\_"));
         let mut st = self.conn.prepare(
-            "SELECT id,service_id,title,created_at,updated_at,mode FROM chats
-             WHERE ((?1 IS NULL AND mode='chat') OR service_id=?1) AND title LIKE ?2 ESCAPE '\\'
+            "SELECT id,service_id,title,created_at,updated_at,mode,project_dir FROM chats
+             WHERE ((?1 IS NULL AND mode=?3) OR service_id=?1) AND title LIKE ?2 ESCAPE '\\'
              ORDER BY updated_at DESC LIMIT 200",
         )?;
-        let rows = st.query_map(params![service_id, like], Self::row)?;
+        let rows = st.query_map(params![service_id, like, floating_mode], Self::row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -246,6 +266,12 @@ impl ChatDb {
 
     pub fn touch(&self, id: &str) -> AppResult<()> {
         self.conn.execute("UPDATE chats SET updated_at=?2 WHERE id=?1", params![id, now_ms()])?;
+        Ok(())
+    }
+
+    /// Change the project folder of a "code" chat (when the user re-picks it mid-chat).
+    pub fn set_project_dir(&self, id: &str, dir: &str) -> AppResult<()> {
+        self.conn.execute("UPDATE chats SET project_dir=?2 WHERE id=?1", params![id, dir])?;
         Ok(())
     }
 
@@ -277,10 +303,11 @@ impl ChatDb {
         let now = now_ms();
         let sources = serde_json::to_string(m.sources)?;
         let steps = if m.steps.is_empty() { None } else { Some(serde_json::to_string(m.steps)?) };
+        let changes = m.changes.map(serde_json::to_string).transpose()?;
         self.conn.execute(
-            "INSERT INTO messages(chat_id,role,content,model,reasoning_effort,sources,elapsed_ms,error,created_at,search_query,steps)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-            params![m.chat_id, m.role, m.content, m.model, m.reasoning_effort, sources, m.elapsed_ms, m.error, now, m.search_query, steps],
+            "INSERT INTO messages(chat_id,role,content,model,reasoning_effort,sources,elapsed_ms,error,created_at,search_query,steps,changes)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![m.chat_id, m.role, m.content, m.model, m.reasoning_effort, sources, m.elapsed_ms, m.error, now, m.search_query, steps, changes],
         )?;
         let id = self.conn.last_insert_rowid();
         self.touch(m.chat_id)?;
@@ -297,17 +324,19 @@ impl ChatDb {
             created_at: now,
             search_query: m.search_query.map(Into::into),
             steps: m.steps.to_vec(),
+            changes: m.changes.cloned(),
         })
     }
 
     pub fn messages(&self, chat_id: &str) -> AppResult<Vec<Message>> {
         let mut st = self.conn.prepare(
-            "SELECT id,chat_id,role,content,model,reasoning_effort,sources,elapsed_ms,error,created_at,search_query,steps
+            "SELECT id,chat_id,role,content,model,reasoning_effort,sources,elapsed_ms,error,created_at,search_query,steps,changes
              FROM messages WHERE chat_id=?1 ORDER BY id",
         )?;
         let rows = st.query_map([chat_id], |r| {
             let src: String = r.get(6)?;
             let steps: Option<String> = r.get(11)?;
+            let changes: Option<String> = r.get(12)?;
             Ok(Message {
                 id: r.get(0)?,
                 chat_id: r.get(1)?,
@@ -321,9 +350,20 @@ impl ChatDb {
                 created_at: r.get(9)?,
                 search_query: r.get(10)?,
                 steps: steps.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+                changes: changes.and_then(|s| serde_json::from_str(&s).ok()),
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The changeset a coding message saved (for undo), or `None` if that message changed nothing.
+    pub fn changeset(&self, chat_id: &str, message_id: i64) -> AppResult<Option<crate::codefs::Changeset>> {
+        let raw: Option<String> = self
+            .conn
+            .query_row("SELECT changes FROM messages WHERE id=?1 AND chat_id=?2", params![message_id, chat_id], |r| r.get(0))
+            .optional()?
+            .flatten();
+        Ok(raw.and_then(|s| serde_json::from_str(&s).ok()))
     }
 
     /// The last answer that worked (text + its sources) — what a follow-up question builds on.
@@ -398,7 +438,7 @@ mod tests {
     use super::*;
 
     fn msg<'a>(chat: &'a str, role: &'a str, content: &'a str, error: Option<&'a str>) -> NewMessage<'a> {
-        NewMessage { chat_id: chat, role, content, model: None, reasoning_effort: None, sources: &[], elapsed_ms: None, error, search_query: None, steps: &[] }
+        NewMessage { chat_id: chat, role, content, model: None, reasoning_effort: None, sources: &[], elapsed_ms: None, error, search_query: None, steps: &[], changes: None }
     }
 
     #[test]
@@ -427,7 +467,7 @@ mod tests {
     #[test]
     fn turns_leaving_the_window_are_summarized_once() {
         let db = ChatDb::open_in_memory().unwrap();
-        let c = db.create_chat(Some("hr"), "docs", "q").unwrap();
+        let c = db.create_chat(Some("hr"), "docs", "q", None).unwrap();
         for i in 0..5 {
             db.add_message(msg(&c.id, "user", &format!("q{i}"), None)).unwrap();
             db.add_message(msg(&c.id, "assistant", &format!("a{i}"), None)).unwrap();
@@ -449,7 +489,7 @@ mod tests {
     #[test]
     fn history_roundtrip_and_turns() {
         let db = ChatDb::open_in_memory().unwrap();
-        let c = db.create_chat(Some("hr"), "docs", "พนักงานลาพักร้อนได้กี่วันต่อปี และต้องแจ้งล่วงหน้ากี่วันทำการ ตามนโยบายบริษัท").unwrap();
+        let c = db.create_chat(Some("hr"), "docs", "พนักงานลาพักร้อนได้กี่วันต่อปี และต้องแจ้งล่วงหน้ากี่วันทำการ ตามนโยบายบริษัท", None).unwrap();
         assert!(c.title.ends_with('…'));
         for i in 0..4 {
             db.add_message(msg(&c.id, "user", &format!("q{i}"), None)).unwrap();
@@ -457,8 +497,8 @@ mod tests {
         }
         let t = db.recent_turns(&c.id, 2).unwrap();
         assert_eq!(t, vec![("q1".into(), "a1".into()), ("q3".into(), "a3".into())]);
-        assert_eq!(db.list_chats(Some("hr"), "ลาพัก").unwrap().len(), 1);
-        assert!(db.list_chats(Some("pos"), "").unwrap().is_empty());
+        assert_eq!(db.list_chats(Some("hr"), "chat", "ลาพัก").unwrap().len(), 1);
+        assert!(db.list_chats(Some("pos"), "chat", "").unwrap().is_empty());
         db.delete_by_service("hr").unwrap();
         assert!(db.messages(&c.id).unwrap().is_empty());
     }
@@ -466,18 +506,34 @@ mod tests {
     #[test]
     fn general_and_docs_chats_never_mix() {
         let db = ChatDb::open_in_memory().unwrap();
-        let g = db.create_chat(None, "chat", "สรุปอีเมลให้หน่อย").unwrap();
-        let d = db.create_chat(Some("hr"), "docs", "สิทธิลาพักร้อน").unwrap();
+        let g = db.create_chat(None, "chat", "สรุปอีเมลให้หน่อย", None).unwrap();
+        let d = db.create_chat(Some("hr"), "docs", "สิทธิลาพักร้อน", None).unwrap();
         assert_eq!(g.service_id, None);
         assert_eq!(g.mode, "chat");
         assert_eq!(d.service_id.as_deref(), Some("hr"));
         // general menu (None) lists only the floating chat; the service menu only its own
-        let general = db.list_chats(None, "").unwrap();
+        let general = db.list_chats(None, "chat", "").unwrap();
         assert_eq!(general.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec![g.id.as_str()]);
-        let hr = db.list_chats(Some("hr"), "").unwrap();
+        let hr = db.list_chats(Some("hr"), "chat", "").unwrap();
         assert_eq!(hr.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec![d.id.as_str()]);
         // reload keeps the mode
         assert_eq!(db.get_chat(&g.id).unwrap().mode, "chat");
+    }
+
+    #[test]
+    fn code_chats_persist_their_folder_and_list_separately() {
+        let db = ChatDb::open_in_memory().unwrap();
+        let c = db.create_chat(None, "code", "แก้บั๊ก", Some("D:\\proj")).unwrap();
+        assert_eq!(c.mode, "code");
+        assert_eq!(c.project_dir.as_deref(), Some("D:\\proj"));
+        let general = db.create_chat(None, "chat", "คุย", None).unwrap();
+        // the code menu lists only code chats; the general menu only general ones (never mix)
+        let code = db.list_chats(None, "code", "").unwrap();
+        assert_eq!(code.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec![c.id.as_str()]);
+        let chat = db.list_chats(None, "chat", "").unwrap();
+        assert_eq!(chat.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec![general.id.as_str()]);
+        // reload keeps the folder
+        assert_eq!(db.get_chat(&c.id).unwrap().project_dir.as_deref(), Some("D:\\proj"));
     }
 
     #[test]
@@ -494,7 +550,7 @@ mod tests {
         .unwrap();
         let db = ChatDb::init(conn).unwrap();
         // the migration must drop NOT NULL so a floating chat can be created
-        let g = db.create_chat(None, "chat", "สรุปให้หน่อย").unwrap();
+        let g = db.create_chat(None, "chat", "สรุปให้หน่อย", None).unwrap();
         assert_eq!(g.service_id, None);
         assert_eq!(g.mode, "chat");
         // the old docs chat and its message survive the table rebuild
@@ -502,7 +558,7 @@ mod tests {
         assert_eq!(db.get_chat("old").unwrap().mode, "docs");
         assert_eq!(db.messages("old").unwrap()[0].content, "คำตอบเก่า");
         // and the two kinds still don't mix
-        assert_eq!(db.list_chats(None, "").unwrap().len(), 1);
-        assert_eq!(db.list_chats(Some("hr"), "").unwrap().len(), 1);
+        assert_eq!(db.list_chats(None, "chat", "").unwrap().len(), 1);
+        assert_eq!(db.list_chats(Some("hr"), "chat", "").unwrap().len(), 1);
     }
 }

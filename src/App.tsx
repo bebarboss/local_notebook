@@ -143,6 +143,7 @@ export default function App() {
         {page.name === "chat" && <ChatPage chatId={page.chatId} initial={page.initial} onMenu={() => setMenuOpen(true)} />}
         {page.name === "newchat" && <NewChatPage onMenu={() => setMenuOpen(true)} />}
         {page.name === "general" && <NewChatPage general onMenu={() => setMenuOpen(true)} />}
+        {page.name === "code" && <NewChatPage coding onMenu={() => setMenuOpen(true)} />}
         {page.name === "services" && <ServicesPage />}
         {page.name === "settings" && <SettingsPage section={page.section} />}
       </div>

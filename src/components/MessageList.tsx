@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
-import { BookMarked, BookOpen, Copy, Check, CircleAlert, Globe, RotateCcw, Search } from "lucide-react";
-import type { AgentStep, Message, Source } from "../lib/types";
+import { BookMarked, BookOpen, Code2, Copy, Check, CircleAlert, Globe, RotateCcw, Search } from "lucide-react";
+import type { AgentStep, CodeChange, Message, Source } from "../lib/types";
 import { th } from "../i18n/th";
+import { api } from "../lib/api";
 import { initials, useApp } from "../state";
 import { Markdown } from "./Markdown";
+import { ChangesList } from "./ChangesList";
 import { ErrorState } from "./ui";
 
 export interface StreamingState {
@@ -14,6 +16,8 @@ export interface StreamingState {
   searchQuery?: string;
   /** the agentic gather step's activity, appended live each round */
   steps?: AgentStep[];
+  /** files the coding agent changed this turn (shown live before the answer saves) */
+  changes?: CodeChange[];
 }
 
 /** "ค้นด้วย: …" — how a follow-up question was understood for the search */
@@ -37,10 +41,20 @@ function stepText(s: AgentStep): string {
       return `ค้นเว็บ: ${s.detail}${s.found ? ` — เจอ ${s.found} แหล่ง` : ""}`;
     case "webread":
       return `อ่านหน้า: ${s.detail}`;
+    case "codelist":
+      return `ดูโฟลเดอร์: ${s.detail}`;
+    case "coderead":
+      return `อ่านไฟล์: ${s.detail}`;
+    case "codegrep":
+      return `ค้นโค้ด: ${s.detail}`;
+    case "codewrite":
+      return `เขียนไฟล์: ${s.detail}`;
+    case "codeedit":
+      return `แก้ไฟล์: ${s.detail}`;
     case "done":
-      return "ข้อมูลพอแล้ว";
+      return "เสร็จแล้ว";
     case "error":
-      return "ค้นเพิ่มไม่สำเร็จ ใช้ข้อมูลที่มี";
+      return "ทำบางขั้นไม่สำเร็จ ใช้ผลที่มี";
     default:
       return s.detail;
   }
@@ -50,6 +64,7 @@ function stepIcon(kind: string) {
   const p = { size: 12, strokeWidth: 2, "aria-hidden": true } as const;
   if (kind === "read") return <BookOpen {...p} />;
   if (kind === "websearch" || kind === "webread") return <Globe {...p} />;
+  if (kind.startsWith("code")) return <Code2 {...p} />;
   if (kind === "done") return <Check {...p} />;
   if (kind === "error") return <CircleAlert {...p} />;
   return <Search {...p} />;
@@ -101,6 +116,7 @@ export function MessageList({
         <div className="ai-msg" aria-busy={!streaming.error}>
           <SearchedAs query={streaming.searchQuery} />
           <AgentSteps steps={streaming.steps} />
+          {streaming.changes && <ChangesList changes={streaming.changes} />}
           {streaming.content ? (
             <Markdown text={streaming.content} sources={streaming.sources} trailing={<span className="caret" aria-hidden="true" />} />
           ) : !streaming.error ? (
@@ -150,6 +166,7 @@ function AiMsg({ msg, onRetry, retryDisabled, onSaveKnowledge }: { msg: Message;
       {menu && <ContextMenu at={menu} onClose={() => setMenu(null)} onCopy={copy} onSaveKnowledge={onSaveKnowledge!} />}
       <SearchedAs query={msg.searchQuery} />
       <AgentSteps steps={msg.steps} />
+      {msg.changes && msg.changes.items.length > 0 && <CodeChanges chatId={msg.chatId} messageId={msg.id} items={msg.changes.items} />}
       {msg.content && <Markdown text={msg.content} sources={msg.sources} />}
       {msg.error && <ErrorState message={msg.error} />}
       <div className="ai-meta">
@@ -172,6 +189,31 @@ function AiMsg({ msg, onRetry, retryDisabled, onSaveKnowledge }: { msg: Message;
         {info && <span className="info">{info}</span>}
       </div>
     </div>
+  );
+}
+
+/** A saved coding turn's changes, with a working undo button. */
+function CodeChanges({ chatId, messageId, items }: { chatId: string; messageId: number; items: CodeChange[] }) {
+  const [undoing, setUndoing] = useState(false);
+  const [undone, setUndone] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const undo = async () => {
+    setUndoing(true);
+    setErr(null);
+    try {
+      await api.undoCodeChanges(chatId, messageId);
+      setUndone(true);
+    } catch (e) {
+      setErr((e as { message: string }).message);
+    } finally {
+      setUndoing(false);
+    }
+  };
+  return (
+    <>
+      <ChangesList changes={items} onUndo={undo} undoing={undoing} undone={undone} />
+      {err && <div className="ai-text muted" style={{ fontSize: 12.5, color: "var(--danger, #ef4444)" }}>ย้อนกลับไม่สำเร็จ: {err}</div>}
+    </>
   );
 }
 

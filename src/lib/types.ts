@@ -142,6 +142,30 @@ export interface Message {
   searchQuery?: string;
   /** the agentic gather step's activity (empty/absent when it didn't run) */
   steps?: AgentStep[];
+  /** files changed by a "เขียนโค้ด" turn (absent when it didn't run) — can be undone */
+  changes?: Changeset;
+}
+
+/** one file changed by the coding agent */
+export interface CodeChange {
+  /** path relative to the project root, forward-slashed */
+  path: string;
+  kind: "create" | "modify";
+  /** original content before this turn (null when the file was created) */
+  before: string | null;
+  after: string;
+}
+
+/** the files a coding turn changed, plus the project root they apply to (for undo) */
+export interface Changeset {
+  root: string;
+  items: CodeChange[];
+}
+
+/** how many files an undo restored and deleted */
+export interface UndoResult {
+  restored: number;
+  deleted: number;
 }
 
 export interface Chat {
@@ -151,8 +175,10 @@ export interface Chat {
   title: string;
   createdAt: number;
   updatedAt: number;
-  /** "docs" = RAG over a service · "chat" = general assistant, no documents */
-  mode: "docs" | "chat";
+  /** "docs" = RAG over a service · "chat" = general assistant · "code" = coding agent on a folder */
+  mode: "docs" | "chat" | "code";
+  /** the project folder a "code" chat works in (absolute path); absent for other modes */
+  projectDir?: string | null;
 }
 
 export interface ModelConfig {
@@ -375,8 +401,8 @@ export interface AskRequest {
   question: string;
   model: string;
   effort: Effort;
-  /** "docs" (default) or "chat"; only used when creating a new chat */
-  mode?: "docs" | "chat";
+  /** "docs" (default), "chat", or "code"; only used when creating a new chat */
+  mode?: "docs" | "chat" | "code";
   allServices: boolean;
   /** file paths attached to this one question (general chat only); read fresh, not indexed */
   attachments?: string[];
@@ -384,6 +410,10 @@ export interface AskRequest {
   now?: string;
   /** general chat only: run a web-research step (DuckDuckGo) before answering */
   web?: boolean;
+  /** general chat only: run the "เขียนโค้ด" agent on `projectDir` before answering */
+  code?: boolean;
+  /** the project folder the coding agent may read/edit (required when `code` is on) */
+  projectDir?: string | null;
 }
 
 export interface AskStarted {
@@ -425,6 +455,14 @@ export interface ChatStep {
   requestId: string;
   chatId: string;
   step: AgentStep;
+}
+
+/** the coding agent's changeset, emitted when a "เขียนโค้ด" turn finishes */
+export interface ChatChanges {
+  requestId: string;
+  chatId: string;
+  root: string;
+  changes: CodeChange[];
 }
 
 export interface AppInfo {

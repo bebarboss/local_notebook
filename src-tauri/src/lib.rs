@@ -3,6 +3,8 @@
 pub mod agent;
 pub mod background;
 pub mod chats;
+pub mod codefs;
+pub mod coding;
 pub mod commands;
 pub mod config;
 pub mod diag;
@@ -150,6 +152,7 @@ pub fn run() {
             commands::ask,
             commands::save_pasted_image,
             commands::open_url,
+            commands::undo_code_changes,
             commands::stop_generation,
             commands::open_source_file,
             commands::embedding_status,

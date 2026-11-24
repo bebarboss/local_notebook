@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { MoreHorizontal, Plus, Search, Settings as SettingsIcon, Pencil, Trash2, BookMarked, MessageCircle, FileText } from "lucide-react";
+import { MoreHorizontal, Plus, Search, Settings as SettingsIcon, Pencil, Trash2, BookMarked, MessageCircle, FileText, Code2 } from "lucide-react";
 import { api } from "../lib/api";
 import type { Chat } from "../lib/types";
 import { th } from "../i18n/th";
@@ -13,6 +13,8 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
   const { services, stats, page, go, appMode, setAppMode, activeServiceId, setActiveServiceId, settings, gateway, chatsVersion } = app;
   const active = services.find((s) => s.id === activeServiceId) ?? null;
   const generalMode = appMode === "chat";
+  const codeMode = appMode === "code";
+  const floating = generalMode || codeMode; // not tied to a service
   const [chats, setChats] = useState<Chat[] | null>(null);
   const [query, setQuery] = useState("");
   const [renaming, setRenaming] = useState<Chat | null>(null);
@@ -20,16 +22,16 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
   const [deleting, setDeleting] = useState<Chat | null>(null);
 
   useEffect(() => {
-    // general mode lists floating chats (null); docs mode lists the active service's chats
-    if (!generalMode && !active) { setChats([]); return; }
+    // floating modes list their own chats (chat/code); docs mode lists the active service's chats
+    if (!floating && !active) { setChats([]); return; }
     let alive = true;
     setChats(null);
     const t = setTimeout(() => {
-      const p = generalMode ? api.listChats(null, query) : api.listChats(active!.id, query);
+      const p = floating ? api.listChats(null, query, codeMode ? "code" : "chat") : api.listChats(active!.id, query);
       p.then((c) => alive && setChats(c)).catch(() => alive && setChats([]));
     }, query ? 200 : 0);
     return () => { alive = false; clearTimeout(t); };
-  }, [generalMode, active, query, chatsVersion]);
+  }, [floating, codeMode, active, query, chatsVersion]);
 
   const openChat = page.name === "chat" ? page.chatId : null;
 
@@ -44,28 +46,42 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
         <button
           role="tab"
           aria-selected={generalMode}
+          aria-label="คุยทั่วไป"
+          title="คุยทั่วไป"
           className={`mode-tab${generalMode ? " on on-chat" : ""}`}
           onClick={nav(() => { setAppMode("chat"); go({ name: "general" }); })}
         >
-          <MessageCircle size={14} strokeWidth={2.2} aria-hidden="true" /> คุยทั่วไป
+          <MessageCircle size={17} strokeWidth={2.2} aria-hidden="true" />
         </button>
         <button
           role="tab"
-          aria-selected={!generalMode}
-          className={`mode-tab${!generalMode ? " on on-docs" : ""}`}
+          aria-selected={codeMode}
+          aria-label="เขียนโค้ด"
+          title="เขียนโค้ด"
+          className={`mode-tab${codeMode ? " on on-code" : ""}`}
+          onClick={nav(() => { setAppMode("code"); go({ name: "code" }); })}
+        >
+          <Code2 size={17} strokeWidth={2.2} aria-hidden="true" />
+        </button>
+        <button
+          role="tab"
+          aria-selected={appMode === "docs"}
+          aria-label="เอกสาร"
+          title="เอกสาร"
+          className={`mode-tab${appMode === "docs" ? " on on-docs" : ""}`}
           onClick={nav(() => { setAppMode("docs"); go({ name: "newchat" }); })}
         >
-          <FileText size={14} strokeWidth={2.2} aria-hidden="true" /> เอกสาร
+          <FileText size={17} strokeWidth={2.2} aria-hidden="true" />
         </button>
       </div>
 
-      {generalMode ? (
+      {floating ? (
         <button
-          className={`nav-item nav-new${page.name === "general" ? " selected" : ""}`}
-          onClick={nav(() => go({ name: "general" }))}
+          className={`nav-item nav-new${page.name === (codeMode ? "code" : "general") ? " selected" : ""}`}
+          onClick={nav(() => go({ name: codeMode ? "code" : "general" }))}
         >
           <span className="plus" aria-hidden="true"><Plus size={14} strokeWidth={2.4} /></span>
-          เริ่มคุยใหม่
+          {codeMode ? "เริ่มเขียนโค้ดใหม่" : "เริ่มคุยใหม่"}
         </button>
       ) : (
         <>
@@ -104,10 +120,10 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
         </>
       )}
 
-      {(generalMode || active) && (
+      {(floating || active) && (
         <>
           <div className="side-head" style={{ paddingTop: 16 }}>
-            <span className="ellipsis">{generalMode ? "แชตล่าสุด" : th.recentIn(active!.code)}</span>
+            <span className="ellipsis">{codeMode ? "โค้ดล่าสุด" : generalMode ? "แชตล่าสุด" : th.recentIn(active!.code)}</span>
           </div>
           <label style={{ position: "relative", margin: "2px 0 4px" }}>
             <span className="sr-only">{th.searchChats}</span>
@@ -115,9 +131,9 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
             <input className="input" style={{ minHeight: 36, padding: "6px 10px 6px 30px", fontSize: 13, background: "var(--surface)" }} placeholder={th.searchChats} value={query} onChange={(e) => setQuery(e.target.value)} />
           </label>
           {chats === null && <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "4px 10px" }}><Skeleton /><Skeleton w="80%" /><Skeleton w="60%" /></div>}
-          {chats?.length === 0 && <span style={{ fontSize: 12, color: "var(--muted)", padding: "4px 10px" }}>{query ? "ไม่พบแชตที่ค้นหา" : th.noChats}</span>}
+          {chats?.length === 0 && <span style={{ fontSize: 12, color: "var(--muted)", padding: "4px 10px" }}>{query ? "ไม่พบแชตที่ค้นหา" : codeMode ? "ยังไม่มีแชตเขียนโค้ด" : generalMode ? "ยังไม่มีแชต" : th.noChats}</span>}
           {chats?.map((c) => (
-            <ChatRow key={c.id} chat={c} general={generalMode} open={c.id === openChat} onOpen={nav(() => go({ name: "chat", chatId: c.id }))} onRename={() => setRenaming(c)} onDelete={() => setDeleting(c)} onKnowledge={() => setNoting(c)} />
+            <ChatRow key={c.id} chat={c} general={floating} open={c.id === openChat} onOpen={nav(() => go({ name: "chat", chatId: c.id }))} onRename={() => setRenaming(c)} onDelete={() => setDeleting(c)} onKnowledge={() => setNoting(c)} />
           ))}
         </>
       )}
@@ -144,7 +160,7 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
           onCancel={() => setDeleting(null)}
           onConfirm={async () => {
             await api.deleteChat(deleting.id);
-            if (openChat === deleting.id) go({ name: generalMode ? "general" : "newchat" });
+            if (openChat === deleting.id) go({ name: codeMode ? "code" : generalMode ? "general" : "newchat" });
             setDeleting(null);
             app.bumpChats();
           }}

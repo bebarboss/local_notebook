@@ -445,7 +445,7 @@ mod tests {
         Message {
             id, chat_id: "c".into(), role: role.into(), content: content.into(), model: None, reasoning_effort: None,
             sources: vec![], elapsed_ms: None, error: None, created_at: 0,
-            search_query: None, steps: vec![],
+            search_query: None, steps: vec![], changes: None,
         }
     }
 

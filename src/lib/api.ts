@@ -14,9 +14,11 @@ import type {
   AskStarted,
   Chat,
   ChatDelta,
+  ChatChanges,
   ChatDone,
   ChatSources,
   ChatStep,
+  UndoResult,
   DocItem,
   DownloadProgress,
   EmbeddingModelId,
@@ -54,6 +56,8 @@ export interface EventMap {
   "chat-sources": ChatSources;
   /** one activity line from the agentic gather step, emitted live each round */
   "chat-step": ChatStep;
+  /** the coding agent's changeset (files created/modified this turn) */
+  "chat-changes": ChatChanges;
   "chat-done": ChatDone;
   "chat-error": { requestId: string; chatId: string; error: AppError };
   "index-progress": IndexProgress;
@@ -131,7 +135,8 @@ export interface Backend {
   /** the files of `from` now live in `to` — follow them without re-indexing */
   moveServiceFolder(serviceId: string, from: string, to: string): Promise<Service>;
   // chats
-  listChats(serviceId: string | null, query: string): Promise<Chat[]>;
+  /** `mode` picks the floating menu when serviceId is null: "chat" (general) or "code" (coding) */
+  listChats(serviceId: string | null, query: string, mode?: "chat" | "code"): Promise<Chat[]>;
   getChat(chatId: string): Promise<Chat>;
   getMessages(chatId: string): Promise<Message[]>;
   renameChat(chatId: string, title: string): Promise<Chat>;
@@ -142,6 +147,8 @@ export interface Backend {
   savePastedImage(bytes: Uint8Array, ext: string): Promise<string>;
   /** open a web source (http/https) in the system default browser */
   openUrl(url: string): Promise<void>;
+  /** undo the files a coding turn changed (restore originals, delete created files) */
+  undoCodeChanges(chatId: string, messageId: number): Promise<UndoResult>;
   stop(requestId: string): Promise<void>;
   /** a shared document whose file is on another PC is fetched from the server first */
   openSource(path: string, serviceId?: string): Promise<void>;
@@ -263,7 +270,7 @@ function createTauriBackend(): Backend {
     exportServiceZip: (serviceId, destDir) => call("export_service_zip", { serviceId, destDir }),
     importServiceZip: (zipPath, destDir, reembed) => call("import_service_zip", { zipPath, destDir, reembed }),
     moveServiceFolder: (serviceId, from, to) => call("move_service_folder", { serviceId, from, to }),
-    listChats: (serviceId, query) => call("list_chats", { serviceId, query }),
+    listChats: (serviceId, query, mode) => call("list_chats", { serviceId, mode: mode ?? null, query }),
     getChat: (chatId) => call("get_chat", { chatId }),
     getMessages: (chatId) => call("get_messages", { chatId }),
     renameChat: (chatId, title) => call("rename_chat", { chatId, title }),
@@ -272,6 +279,7 @@ function createTauriBackend(): Backend {
     ask: (req) => call("ask", { req: { ...req, now: new Intl.DateTimeFormat("th-TH", { dateStyle: "full", timeStyle: "short" }).format(new Date()) } }),
     savePastedImage: (bytes, ext) => call("save_pasted_image", { bytes: Array.from(bytes), ext }),
     openUrl: (url) => call("open_url", { url }),
+    undoCodeChanges: (chatId, messageId) => call("undo_code_changes", { chatId, messageId }),
     stop: (requestId) => call("stop_generation", { requestId }),
     openSource: (path, serviceId) => call("open_source_file", { path, serviceId: serviceId ?? null }),
     downloadServiceFiles: (serviceId, dest) => call("download_service_files", { serviceId, dest }),

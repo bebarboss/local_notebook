@@ -6,12 +6,13 @@ export type Page =
   | { name: "chat"; chatId: string; initial?: AskRequest }
   | { name: "newchat" }
   | { name: "general" }
+  | { name: "code" }
   | { name: "services" }
   | { name: "settings"; section?: SettingsSection }
   | { name: "setup" };
 
 /** Top-level workspace, like Claude desktop's Claude ↔ Claude Code switch. */
-export type AppMode = "docs" | "chat";
+export type AppMode = "docs" | "chat" | "code";
 
 export type SettingsSection = "gateway" | "models" | "embedding" | "search" | "history" | "theme" | "startup" | "trouble" | "about";
 
@@ -203,7 +204,7 @@ export function useApp(): Ctx {
 }
 
 function readAppMode(): AppMode {
-  try { return localStorage.getItem("appMode") === "chat" ? "chat" : "docs"; } catch { return "docs"; }
+  try { const m = localStorage.getItem("appMode"); return m === "chat" || m === "code" ? m : "docs"; } catch { return "docs"; }
 }
 
 /** mock-mode preview helper: ?page=chat|services|settings|setup */

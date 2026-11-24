@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { FileText, Menu, MessageCircle } from "lucide-react";
+import { Code2, FileText, Menu, MessageCircle } from "lucide-react";
 import { api } from "../lib/api";
 import type { AskRequest, Chat as ChatT, Effort, Message } from "../lib/types";
 import { th } from "../i18n/th";
@@ -26,6 +26,7 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
   const [allServices, setAllServices] = useState(initial?.allServices ?? false);
   const [knowledgeUpto, setKnowledgeUpto] = useState<number | null>(null);
   const [web, setWeb] = useState(initial?.web ?? false);
+  const [projectDir, setProjectDir] = useState<string | null>(initial?.projectDir ?? null);
   const scroller = useRef<HTMLDivElement>(null);
   const started = useRef(false);
   const streamRef = useRef<Stream | null>(null);
@@ -35,6 +36,9 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
   const service = services.find((s) => s.id === serviceId) ?? null;
   const mode = chat?.mode ?? initial?.mode ?? "docs";
   const docsMode = mode === "docs";
+  const codeMode = mode === "code";
+  // folder: a re-pick in this session wins; otherwise the one persisted on the chat (or from `initial`)
+  const projectFolder = projectDir ?? chat?.projectDir ?? null;
 
   // keep the sidebar workspace in sync with the chat being viewed
   useEffect(() => { setAppMode(mode); }, [mode, setAppMode]);
@@ -81,6 +85,7 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
     const offs = [
       api.on("chat-sources", (p) => setStream((s) => (s && s.requestId === p.requestId ? { ...s, sources: p.sources, searchQuery: p.searchQuery } : s))),
       api.on("chat-step", (p) => setStream((s) => (s && s.requestId === p.requestId ? { ...s, steps: [...(s.steps ?? []), p.step] } : s))),
+      api.on("chat-changes", (p) => setStream((s) => (s && s.requestId === p.requestId ? { ...s, changes: p.changes } : s))),
       api.on("chat-delta", (p) => setStream((s) => (s && s.requestId === p.requestId ? { ...s, content: s.content + p.delta } : s))),
       api.on("chat-done", (p) => {
         if (streamRef.current?.requestId !== p.requestId) return;
@@ -109,7 +114,8 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
       if (docsMode && !serviceId) return;
       const req: AskRequest = {
         chatId: chat?.id ?? (chatId === "new" ? null : chatId),
-        serviceId, question, model, effort, mode, allServices, web: docsMode ? false : web, ...override,
+        serviceId, question, model, effort, mode, allServices,
+        web: mode === "chat" ? web : false, code: codeMode, projectDir: codeMode ? projectFolder : null, ...override,
         // known before the call, so no early delta/done event can be missed
         requestId: crypto.randomUUID(),
       };
@@ -133,7 +139,7 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
         if (err.code === "gateway_unreachable") app.recheckGateway();
       }
     },
-    [serviceId, docsMode, mode, chat, chatId, model, effort, allServices, web, bumpChats, go, app],
+    [serviceId, docsMode, codeMode, mode, chat, chatId, model, effort, allServices, web, projectFolder, bumpChats, go, app],
   );
 
   // first question coming from NewChat
@@ -169,7 +175,13 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
         <div className="topbar">
           <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flex: 1 }}>
             <button className="icon-btn only-narrow" aria-label="เปิดเมนู" onClick={onMenu}><Menu size={18} strokeWidth={1.8} /></button>
-            {!docsMode && (
+            {codeMode && (
+              <span className="chip chip-general" style={{ flex: "none" }} title={projectFolder ?? undefined}>
+                <Code2 size={13} strokeWidth={2} aria-hidden="true" />
+                เขียนโค้ด
+              </span>
+            )}
+            {!docsMode && !codeMode && (
               <span className="chip chip-general" style={{ flex: "none" }}>
                 <MessageCircle size={13} strokeWidth={2} aria-hidden="true" />
                 คุยทั่วไป
@@ -236,10 +248,14 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
           onPickFiles={api.pickFiles}
           onSavePastedImage={api.savePastedImage}
           web={web}
-          onToggleWeb={docsMode ? undefined : () => setWeb((v) => !v)}
+          onToggleWeb={mode === "chat" ? () => setWeb((v) => !v) : undefined}
+          code={codeMode ? true : undefined}
+          projectDir={codeMode ? projectFolder : undefined}
+          onPickProjectDir={codeMode ? async () => { const d = await api.pickFolder(); if (d) setProjectDir(d); } : undefined}
           streaming={!!stream && !stream.error}
           sendBlockedReason={sendBlocked}
-          hint={docsMode ? undefined : "คุยทั่วไป — ไม่ค้นเอกสาร ไม่ผูก service"}
+          placeholder={codeMode ? "บอกงานที่จะให้แก้โค้ด…" : undefined}
+          hint={codeMode ? undefined : docsMode ? undefined : "คุยทั่วไป — ไม่ค้นเอกสาร ไม่ผูก service"}
           autoFocus
         />
       </main>

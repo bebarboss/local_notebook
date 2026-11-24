@@ -300,11 +300,12 @@ export function createMockBackend(): Backend {
       services[i] = { ...services[i], folders: services[i].folders.map((f) => (f === from ? to : f)) };
       return clone(services.find((s) => s.id === sid)!);
     },
-    listChats: async (sid, query) => {
+    listChats: async (sid, query, mode) => {
       const q = query.trim().toLowerCase();
+      const floating = mode ?? "chat";
       return clone(
         chats
-          .filter((c) => (sid === null ? c.mode === "chat" : c.serviceId === sid) && (!q || c.title.toLowerCase().includes(q)))
+          .filter((c) => (sid === null ? c.mode === floating : c.serviceId === sid) && (!q || c.title.toLowerCase().includes(q)))
           .sort((a, b) => b.updatedAt - a.updatedAt),
       );
     },
@@ -328,12 +329,16 @@ export function createMockBackend(): Backend {
     ask: async (req) => {
       if (status.state !== "ok") throw { code: "gateway_unreachable", message: errorText(0, "") };
       const existing = req.chatId ? chats.find((c) => c.id === req.chatId) : null;
-      const isChat = existing ? existing.mode === "chat" : req.mode === "chat";
-      const svc = isChat ? null : services.find((s) => s.id === req.serviceId)!;
+      const chatMode = existing ? existing.mode : (req.mode ?? "docs");
+      const isChat = chatMode === "chat";
+      const isCode = chatMode === "code";
+      const floating = isChat || isCode;
+      const svc = floating ? null : services.find((s) => s.id === req.serviceId)!;
+      const projectDir = isCode ? (req.projectDir ?? existing?.projectDir ?? "D:\\proj") : null;
       let chatId = req.chatId;
       if (!chatId) {
         chatId = uid("chat");
-        chats.push({ id: chatId, serviceId: svc?.id ?? null, title: req.question.trim().slice(0, 40), createdAt: now(), updatedAt: now(), mode: isChat ? "chat" : "docs" });
+        chats.push({ id: chatId, serviceId: svc?.id ?? null, title: req.question.trim().slice(0, 40), createdAt: now(), updatedAt: now(), mode: chatMode, projectDir });
         messages[chatId] = [];
       }
       const userMessage: Message = { id: ++seq, chatId, role: "user", content: req.question, model: null, reasoningEffort: null, sources: [], elapsedMs: null, error: null, createdAt: now() };
@@ -344,12 +349,39 @@ export function createMockBackend(): Backend {
       const cid = chatId;
       (async () => {
         const started = now();
-        // general chat: no documents, no sources, no agentic steps
-        if (isChat) {
+        // floating chat (general or code): no documents, no sources
+        if (floating) {
           const atts = req.attachments ?? [];
           const attLine = atts.length
             ? `\n\n📎 แนบ ${atts.length} ไฟล์: ${atts.map((p: string) => p.split(/[/\\]/).pop()).join(", ")} (ของจริงจะอ่านข้อความ/OCR มาเป็น context)`
             : "";
+          // coding mode (mock): emit code steps + a changeset, then a summary answer with undo
+          if (isCode) {
+            emit("chat-step", { requestId, chatId: cid, step: { kind: "codelist", detail: ".", found: 0 } });
+            await wait(250);
+            emit("chat-step", { requestId, chatId: cid, step: { kind: "coderead", detail: "main.py", found: 0 } });
+            await wait(250);
+            emit("chat-step", { requestId, chatId: cid, step: { kind: "codeedit", detail: "main.py", found: 0 } });
+            await wait(200);
+            emit("chat-step", { requestId, chatId: cid, step: { kind: "done", detail: "", found: 0 } });
+            const items = [
+              { path: "main.py", kind: "modify" as const, before: "print('hi')\n", after: "print('world')\n" },
+              { path: "notes/new.txt", kind: "create" as const, before: null, after: "ไฟล์ตัวอย่าง (mock)\n" },
+            ];
+            emit("chat-changes", { requestId, chatId: cid, root: projectDir ?? "", changes: clone(items) });
+            const codeText = "แก้ให้แล้ว (mock): เปลี่ยน **main.py** ให้พิมพ์ world และสร้าง **notes/new.txt** — ตรวจ diff ด้านบน ถ้าไม่โอเคกดย้อนกลับได้";
+            await wait(200);
+            let cout = "";
+            const cparts = codeText.match(/.{1,6}/gsu) ?? [];
+            for (const p of cparts) { if (st.stopped) break; await wait(25); cout += p; emit("chat-delta", { requestId, chatId: cid, delta: p }); }
+            const cmsg: Message = { id: ++seq, chatId: cid, role: "assistant", content: cout, model: req.model, reasoningEffort: req.effort, sources: [], elapsedMs: now() - started, error: st.stopped ? "หยุดโดยผู้ใช้" : null, createdAt: now(), changes: { root: projectDir ?? "", items: clone(items) } };
+            messages[cid].push(cmsg);
+            const cc = chats.find((x) => x.id === cid);
+            if (cc) cc.updatedAt = now();
+            streams.delete(requestId);
+            emit("chat-done", { requestId, chatId: cid, message: clone(cmsg) });
+            return;
+          }
           // web research (mock): emit a couple of steps + fake web sources
           let webSources: Source[] = [];
           if (req.web) {
@@ -584,6 +616,7 @@ export function createMockBackend(): Backend {
     pickFiles: async () => ["D:\\Docs\\เอกสารใหม่.pdf"],
     savePastedImage: async (_bytes, ext) => `D:\\paste\\วางรูป-${Date.now().toString(36)}.${ext}`,
     openUrl: async (url) => { window.open(url, "_blank", "noopener"); },
+    undoCodeChanges: async () => ({ restored: 1, deleted: 1 }),
     pickZip: async () => "C:\\Users\\me\\Downloads\\DocAsk-HR-นโยบาย.zip",
     pickJson: async () => "C:\\Users\\me\\AppData\\Roaming\\Code\\User\\chatLanguageModels.json",
     on: async (event, cb) => {

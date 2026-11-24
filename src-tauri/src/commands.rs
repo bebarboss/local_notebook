@@ -588,8 +588,10 @@ pub fn move_service_folder(app: AppHandle, state: S<'_>, service_id: String, fro
 // ------------------------------------------------------------------ chats
 
 #[tauri::command]
-pub fn list_chats(state: S<'_>, service_id: Option<String>, query: String) -> AppResult<Vec<Chat>> {
-    state.chats.lock().list_chats(service_id.as_deref(), &query)
+pub fn list_chats(state: S<'_>, service_id: Option<String>, mode: Option<String>, query: String) -> AppResult<Vec<Chat>> {
+    // for a floating list (no service) `mode` picks the menu: "chat" (general) or "code" (coding)
+    let floating = mode.as_deref().unwrap_or("chat");
+    state.chats.lock().list_chats(service_id.as_deref(), floating, &query)
 }
 
 #[tauri::command]
@@ -650,6 +652,12 @@ pub struct AskRequest {
     /// general chat only: run a web-research step (DuckDuckGo) before answering.
     #[serde(default)]
     pub web: bool,
+    /// general chat only: run the "เขียนโค้ด" agent on `project_dir` before answering.
+    #[serde(default)]
+    pub code: bool,
+    /// the project folder the coding agent may read/edit (required when `code` is on).
+    #[serde(default)]
+    pub project_dir: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -693,6 +701,12 @@ struct Failed {
 struct StepEvent {
     step: crate::agent::Step,
 }
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CodeChangesEvent {
+    root: String,
+    changes: Vec<crate::codefs::CodeChange>,
+}
 
 #[tauri::command]
 pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<AskStarted> {
@@ -715,15 +729,19 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
         let chat = match &req.chat_id {
             // existing chat: its mode and service are authoritative (can't switch mid-chat)
             Some(id) => db.get_chat(id)?,
-            // new chat: "chat" = general/floating (no service); "docs" = tied to a service
-            None => {
-                if req.mode == "chat" {
-                    db.create_chat(None, "chat", &question)?
-                } else {
-                    let sid = req.service_id.as_deref().ok_or_else(|| AppError::new("invalid", "ต้องเลือก service ก่อน"))?;
-                    db.create_chat(Some(sid), "docs", &question)?
+            // new chat: "chat" = general/floating, "code" = coding on a project folder, "docs" = a service
+            None => match req.mode.as_str() {
+                "chat" => db.create_chat(None, "chat", &question, None)?,
+                "code" => {
+                    let pd = req.project_dir.as_deref().filter(|p| !p.trim().is_empty())
+                        .ok_or_else(|| AppError::new("invalid", "ต้องเลือกโฟลเดอร์โปรเจคก่อน"))?;
+                    db.create_chat(None, "code", &question, Some(pd))?
                 }
-            }
+                _ => {
+                    let sid = req.service_id.as_deref().ok_or_else(|| AppError::new("invalid", "ต้องเลือก service ก่อน"))?;
+                    db.create_chat(Some(sid), "docs", &question, None)?
+                }
+            },
         };
         // history first (text only), then the new question
         let history = crate::memory::fit(&db.recent_turns(&chat.id, turns)?, crate::memory::HISTORY_BUDGET);
@@ -732,13 +750,13 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
         let previous = db.last_answer(&chat.id)?;
         let um = db.add_message(NewMessage {
             chat_id: &chat.id, role: "user", content: &question, model: None, reasoning_effort: None,
-            sources: &[], elapsed_ms: None, error: None, search_query: None, steps: &[],
+            sources: &[], elapsed_ms: None, error: None, search_query: None, steps: &[], changes: None,
         })?;
         (chat, history, summary, previous, um)
     };
 
-    // a docs chat needs its service loaded; a general chat has none
-    let docs = chat.mode != "chat";
+    // a docs chat needs its service loaded; general ("chat") and "code" chats have none
+    let docs = chat.mode == "docs";
     let svc = if docs {
         let sid = chat.service_id.as_deref().ok_or_else(|| AppError::new("invalid", "แชตนี้ไม่มี service"))?;
         Some(state.services.lock().get(sid)?)
@@ -757,9 +775,23 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
     // attachments are per-question context in both modes (docs chats also search the service)
     let attachments = req.attachments;
     let now = req.now.filter(|s| !s.trim().is_empty());
-    // web research is a general-chat feature and needs a tool-calling model
-    let web = !docs && req.web && model.tool_calling;
-    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, docs, model, effort: req.effort, all: req.all_services, question, history, summary, turns, previous, search_query: None, steps: Vec::new(), attachments, now, web, key, token };
+    // "code" chats run the coding agent on the chat's project folder (persisted at creation; a
+    // re-pick mid-chat updates it). "chat" chats may run web research. Both need a tool-calling model.
+    let project_dir = if chat.mode == "code" {
+        let req_pd = req.project_dir.as_deref().map(str::trim).filter(|p| !p.is_empty());
+        match req_pd {
+            Some(pd) if chat.project_dir.as_deref() != Some(pd) => {
+                state.chats.lock().set_project_dir(&chat.id, pd)?;
+                Some(pd.to_string())
+            }
+            _ => chat.project_dir.clone(),
+        }
+    } else {
+        None
+    };
+    let code = chat.mode == "code" && model.tool_calling && project_dir.is_some();
+    let web = chat.mode == "chat" && req.web && model.tool_calling;
+    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, docs, model, effort: req.effort, all: req.all_services, question, history, summary, turns, previous, search_query: None, steps: Vec::new(), attachments, now, web, code, project_dir, changes: None, key, token };
     tauri::async_runtime::spawn(job.run());
 
     Ok(AskStarted { request_id, chat_id: chat.id, user_message })
@@ -799,6 +831,12 @@ struct AskJob {
     now: Option<String>,
     /// general chat only: run the web-research step before answering
     web: bool,
+    /// general chat only: run the coding agent on `project_dir` before answering
+    code: bool,
+    /// project folder for the coding agent (absolute path; set only when `code` is on)
+    project_dir: Option<String>,
+    /// files the coding turn changed, saved with the answer for undo
+    changes: Option<crate::codefs::Changeset>,
     key: String,
     token: CancellationToken,
 }
@@ -824,6 +862,7 @@ impl AskJob {
             error,
             search_query: self.search_query.as_deref(),
             steps: &self.steps,
+            changes: self.changes.as_ref(),
         });
         saved.unwrap_or_else(|e| Message {
             id: -now_ms(),
@@ -838,6 +877,7 @@ impl AskJob {
             created_at: now_ms(),
             search_query: self.search_query.clone(),
             steps: self.steps.clone(),
+            changes: self.changes.clone(),
         })
     }
 
@@ -894,6 +934,40 @@ impl AskJob {
         // general (floating) chat: no documents, no retrieval — just answer with the model's
         // own knowledge, keeping the chat's own history.
         if !self.docs {
+            // coding: let the model read/edit files in the chosen project folder a few bounded
+            // rounds (writes land on disk at once). The loop's own final text is the answer; its
+            // changes are emitted for the diff view and saved for undo.
+            if self.code {
+                let root = self.project_dir.clone().unwrap_or_default();
+                let ws = match crate::codefs::Workspace::new(&root) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        self.fail(e, &[], elapsed());
+                        self.cleanup();
+                        return;
+                    }
+                };
+                let agent = CodeAgent { model: &self.model, key: self.key.as_str(), effort: None, tools_max: self.model.max_output_tokens, ws };
+                let (rid, cid, app2) = (self.request_id.clone(), self.chat_id.clone(), self.app.clone());
+                let mut collected: Vec<crate::agent::Step> = Vec::new();
+                let (items, answer_text) = crate::coding::edit_codebase(&agent, &self.question, self.now.as_deref(), &self.token, |step| {
+                    let _ = app2.emit("chat-step", ChatEvent { request_id: rid.clone(), chat_id: cid.clone(), data: StepEvent { step: step.clone() } });
+                    collected.push(step);
+                })
+                .await;
+                self.steps = collected;
+                let changeset = crate::codefs::Changeset { root: agent.ws.root_display(), items };
+                self.emit("chat-changes", CodeChangesEvent { root: changeset.root.clone(), changes: changeset.items.clone() });
+                self.changes = (!changeset.items.is_empty()).then_some(changeset.clone());
+                if answer_text.trim().is_empty() {
+                    // the loop ended without a summary (hit a limit/cancel) — ask for one from the files changed
+                    let messages = build_code_prompt(&self.history, self.summary.as_deref(), self.now.as_deref(), &changeset, &self.question);
+                    self.answer(messages, Vec::new(), started).await;
+                } else {
+                    self.deliver(&answer_text, started);
+                }
+                return;
+            }
             // web research: let the model search the public web (DuckDuckGo) a few bounded rounds,
             // collect sources, then answer citing them. Trouble just yields fewer/zero sources.
             if self.web {
@@ -1009,6 +1083,18 @@ impl AskJob {
             }
             Err(e) => self.fail(e, &sources, elapsed()),
         }
+        self.cleanup();
+    }
+
+    /// Deliver an answer that is already complete (the coding loop's final summary): show it, save
+    /// it with this turn's changes, finish — no extra Gateway call.
+    fn deliver(&self, text: &str, started: Instant) {
+        let elapsed = started.elapsed().as_millis() as i64;
+        self.emit("chat-delta", Delta { delta: text.to_string() });
+        let m = self.save(text, &[], elapsed, None);
+        self.emit("chat-done", Done { message: m });
+        set_status(&self.app, "ok", None);
+        self.summarize_later();
         self.cleanup();
     }
 
@@ -1406,6 +1492,36 @@ struct WebAgent<'a> {
     tools_max: u64,
 }
 
+/// Backend for the coding loop: a Gateway tool round plus the project-scoped filesystem.
+struct CodeAgent<'a> {
+    model: &'a ModelConfig,
+    key: &'a str,
+    effort: Option<&'a str>,
+    tools_max: u64,
+    ws: crate::codefs::Workspace,
+}
+
+impl crate::coding::CodeBackend for CodeAgent<'_> {
+    async fn complete(&self, messages: &serde_json::Value, tools: &serde_json::Value) -> AppResult<llm::Reply> {
+        llm::complete_tools(&self.model.url, self.key, &self.model.id, self.effort, self.tools_max, messages, tools, crate::coding::PER_CALL).await
+    }
+    fn list_dir(&self, path: &str) -> AppResult<Vec<crate::codefs::DirEntry>> {
+        self.ws.list(path)
+    }
+    fn read_file(&self, path: &str) -> AppResult<String> {
+        self.ws.read(path)
+    }
+    fn grep(&self, pattern: &str, sub: Option<&str>) -> AppResult<Vec<crate::codefs::Hit>> {
+        self.ws.grep(pattern, sub)
+    }
+    fn write_file(&self, path: &str, content: &str) -> AppResult<crate::codefs::WriteOutcome> {
+        self.ws.write(path, content)
+    }
+    fn edit_file(&self, path: &str, old: &str, new: &str) -> AppResult<crate::codefs::WriteOutcome> {
+        self.ws.edit(path, old, new)
+    }
+}
+
 /// A static fetch under this many characters is treated as "thin" — likely a JS-rendered page —
 /// so we re-read it with the headless renderer.
 const THIN_PAGE: usize = 400;
@@ -1516,6 +1632,39 @@ pub fn build_web_prompt(history: &[(String, String)], summary: Option<&str>, att
     msgs
 }
 
+/// Coding summary prompt: used only when the coding loop ended without its own final text (hit a
+/// limit/cancel). Asks the model to summarize the files it changed. The normal path delivers the
+/// loop's own last message instead.
+pub fn build_code_prompt(history: &[(String, String)], summary: Option<&str>, now: Option<&str>, changeset: &crate::codefs::Changeset, question: &str) -> Vec<ChatMessage> {
+    let mut system = String::from(
+        "คุณเพิ่งพยายามแก้โค้ดในโปรเจคของผู้ใช้ตามคำขอ ด้านล่างคือรายการไฟล์ที่เปลี่ยน\n\
+         - สรุปสั้น ๆ ว่าแก้อะไรไปบ้าง และถ้าทำไม่ครบให้บอกตรง ๆ ว่าติดอะไร ตอบเป็นภาษาเดียวกับคำขอ\n\
+         - เตือนให้ผู้ใช้ตรวจ diff ก่อนใช้ (มีปุ่มย้อนกลับถ้าไม่ต้องการ)\n\
+         - ใช้ **ตัวหนา** กับชื่อไฟล์ได้ อย่าแปะเนื้อไฟล์ทั้งหมดซ้ำ",
+    );
+    if let Some(n) = now {
+        system.push_str(&format!("\n- วันเวลาปัจจุบัน: {n}"));
+    }
+    if let Some(s) = summary {
+        system.push_str(&crate::memory::system_note(s));
+    }
+    let mut msgs = vec![ChatMessage::new("system", system)];
+    for (q, a) in history {
+        msgs.push(ChatMessage::new("user", q.clone()));
+        msgs.push(ChatMessage::new("assistant", a.clone()));
+    }
+    let mut user = format!("คำขอ: {question}\n\nไฟล์ที่เปลี่ยน (ราก {}):\n", changeset.root);
+    if changeset.items.is_empty() {
+        user.push_str("(ยังไม่ได้แก้ไฟล์ใด)\n");
+    }
+    for c in &changeset.items {
+        let act = if c.kind == "create" { "สร้าง" } else { "แก้" };
+        user.push_str(&format!("- {act} {}\n", c.path));
+    }
+    msgs.push(ChatMessage::new("user", user));
+    msgs
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_prompt(svc: &Service, sources: &[SourceRef], history: &[(String, String)], summary: Option<&str>, question: &str, all: bool, now: Option<&str>, attachments: Option<&str>) -> Vec<ChatMessage> {
     let mut system = String::from(
@@ -1619,6 +1768,19 @@ pub fn open_url(url: String) -> AppResult<()> {
     #[cfg(all(unix, not(target_os = "macos")))]
     let r = std::process::Command::new("xdg-open").arg(u.as_str()).spawn();
     r.map(|_| ()).map_err(|e| AppError::new("open", format!("เปิดลิงก์ไม่ได้: {e}")))
+}
+
+/// Undo the files a "เขียนโค้ด" turn changed: restore each original, delete files it created.
+/// Loads the changeset saved with that assistant message.
+#[tauri::command]
+pub fn undo_code_changes(state: S<'_>, chat_id: String, message_id: i64) -> AppResult<crate::codefs::UndoResult> {
+    let changeset = {
+        let db = state.chats.lock();
+        db.changeset(&chat_id, message_id)?
+    }
+    .ok_or_else(|| AppError::new("not_found", "ไม่พบรายการแก้ไขของข้อความนี้"))?;
+    let ws = crate::codefs::Workspace::new(&changeset.root)?;
+    Ok(ws.undo(&changeset.items))
 }
 
 // ------------------------------------------------------------------ knowledge

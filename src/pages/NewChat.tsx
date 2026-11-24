@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Menu, Plus } from "lucide-react";
+import { FolderOpen, Menu, Plus } from "lucide-react";
 import type { Effort } from "../lib/types";
 import { api } from "../lib/api";
 import { th } from "../i18n/th";
@@ -7,7 +7,7 @@ import { useApp, visibleModels } from "../state";
 import { Composer } from "../components/Composer";
 import { CodeBadge, SkeletonList } from "../components/ui";
 
-export default function NewChatPage({ onMenu, general = false }: { onMenu: () => void; general?: boolean }) {
+export default function NewChatPage({ onMenu, general = false, coding = false }: { onMenu: () => void; general?: boolean; coding?: boolean }) {
   const app = useApp();
   const { services, stats, settings, go, gateway, activeServiceId, setActiveServiceId, ready } = app;
   const models = visibleModels(app.models);
@@ -17,6 +17,7 @@ export default function NewChatPage({ onMenu, general = false }: { onMenu: () =>
   const [effort, setEffort] = useState<Effort>("medium");
   const [allServices, setAllServices] = useState(false);
   const [web, setWeb] = useState(false);
+  const [projectDir, setProjectDir] = useState<string | null>(null);
   const mountedActive = useRef(activeServiceId);
 
   const svc = services.find((s) => s.id === picked) ?? null;
@@ -28,20 +29,22 @@ export default function NewChatPage({ onMenu, general = false }: { onMenu: () =>
     if (s) { setModel(s.model); setEffort(s.effort); }
   };
 
+  const floating = general || coding; // not tied to a service
+
   // clicking a service in the sidebar while on this page picks it too (docs mode only)
   useEffect(() => {
-    if (!general && activeServiceId && activeServiceId !== mountedActive.current) {
+    if (!floating && activeServiceId && activeServiceId !== mountedActive.current) {
       mountedActive.current = activeServiceId;
       pick(activeServiceId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeServiceId, general]);
+  }, [activeServiceId, floating]);
 
-  // general chat isn't tied to a service, so default to the first available model
+  // a floating chat isn't tied to a service, so default to the first available model
   useEffect(() => {
-    if (general && !model && models.length) { setModel(models[0].id); setEffort("medium"); }
+    if (floating && !model && models.length) { setModel(models[0].id); setEffort("medium"); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [general, models]);
+  }, [floating, models]);
 
   const sendBlocked =
     gateway.state === "unreachable" ? th.err.unreachable :
@@ -57,16 +60,29 @@ export default function NewChatPage({ onMenu, general = false }: { onMenu: () =>
         <div style={{ width: "100%", maxWidth: 720, margin: "0 auto", padding: "40px 20px 8px", display: "flex", flexDirection: "column", gap: 22 }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 6, textAlign: "center" }}>
             <h1 style={{ fontSize: 28, fontWeight: 700 }}>
-              {general ? "เริ่มคุยทั่วไป" : <>สวัสดี {settings.userName || "คุณ"}</>}
+              {coding ? "เริ่มเขียนโค้ด" : general ? "เริ่มคุยทั่วไป" : <>สวัสดี {settings.userName || "คุณ"}</>}
             </h1>
             <p className="muted" style={{ fontSize: 15 }}>
-              {general ? "คุยกับ AI ได้เลย โหมดนี้ไม่ค้นเอกสารและไม่ผูกกับ service" : "เลือก service ที่จะใช้ค้นเอกสารก่อนเริ่มแชต"}
+              {coding ? "ผู้ช่วยอ่าน/แก้ไฟล์ในโฟลเดอร์โปรเจคที่เลือกโดยตรง (มีปุ่มย้อนกลับทุกครั้ง)"
+                : general ? "คุยกับ AI ได้เลย โหมดนี้ไม่ค้นเอกสารและไม่ผูกกับ service"
+                : "เลือก service ที่จะใช้ค้นเอกสารก่อนเริ่มแชต"}
             </p>
           </div>
 
-          {!general && !ready && <SkeletonList rows={2} h={72} />}
+          {coding && (
+            <div className="empty card" style={{ alignItems: "flex-start", gap: 10 }}>
+              <h2 style={{ fontSize: 16 }}>โฟลเดอร์โปรเจค</h2>
+              <span className="muted" style={{ fontSize: 13 }}>เปิดโฟลเดอร์เดียวกันไว้ใน VS Code จะเห็นการแก้ไฟล์ทันที</span>
+              <button className="btn btn-primary btn-lg" style={{ maxWidth: "100%" }} onClick={async () => { const d = await api.pickFolder(); if (d) setProjectDir(d); }}>
+                <FolderOpen size={16} strokeWidth={2} aria-hidden="true" />
+                <span className="ellipsis">{projectDir ?? "เลือกโฟลเดอร์โปรเจค"}</span>
+              </button>
+            </div>
+          )}
 
-          {!general && ready && services.length === 0 && (
+          {!floating && !ready && <SkeletonList rows={2} h={72} />}
+
+          {!floating && ready && services.length === 0 && (
             <div className="empty card">
               <h2>ยังไม่มี service</h2>
               <span>สร้าง service แรกโดยเลือกโฟลเดอร์เอกสาร ตั้งชื่อ และเลือกโมเดลเริ่มต้น</span>
@@ -76,7 +92,7 @@ export default function NewChatPage({ onMenu, general = false }: { onMenu: () =>
             </div>
           )}
 
-          {!general && services.length > 0 && (
+          {!floating && services.length > 0 && (
             <div className="pick-grid" role="radiogroup" aria-label="เลือก service">
               {services.map((s) => {
                 const on = s.id === picked;
@@ -117,8 +133,8 @@ export default function NewChatPage({ onMenu, general = false }: { onMenu: () =>
       </div>
 
       <Composer
-        service={general ? null : svc}
-        docsMode={!general}
+        service={floating ? null : svc}
+        docsMode={!floating}
         models={models}
         model={model}
         effort={effort}
@@ -126,6 +142,10 @@ export default function NewChatPage({ onMenu, general = false }: { onMenu: () =>
         allServices={allServices}
         onToggleAll={() => setAllServices((v) => !v)}
         onSend={async (q, atts) => {
+          if (coding) {
+            go({ name: "chat", chatId: "new", initial: { chatId: null, serviceId: null, question: q, model, effort, mode: "code", allServices: false, attachments: atts, projectDir } });
+            return;
+          }
           if (general) {
             go({ name: "chat", chatId: "new", initial: { chatId: null, serviceId: null, question: q, model, effort, mode: "chat", allServices: false, attachments: atts, web } });
             return;
@@ -138,10 +158,13 @@ export default function NewChatPage({ onMenu, general = false }: { onMenu: () =>
         onSavePastedImage={api.savePastedImage}
         web={web}
         onToggleWeb={general ? () => setWeb((v) => !v) : undefined}
+        code={coding ? true : undefined}
+        projectDir={coding ? projectDir : undefined}
+        onPickProjectDir={coding ? async () => { const d = await api.pickFolder(); if (d) setProjectDir(d); } : undefined}
         onStop={() => {}}
         streaming={false}
         sendBlockedReason={sendBlocked}
-        placeholder={general ? "พิมพ์ข้อความ… (คุยทั่วไป)" : svc ? `ถามอะไรก็ได้เกี่ยวกับเอกสารใน ${svc.name}` : undefined}
+        placeholder={coding ? "บอกงานที่จะให้แก้โค้ด…" : general ? "พิมพ์ข้อความ… (คุยทั่วไป)" : svc ? `ถามอะไรก็ได้เกี่ยวกับเอกสารใน ${svc.name}` : undefined}
         hint={general ? "คุยทั่วไป — ไม่ค้นเอกสาร ไม่ผูก service" : svc ? `จะค้นเฉพาะเอกสารใน ${svc.name} · เปลี่ยน service ได้ก่อนส่งข้อความแรก` : "แชตแต่ละห้องผูกกับ service เดียว"}
         autoFocus
       />

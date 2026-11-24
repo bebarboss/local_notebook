@@ -1,5 +1,5 @@
 import { type ClipboardEvent, useEffect, useRef, useState } from "react";
-import { ArrowUp, Globe, Paperclip, Plus, Square, X } from "lucide-react";
+import { ArrowUp, Code2, FolderOpen, Globe, Paperclip, Plus, Square, X } from "lucide-react";
 import type { Effort, ModelConfig, Service } from "../lib/types";
 import { th } from "../i18n/th";
 import { ModelPicker } from "./ModelPicker";
@@ -8,6 +8,7 @@ const baseName = (p: string) => p.replace(/[/\\]+$/, "").split(/[/\\]/).pop() ||
 
 export function Composer({
   service, docsMode = true, models, model, effort, onModelChange, allServices, onToggleAll, onSend, onStop, onAddDocs, onPickFiles, onSavePastedImage, web, onToggleWeb,
+  code, onToggleCode, projectDir, onPickProjectDir,
   streaming, sendBlockedReason, placeholder, hint, autoFocus, lockedScope,
 }: {
   service: Service | null;
@@ -30,6 +31,14 @@ export function Composer({
   web?: boolean;
   /** general chat: toggle web research; the button shows only when this is provided */
   onToggleWeb?: () => void;
+  /** general chat: whether the "เขียนโค้ด" (coding) toggle is on */
+  code?: boolean;
+  /** general chat: toggle coding mode; the button shows only when this is provided */
+  onToggleCode?: () => void;
+  /** general chat: the chosen project folder for coding mode (null = none yet) */
+  projectDir?: string | null;
+  /** general chat: pick/replace the project folder for coding mode */
+  onPickProjectDir?: () => void;
   streaming: boolean;
   /** when set, typing works but sending is blocked (e.g. gateway down) */
   sendBlockedReason: string | null;
@@ -57,7 +66,9 @@ export function Composer({
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
   }, [text]);
 
-  const canSend = !disabled && !streaming && !sendBlockedReason && text.trim().length > 0 && !!model;
+  // coding mode needs a project folder before it can send
+  const blockReason = sendBlockedReason ?? (code && !projectDir ? "เลือกโฟลเดอร์โปรเจคก่อนใช้โหมดเขียนโค้ด" : null);
+  const canSend = !disabled && !streaming && !blockReason && text.trim().length > 0 && !!model;
   const submit = () => {
     if (!canSend) return;
     onSend(text.trim(), attached.length ? attached : undefined);
@@ -151,6 +162,18 @@ export function Composer({
               ค้นเว็บ
             </button>
           )}
+          {!docsMode && onToggleCode && (
+            <button type="button" className="scope-btn" aria-pressed={!!code} onClick={onToggleCode} title="ให้ผู้ช่วยอ่าน/แก้ไฟล์ในโฟลเดอร์โปรเจคที่เลือก (เขียนไฟล์จริง มีปุ่มย้อนกลับ)">
+              <Code2 size={14} strokeWidth={2} aria-hidden="true" />
+              เขียนโค้ด
+            </button>
+          )}
+          {!docsMode && code && onPickProjectDir && (
+            <button type="button" className="scope-btn" aria-pressed={!!projectDir} onClick={onPickProjectDir} title={projectDir ?? "เลือกโฟลเดอร์โปรเจคที่จะให้แก้ไฟล์"}>
+              <FolderOpen size={14} strokeWidth={2} aria-hidden="true" />
+              <span className="ellipsis" style={{ maxWidth: 160 }}>{projectDir ? baseName(projectDir) : "เลือกโฟลเดอร์"}</span>
+            </button>
+          )}
           {docsMode && onAddDocs && (
             <button type="button" className="icon-btn bordered" aria-label={th.addDocs} title={th.addDocs} onClick={onAddDocs} disabled={disabled}>
               <Plus size={16} strokeWidth={2} />
@@ -176,13 +199,13 @@ export function Composer({
               <Square size={14} strokeWidth={2.2} fill="currentColor" />
             </button>
           ) : (
-            <button type="submit" className="send-btn" aria-label={th.send} title={sendBlockedReason ?? th.send} disabled={!canSend}>
+            <button type="submit" className="send-btn" aria-label={th.send} title={blockReason ?? th.send} disabled={!canSend}>
               <ArrowUp size={16} strokeWidth={2.2} />
             </button>
           )}
         </div>
       </form>
-      <span className="composer-hint">{sendBlockedReason ?? (!docsMode && web ? "ค้นเว็บสาธารณะ — คำค้นถูกส่งออกอินเทอร์เน็ต (DuckDuckGo)" : hint ?? defaultHint)}</span>
+      <span className="composer-hint">{blockReason ?? (!docsMode && code ? "โหมดเขียนโค้ด — ผู้ช่วยแก้ไฟล์ในโฟลเดอร์ที่เลือกโดยตรง (มีปุ่มย้อนกลับ)" : !docsMode && web ? "ค้นเว็บสาธารณะ — คำค้นถูกส่งออกอินเทอร์เน็ต (DuckDuckGo)" : hint ?? defaultHint)}</span>
     </div>
   );
 }
