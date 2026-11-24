@@ -2,7 +2,8 @@
 
 เซิร์ฟเวอร์ทำ embedding ให้ DocAsk รันใน Docker บนเครื่องที่บ้าน (เขียนไว้สำหรับ Mac mini Apple Silicon และใช้กับเครื่อง Linux หรือ Windows ได้ด้วย) แล้วต่อจากที่ทำงานผ่าน Cloudflare Quick Tunnel (HTTPS, ฟรี ไม่ต้องมีบัญชีหรือโดเมน)
 
-- ใช้โมเดล `BAAI/bge-m3` (1024 มิติ, รองรับภาษาไทย) แบบ fp32 เต็มความแม่น ไม่ใช่ int8 แบบที่แอปใช้ในเครื่อง
+- ใช้โมเดล `bge-m3` (1024 มิติ, รองรับภาษาไทย) **รันใน Ollama บน macOS** ใช้ GPU (Metal) ได้ (F16 — vector ตรงกับ fp32 เดิม cosine ≥ 0.9999 ไม่ต้อง index ใหม่)
+  เซิร์ฟเวอร์นี้เรียก Ollama ที่ `POST /api/embed` (ไม่โหลดโมเดลเอง) · คำถามยาวเกิน 512 token ถูกตัด · คำถามซ้ำตอบจากแคช · ส่งเข้า Ollama พร้อมกันได้ไม่เกิน 4 งาน
 - API เป็นแบบเดียวกับ OpenAI `POST /v1/embeddings` และต้องส่ง `Authorization: Bearer <token>`
 - **ฐานข้อมูลของทีม** (PostgreSQL + pgvector ใน container `docask-db`): เก็บ index เอกสาร (ข้อความท่อน + vector) และประวัติแชต
   ให้ทุกเครื่องในทีมใช้ร่วมกัน — ดูหัวข้อ [ฐานข้อมูลของทีม](#ฐานข้อมูลของทีม-index--แชต)
@@ -10,11 +11,23 @@
 
 ## สิ่งที่ต้องมีบน Mac mini
 
-- **Docker Desktop:** ตั้งค่า › General › เปิด *Start Docker Desktop when you sign in* และตั้งค่า › Resources › Memory **อย่างน้อย 6 GB**
+- **Ollama:** ติดตั้งจาก https://ollama.com/download แล้วรัน `./ollama-setup.sh install` ครั้งเดียว (ดู [Ollama](#ollama-bge-m3-บน-gpu))
+- **Docker Desktop:** ตั้งค่า › General › เปิด *Start Docker Desktop when you sign in* และตั้งค่า › Resources › Memory **อย่างน้อย 4 GB**
   - ใช้ OrbStack แทนได้ กิน RAM น้อยกว่า
 - **ไม่ให้เครื่องหลับ:** ตั้งค่าระบบ › พลังงาน › เปิด *ป้องกันการพักเครื่องอัตโนมัติเมื่อจอดับ*
 
-> Docker บน Mac ใช้ GPU (Metal) ไม่ได้ จึงรันบน CPU ซึ่งช้า (M2: ราว 20–40 วินาทีต่อ 32 ท่อน) บน Mac แนะนำ **โหมดเร็ว** ด้านล่าง
+> Docker บน Mac ใช้ GPU (Metal) ไม่ได้ จึงให้ Ollama บน macOS ทำ embedding แทน · reranker ยังรันในตัวเซิร์ฟเวอร์ (ใน Docker = CPU) บน Mac แนะนำ **โหมดเร็ว** ด้านล่างให้ reranker ใช้ GPU ด้วย
+
+## Ollama (bge-m3 บน GPU)
+
+```bash
+./ollama-setup.sh install   # ollama pull bge-m3 + LaunchAgent ~/Library/LaunchAgents/com.docask.ollama.plist
+./ollama-setup.sh status    # ต้องเห็น listening: 127.0.0.1:11434 และ embed ok: 1024 dims
+```
+
+- ทุกครั้งที่ login, LaunchAgent ตั้ง `OLLAMA_KEEP_ALIVE=-1` (โมเดลอยู่ในหน่วยความจำตลอด ไม่ต้องโหลดใหม่) และ `OLLAMA_NUM_PARALLEL=2` แล้วเปิด Ollama ใหม่ให้ใช้ค่านี้ (`launchctl setenv` อย่างเดียวหายตอนรีสตาร์ท)
+- Ollama ฟังแค่ `127.0.0.1` — **อย่าตั้ง `OLLAMA_HOST=0.0.0.0` และอย่าเปิด *Expose Ollama to the network* ในแอป Ollama** (install ปิดให้) container ยังเรียกได้ทาง `host.docker.internal:11434`
+- `KEEP_ALIVE=-1` ใช้กับทุกโมเดลใน Ollama: ถ้าเรียกโมเดลแชตใหญ่ (เช่น qwen2.5:14b ≈ 9 GB) มันจะค้างในหน่วยความจำด้วย — `ollama stop <ชื่อ>` เพื่อปล่อย
 
 ## ติดตั้ง
 
@@ -35,11 +48,11 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
-ครั้งแรกจะดาวน์โหลดโมเดลราว 2.3 GB เก็บไว้ใน volume `hf-cache` ใช้เวลาหลายนาที จนกว่า log จะขึ้นว่า `loaded BAAI/bge-m3 (1024 dims) on cpu` แล้วค่อยลองเรียก
+เซิร์ฟเวอร์เปิดในไม่กี่วินาที (log: `embeddings by Ollama bge-m3 at http://host.docker.internal:11434`) · reranker ดาวน์โหลด ~2.3 GB ลง volume `hf-cache` ตอนใช้ครั้งแรก
 
 ```bash
 curl http://127.0.0.1:8080/health
-# {"status":"ok","model":"bge-m3","dim":1024,"device":"cpu"}
+# {"status":"ok","model":"bge-m3","dim":1024,"device":"ollama",...}   ("degraded" + "error" = ติดต่อ Ollama ไม่ได้)
 ```
 
 **3. ดู URL ของ tunnel**
@@ -87,11 +100,12 @@ DocAsk จะคำนวณคำถามในเครื่องแทน�
 
 ## โหมดเร็ว (Mac Apple Silicon, GPU)
 
-รันเซิร์ฟเวอร์บน macOS ตรงๆ ให้ใช้ GPU (Metal) ได้ เร็วกว่า Docker ราว 6–10 เท่า (M2: ราว 3 วินาทีต่อ 32 ท่อน) และได้ vector เดิมทุกตัว ไม่ต้อง index ใหม่ tunnel ยังรันใน Docker เหมือนเดิม
+รันเซิร์ฟเวอร์บน macOS ตรงๆ: embedding มาจาก Ollama เหมือนกัน (M2: ราว 2 วินาทีต่อ 32 ท่อน) และ reranker ใช้ GPU (Metal) ได้ด้วย tunnel ยังรันใน Docker เหมือนเดิม
 
 ```bash
-./mac-native.sh install      # ครั้งแรกติดตั้ง Python 3.12 + PyTorch ใน ~/.docask-embed และดาวน์โหลดโมเดล ~2.3 GB
-./mac-native.sh status       # ต้องเห็น "device":"mps:0"
+./ollama-setup.sh install    # ครั้งเดียว (ข้างบน)
+./mac-native.sh install      # ครั้งแรกติดตั้ง Python 3.12 + PyTorch (สำหรับ reranker) ใน ~/.docask-embed
+./mac-native.sh status       # ต้องเห็น "status":"ok" และ "device":"ollama"
 ```
 
 แล้วแก้ `.env` ให้ tunnel ส่งต่อไปที่เซิร์ฟเวอร์ตัวนี้ และปิด container CPU
@@ -164,13 +178,14 @@ docker compose exec -T db pg_restore -U docask -d docask --clean --if-exists < b
 
 | งาน | คำสั่ง |
 |---|---|
-| ดูสถานะ | `docker compose ps` (`docask-embed` ต้องเป็น `healthy` และ `docask-tunnel` ต้องเป็น `running`) · โหมดเร็ว: `./mac-native.sh status` |
+| ดูสถานะ | `docker compose ps` (`docask-embed` ต้องเป็น `healthy` และ `docask-tunnel` ต้องเป็น `running`) · โหมดเร็ว: `./mac-native.sh status` · Ollama: `./ollama-setup.sh status` |
 | ดู log | `docker compose logs --tail 50` |
 | อัปเดตโค้ด | คัดลอกไฟล์ใหม่ทับ แล้ว `docker compose up -d --build` |
 | เปลี่ยน token | แก้ `.env` → `docker compose up -d` → ใส่ token ใหม่ใน DocAsk |
 | หยุด | `docker compose down` (โมเดลยังอยู่ใน volume) |
 
-container มี `restart: unless-stopped` จึงกลับมาทำงานเองหลังรีสตาร์ทเครื่อง ตราบใดที่ Docker Desktop ตั้งให้เปิดตอน login
+หลังรีสตาร์ทเครื่องทุกอย่างกลับมาเองเมื่อ **login แล้ว**: container (`restart: unless-stopped`, Docker Desktop เปิดตอน login), Ollama (LaunchAgent `com.docask.ollama`), โหมดเร็ว (`com.docask.embed`)
+· เครื่องเปิด FileVault จะค้างที่หน้าใส่รหัสจนกว่ามีคน login — รีสตาร์ทตามแผนใช้ `sudo fdesetup authrestart` · tunnel ได้ URL ใหม่ทุกครั้ง
 
 ## ถ้าใช้ไม่ได้
 
@@ -180,7 +195,10 @@ container มี `restart: unless-stopped` จึงกลับมาทำง�
 | ได้ 502 / 530 จาก Cloudflare | tunnel ต่อเซิร์ฟเวอร์ไม่ได้ ดู `docker compose logs tunnel` และเซิร์ฟเวอร์ยังรันอยู่ไหม (`./mac-native.sh status`) |
 | token ไม่ถูกต้อง | token ใน DocAsk ตรงกับ `EMBED_TOKEN` ใน `.env` ไหม (ถ้าแก้ `.env` ต้อง `docker compose up -d` ใหม่) |
 | เซิร์ฟเวอร์ไม่มีโมเดล … | เปลี่ยน `EMBED_MODEL` แล้วหรือเปล่า ให้กดทดสอบและ "ใช้เซิร์ฟเวอร์นี้" ใหม่ |
-| container restart วน | RAM ของ Docker ไม่พอ ให้เพิ่มเป็น 6 GB ขึ้นไป |
+| Ollama is not reachable … / `"status":"degraded"` | Ollama ไม่ได้เปิด: `./ollama-setup.sh status` · เปิดใหม่: `open -a Ollama` |
+| model 'bge-m3' is not in Ollama | `ollama pull bge-m3` |
+| embedding server busy | งานพร้อมกันเกิน `EMBED_CONCURRENCY` นานเกิน 60 วินาที — ลองใหม่ |
+| container restart วน | RAM ของ Docker ไม่พอ ให้เพิ่มเป็น 4 GB ขึ้นไป |
 
 ## ความปลอดภัย
 
@@ -204,18 +222,24 @@ container มี `restart: unless-stopped` จึงกลับมาทำง�
 | `DATABASE_URL` | (Docker ตั้งให้เอง) | โหมดเร็วต้องใส่เอง: `postgresql://docask:<รหัส>@127.0.0.1:5432/docask` · ไม่ใส่ = ไม่มีฐานข้อมูล ทำแค่ embedding |
 | `COMPOSE_PROFILES` | `cpu` | `cpu` = รันเซิร์ฟเวอร์ใน Docker · ว่าง = โหมดเร็ว (`./mac-native.sh`) |
 | `TUNNEL_UPSTREAM` | `embed:8080` | ที่ที่ tunnel ส่งต่อไป · โหมดเร็ว = `host.docker.internal:8081` |
-| `EMBED_MODEL` | `BAAI/bge-m3` | โมเดล sentence-transformers จาก Hugging Face (เปลี่ยนแล้ว DocAsk ต้อง index ใหม่) |
+| `OLLAMA_URL` | Docker: `http://host.docker.internal:11434` · โหมดเร็ว: `http://127.0.0.1:11434` | Ollama ที่ทำ embedding |
+| `OLLAMA_EMBED_MODEL` | `bge-m3` | ชื่อโมเดลใน Ollama (เปลี่ยนแล้ว DocAsk ต้อง index ใหม่) |
+| `OLLAMA_TIMEOUT` | `120` | วินาทีที่รอ Ollama ต่อ batch (เกิน = 504) |
+| `EMBED_QUERY_MAX_TOKENS` | `512` | ตัดคำถามที่ยาวกว่านี้ (ท่อนเอกสารใช้ `EMBED_MAX_TOKENS`) |
+| `EMBED_CACHE_SIZE` | `1024` | จำนวนคำถามที่จำ vector ไว้ (LRU) · `0` = ปิด |
+| `EMBED_CONCURRENCY` | `4` | งานที่ส่งเข้า Ollama พร้อมกันได้ |
+| `EMBED_MODEL` | `BAAI/bge-m3` | ชื่อบน Hugging Face — ใช้แค่ tokenizer (ตัดความยาว) |
 | `EMBED_MODEL_REVISION` | `main` | ระบุ commit ของโมเดลเพื่อให้ผลไม่เปลี่ยน |
 | `EMBED_QUERY_PREFIX` / `EMBED_PASSAGE_PREFIX` | ว่าง | สำหรับโมเดลตระกูล e5 ให้ใส่ `query: ` / `passage: ` |
 | `EMBED_MAX_TOKENS` | `2048` | ตัดข้อความที่ยาวกว่านี้ |
-| `EMBED_BATCH` | `16` | จำนวนข้อความต่อรอบ ลดลงถ้า RAM ไม่พอ |
+| `EMBED_BATCH` | `16` | จำนวนข้อความต่อ request ที่ส่งเข้า Ollama |
 | `EMBED_RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | reranker (`/v1/rerank`) โหลดตอนใช้ครั้งแรก ใช้ RAM เพิ่มราว 2.3 GB · ว่าง = ปิด |
 | `EMBED_RERANK_MAX_TOKENS` | `512` | ความยาวคำถาม + ท่อนที่ reranker อ่าน |
 
 ## ทดสอบโค้ด (ไม่ต้องดาวน์โหลดโมเดล)
 
 ```bash
-pip install fastapi httpx pytest "psycopg[binary]" psycopg-pool pgvector numpy
+pip install fastapi httpx pytest "psycopg[binary]" psycopg-pool pgvector numpy   # ไม่ต้องมี Ollama: test จำลองไว้
 EMBED_NO_AUTOLOAD=1 python -m pytest -q          # test ฐานข้อมูลถูกข้ามถ้าไม่มี TEST_DATABASE_URL
 
 # test ฐานข้อมูลกับ Postgres จริง

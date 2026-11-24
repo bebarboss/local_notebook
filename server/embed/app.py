@@ -1,4 +1,4 @@
-"""DocAsk embedding server: OpenAI-style /v1/embeddings for one sentence-transformers model,
+"""DocAsk embedding server: OpenAI-style /v1/embeddings for bge-m3 (run by Ollama, see Encoder),
 plus (when DATABASE_URL is set) the team's shared document index and chat history in
 PostgreSQL + pgvector (see db.py).
 
@@ -16,6 +16,7 @@ import os
 import secrets
 import threading
 import time
+from collections import OrderedDict
 from typing import Any, Literal, Optional, Union
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -30,6 +31,16 @@ MODEL_REVISION = os.environ.get("EMBED_MODEL_REVISION") or None
 QUERY_PREFIX = os.environ.get("EMBED_QUERY_PREFIX", "")
 PASSAGE_PREFIX = os.environ.get("EMBED_PASSAGE_PREFIX", "")
 MAX_TOKENS = int(os.environ.get("EMBED_MAX_TOKENS", "2048"))
+# the model itself runs in Ollama (Metal GPU on the Mac); this server only calls it
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "bge-m3")
+OLLAMA_TIMEOUT = float(os.environ.get("OLLAMA_TIMEOUT", "120"))
+DIM = int(os.environ.get("EMBED_DIM", "1024"))
+# questions longer than this are cut (passages keep EMBED_MAX_TOKENS)
+QUERY_MAX_TOKENS = int(os.environ.get("EMBED_QUERY_MAX_TOKENS", "512"))
+CACHE_SIZE = int(os.environ.get("EMBED_CACHE_SIZE", "1024"))
+CONCURRENCY = int(os.environ.get("EMBED_CONCURRENCY", "4"))
+QUEUE_TIMEOUT = float(os.environ.get("EMBED_QUEUE_TIMEOUT", "60"))
 # second-stage ranking: a cross-encoder reads question + passage together ("" = off)
 RERANK_MODEL = os.environ.get("EMBED_RERANK_MODEL", "BAAI/bge-reranker-v2-m3").strip()
 RERANK_MAX_TOKENS = int(os.environ.get("EMBED_RERANK_MAX_TOKENS", "512"))
@@ -48,6 +59,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 
 log = logging.getLogger("docask-embed")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)  # not a line per call to Ollama
 
 
 def _token() -> str:
@@ -61,24 +73,134 @@ def _token() -> str:
     return t
 
 
+class EmbedError(Exception):
+    """Ollama could not embed: `status` is what the client gets (502/503/504), `message` says why."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+class Truncator:
+    """Cuts text to N tokens of the model's own tokenizer (only the tokenizer is loaded, ≈ 20 MB)."""
+
+    def __init__(self, name: str):
+        try:
+            from transformers import AutoTokenizer
+
+            self.tok = AutoTokenizer.from_pretrained(name, revision=MODEL_REVISION)
+        except Exception as e:  # no tokenizer: fall back to a cut by characters (≈ 3 per token)
+            log.warning("tokenizer %s unavailable (%s) — truncating by characters", name, e)
+            self.tok = None
+
+    def cut(self, text: str, max_tokens: int) -> str:
+        if self.tok is None:
+            return text[: max_tokens * 3]
+        enc = self.tok(text, add_special_tokens=False, return_offsets_mapping=True, truncation=False, verbose=False)
+        keep = max_tokens - 2  # room for <s> … </s>
+        offsets = enc["offset_mapping"]
+        return text if len(offsets) <= keep else text[: offsets[keep - 1][1]]
+
+
 class Encoder:
-    """The model, loaded once; one encode at a time (the CPU is the limit anyway)."""
+    """bge-m3 served by Ollama (Metal GPU on the Mac) through POST /api/embed.
 
-    def __init__(self) -> None:
-        from sentence_transformers import SentenceTransformer
+    One HTTP client for the server's lifetime; texts go in batches of EMBED_BATCH; at most
+    EMBED_CONCURRENCY requests at once; repeated questions come from an LRU cache."""
 
-        t = time.time()
-        self.model = SentenceTransformer(MODEL_NAME, revision=MODEL_REVISION, device=os.environ.get("EMBED_DEVICE") or None)
-        self.model.max_seq_length = min(MAX_TOKENS, self.model.max_seq_length or MAX_TOKENS)
-        self.dim = self.model.get_sentence_embedding_dimension()
-        self.device = str(self.model.device)
-        self.lock = threading.Lock()
-        log.info("loaded %s (%d dims) on %s in %.0fs", MODEL_NAME, self.dim, self.device, time.time() - t)
+    def __init__(self, url: str = OLLAMA_URL, client: Any = None, truncator: Any = None) -> None:
+        import httpx
 
-    def encode(self, texts: list[str]) -> list[list[float]]:
-        with self.lock:
-            v = self.model.encode(texts, batch_size=BATCH, normalize_embeddings=True, convert_to_numpy=True)
-        return v.tolist()
+        self.url = url.rstrip("/")
+        self.model = OLLAMA_MODEL
+        self.dim = DIM
+        self.device = "ollama"
+        self.client = client or httpx.Client(
+            base_url=self.url,
+            timeout=httpx.Timeout(OLLAMA_TIMEOUT, connect=5.0),
+            limits=httpx.Limits(max_connections=CONCURRENCY, max_keepalive_connections=CONCURRENCY),
+        )
+        self.slots = threading.BoundedSemaphore(CONCURRENCY)
+        self.trunc = truncator or Truncator(MODEL_NAME)
+        self.cache: OrderedDict[str, list[float]] = OrderedDict()
+        self.cache_lock = threading.Lock()
+        self._health: tuple[float, Optional[str]] = (0.0, None)
+        log.info("embeddings by Ollama %s at %s (%d dims, %d at once)", self.model, self.url, self.dim, CONCURRENCY)
+
+    def close(self) -> None:
+        self.client.close()
+
+    def encode(self, texts: list[str], query: bool = False) -> list[list[float]]:
+        """Normalised vectors in input order. Questions are cut to EMBED_QUERY_MAX_TOKENS and cached."""
+        limit = QUERY_MAX_TOKENS if query else MAX_TOKENS
+        texts = [self.trunc.cut(t, limit) for t in texts]
+        out: list[Optional[list[float]]] = [None] * len(texts)
+        if query and CACHE_SIZE:
+            with self.cache_lock:
+                for i, t in enumerate(texts):
+                    if t in self.cache:
+                        self.cache.move_to_end(t)
+                        out[i] = self.cache[t]
+        todo = [i for i, v in enumerate(out) if v is None]
+        for s in range(0, len(todo), BATCH):
+            part = todo[s : s + BATCH]
+            for i, v in zip(part, self._embed([texts[i] for i in part])):
+                out[i] = v
+        if query and CACHE_SIZE and todo:
+            with self.cache_lock:
+                for i in todo:
+                    self.cache[texts[i]] = out[i]
+                while len(self.cache) > CACHE_SIZE:
+                    self.cache.popitem(last=False)
+        return out  # type: ignore[return-value]
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        import httpx
+
+        if not self.slots.acquire(timeout=QUEUE_TIMEOUT):
+            raise EmbedError(503, f"embedding server busy ({CONCURRENCY} requests already running) — try again")
+        try:
+            r = self.client.post("/api/embed", json={"model": self.model, "input": texts, "truncate": True, "keep_alive": -1})
+        except httpx.TimeoutException:
+            raise EmbedError(504, f"Ollama did not answer within {OLLAMA_TIMEOUT:.0f}s ({len(texts)} texts)")
+        except httpx.HTTPError as e:
+            raise EmbedError(503, f"Ollama is not reachable at {self.url} — is it running? ({type(e).__name__})")
+        finally:
+            self.slots.release()
+        if r.status_code != 200:
+            try:
+                msg = r.json().get("error") or r.text
+            except ValueError:
+                msg = r.text
+            if r.status_code == 404 or "not found" in str(msg):
+                raise EmbedError(503, f"model {self.model!r} is not in Ollama — run: ollama pull {self.model}")
+            raise EmbedError(502, f"Ollama error {r.status_code}: {str(msg)[:300]}")
+        try:
+            vecs = r.json()["embeddings"]
+        except (ValueError, KeyError, TypeError):
+            raise EmbedError(502, "Ollama answered without embeddings")
+        if len(vecs) != len(texts) or any(len(v) != self.dim for v in vecs):
+            raise EmbedError(502, f"Ollama returned {len(vecs)} vectors of {len(vecs[0]) if vecs else 0} dims, expected {len(texts)} × {self.dim}")
+        out = []
+        for v in vecs:  # Ollama already normalises; again so cosine = dot product whatever it does
+            n = math.sqrt(sum(x * x for x in v)) or 1.0
+            out.append([x / n for x in v])
+        return out
+
+    def health(self) -> Optional[str]:
+        """None when Ollama is up and has the model (checked at most every 10 s), else why not."""
+        t, err = self._health
+        if time.time() - t < 10:
+            return err
+        try:
+            r = self.client.get("/api/tags", timeout=3.0)
+            names = {m.get("name", "").removesuffix(":latest") for m in r.json().get("models", [])}
+            err = None if self.model.removesuffix(":latest") in names else f"model {self.model!r} is not in Ollama"
+        except Exception as e:
+            err = f"Ollama is not reachable at {self.url} ({type(e).__name__})"
+        self._health = (time.time(), err)
+        return err
 
 
 class Reranker:
@@ -206,6 +328,8 @@ def create_app(encoder: Encoder | None = None, token: str | None = None, store: 
     app = FastAPI(title="DocAsk embedding server", docs_url=None, redoc_url=None, openapi_url=None)
     token = token or _token()
     enc = encoder or Encoder()
+    if hasattr(enc, "close"):
+        app.router.on_shutdown.append(enc.close)
     if reranker is None and RERANK_MODEL:
         reranker = Reranker(RERANK_MODEL, os.environ.get("EMBED_DEVICE") or None)
     if reranker is False:  # tests: no reranker
@@ -248,6 +372,11 @@ def create_app(encoder: Encoder | None = None, token: str | None = None, store: 
     async def openai_error(_: Request, e: HTTPException):
         return JSONResponse({"error": {"message": e.detail, "code": e.status_code}}, status_code=e.status_code)
 
+    @app.exception_handler(EmbedError)
+    async def embed_error(_: Request, e: EmbedError):
+        log.warning("embedding failed: %s", e.message)
+        return JSONResponse({"error": {"message": e.message, "code": e.status, "type": "embedding_unavailable"}}, status_code=e.status)
+
     if store is not None:
         from db import StoreError
 
@@ -257,8 +386,11 @@ def create_app(encoder: Encoder | None = None, token: str | None = None, store: 
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "model": MODEL_ID, "dim": enc.dim, "device": enc.device, "database": store is not None,
-                "rerank": reranker.name.rsplit("/", 1)[-1] if reranker is not None else None}
+        # 200 either way (chats and files still work without Ollama); "status" says whether embedding does
+        err = enc.health() if hasattr(enc, "health") else None
+        return {"status": "degraded" if err else "ok", "model": MODEL_ID, "dim": enc.dim, "device": enc.device,
+                "database": store is not None, "rerank": reranker.name.rsplit("/", 1)[-1] if reranker is not None else None,
+                **({"error": err} if err else {})}
 
     @app.post("/v1/rerank", dependencies=[Depends(caller)])
     def rerank(req: RerankRequest):
@@ -287,7 +419,7 @@ def create_app(encoder: Encoder | None = None, token: str | None = None, store: 
             raise HTTPException(404, f"model {req.model!r} is not served here (this server has {MODEL_ID!r})")
         prefix = QUERY_PREFIX if req.input_type == "query" else PASSAGE_PREFIX
         t = time.time()
-        vectors = enc.encode([prefix + x[:MAX_CHARS] for x in texts])
+        vectors = enc.encode([prefix + x[:MAX_CHARS] for x in texts], query=req.input_type == "query")
         # counts only — never the text
         log.info("embedded %d %s in %.2fs", len(texts), req.input_type or "inputs", time.time() - t)
         return {
@@ -497,8 +629,8 @@ def _store_routes(app: FastAPI, enc: Encoder, store: Any, auth, caller) -> None:
             allowed(who, sid)
         t = time.time()
         out: dict[int, dict] = {}
-        for q in body.queries:
-            qv = enc.encode([QUERY_PREFIX + q[:MAX_CHARS]])[0]
+        qvs = enc.encode([QUERY_PREFIX + q[:MAX_CHARS] for q in body.queries], query=True)
+        for q, qv in zip(body.queries, qvs):
             for h in store.search(body.serviceIds, q, qv, body.k, body.threshold, body.hybrid):
                 # the same passage found by several queries keeps its best score
                 if h["chunkId"] not in out or h["fused"] > out[h["chunkId"]]["fused"]:

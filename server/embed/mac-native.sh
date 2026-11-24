@@ -1,5 +1,5 @@
 #!/bin/bash
-# Fast mode for Apple Silicon: run the embedding server natively on the Metal GPU (Docker on a Mac is CPU-only).
+# Fast mode for Apple Silicon: run the API natively; bge-m3 in Ollama and the reranker both use the Metal GPU.
 #   ./mac-native.sh install    create ~/.docask-embed/venv, start at login (launchd), listen on 127.0.0.1:8081
 #   ./mac-native.sh status     launchd state + /health
 #   ./mac-native.sh logs       follow the log
@@ -16,6 +16,8 @@ LOG="$HOME_DIR/server.log"
 
 run() {  # launchd entry point: load .env, then serve
   set -a; . "$HERE/.env"; set +a
+  # bge-m3 runs in Ollama (./ollama-setup.sh); EMBED_DEVICE is for the reranker
+  export OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
   export EMBED_DEVICE="${EMBED_DEVICE:-mps}" HF_HUB_DISABLE_TELEMETRY=1 PYTORCH_ENABLE_MPS_FALLBACK=1
   exec "$VENV/bin/uvicorn" app:app --app-dir "$HERE" --host 127.0.0.1 --port "$PORT" --no-access-log
 }
@@ -51,7 +53,7 @@ EOF
   # bootout returns before the old server has exited; bootstrapping too early fails with "5: Input/output error"
   for _ in $(seq 1 30); do launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || break; sleep 1; done
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
-  echo "started; first start loads the model (downloads ~2.3 GB if not cached). Check: $0 status"
+  echo "started (embeddings come from Ollama: run ./ollama-setup.sh install once). Check: $0 status"
 }
 
 case "${1:-}" in

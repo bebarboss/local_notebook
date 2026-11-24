@@ -1,4 +1,4 @@
-# DocAsk embedding server — CPU (arm64 on Apple Silicon, amd64 elsewhere).
+# DocAsk embedding server — the API; bge-m3 runs in Ollama on the host (OLLAMA_URL).
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -18,8 +18,8 @@ COPY app.py db.py ./
 USER app
 EXPOSE 8080
 
-# the first start downloads the model (bge-m3 ≈ 2.3 GB) into the /models volume
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15m --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4)"
+# the first rerank downloads bge-reranker-v2-m3 (≈ 2.3 GB) into the /models volume; bge-m3 is Ollama's
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD python -c "import json,urllib.request,sys; sys.exit(json.load(urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5))['status'] != 'ok')"
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-server-header"]

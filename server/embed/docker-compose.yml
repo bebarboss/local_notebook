@@ -1,5 +1,7 @@
 services:
-  # CPU server in Docker. On an Apple Silicon Mac use fast mode instead (./mac-native.sh, Metal GPU):
+  # The API in Docker. bge-m3 itself runs in Ollama on the host (Metal GPU, ./ollama-setup.sh) — this
+  # container only calls it, so it no longer downloads or loads the model. The reranker still runs here (CPU).
+  # On an Apple Silicon Mac the API can also run natively (./mac-native.sh, reranker on Metal):
   # remove "cpu" from COMPOSE_PROFILES in .env and set TUNNEL_UPSTREAM=host.docker.internal:8081
   embed:
     profiles: ["cpu"]
@@ -11,16 +13,26 @@ services:
     environment:
       # inside Docker the database is "db" (mac-native mode uses DATABASE_URL from .env instead)
       DATABASE_URL: postgresql://docask:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/docask
+      # Ollama on the host, which listens on localhost only — Docker Desktop still forwards this name to it
+      OLLAMA_URL: http://host.docker.internal:11434
+    extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on:
       db: { condition: service_healthy }
     # only this Mac can reach the port directly; other machines come in through the tunnel below
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
+      # the reranker (bge-reranker-v2-m3 ≈ 2.3 GB) and bge-m3's tokenizer
       - hf-cache:/models
       - files:/data/files
-    # bge-m3 + the reranker (bge-reranker-v2-m3) ≈ 5 GB; Docker Desktop needs ≥ 9 GB then
-    mem_limit: 7g
+    mem_limit: 4g
+    # healthy = the API answers and Ollama has bge-m3 ("status": "ok"; "degraded" when Ollama is down)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request,sys; sys.exit(json.load(urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5))['status'] != 'ok')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }

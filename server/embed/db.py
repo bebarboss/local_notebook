@@ -120,7 +120,10 @@ class Store:
     def __init__(self, url: str, dim: int, model: str):
         self.dim = dim
         self.model = model
-        self.pool = ConnectionPool(url, min_size=1, max_size=8, kwargs={"autocommit": True}, configure=self._configure, open=True)
+        # check= tests each connection before handing it out: after the database restarts (Docker restart, reboot)
+        # the pool would otherwise give the first callers dead connections (500 once each)
+        self.pool = ConnectionPool(url, min_size=1, max_size=8, kwargs={"autocommit": True}, configure=self._configure,
+                                   check=ConnectionPool.check_connection, open=True)
         self.migrate()
 
     @staticmethod

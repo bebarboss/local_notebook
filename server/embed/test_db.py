@@ -30,7 +30,7 @@ class TopicEncoder:
     dim = 4
     device = "cpu"
 
-    def encode(self, texts):
+    def encode(self, texts, query=False):
         out = []
         for t in texts:
             t = t.lower()

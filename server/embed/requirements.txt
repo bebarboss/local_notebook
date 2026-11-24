@@ -1,7 +1,9 @@
-# torch is installed first from the CPU-only index (see Dockerfile) — no CUDA in the image
+# torch is installed first from the CPU-only index (see Dockerfile) — no CUDA in the image.
+# bge-m3 itself runs in Ollama; torch + sentence-transformers are for the reranker (and the tokenizer)
 fastapi==0.115.6
 uvicorn==0.32.1
 pydantic==2.10.3
+httpx==0.28.1
 sentence-transformers==3.3.1
 transformers==4.46.3
 huggingface-hub==0.26.5
