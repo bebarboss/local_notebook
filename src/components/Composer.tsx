@@ -1,5 +1,5 @@
 import { type ClipboardEvent, useEffect, useRef, useState } from "react";
-import { ArrowUp, Code2, FolderOpen, Globe, Paperclip, Plus, Square, X } from "lucide-react";
+import { ArrowUp, Code2, ExternalLink, FolderOpen, Globe, Paperclip, Plus, Square, X } from "lucide-react";
 import type { Effort, ModelConfig, Service } from "../lib/types";
 import { th } from "../i18n/th";
 import { ModelPicker } from "./ModelPicker";
@@ -8,7 +8,7 @@ const baseName = (p: string) => p.replace(/[/\\]+$/, "").split(/[/\\]/).pop() ||
 
 export function Composer({
   service, docsMode = true, models, model, effort, onModelChange, allServices, onToggleAll, onSend, onStop, onAddDocs, onPickFiles, onSavePastedImage, web, onToggleWeb,
-  code, onToggleCode, projectDir, onPickProjectDir,
+  code, onToggleCode, projectDir, onPickProjectDir, onOpenProject,
   streaming, sendBlockedReason, placeholder, hint, autoFocus, lockedScope,
 }: {
   service: Service | null;
@@ -39,6 +39,8 @@ export function Composer({
   projectDir?: string | null;
   /** general chat: pick/replace the project folder for coding mode */
   onPickProjectDir?: () => void;
+  /** general chat: open the chosen project folder in the file manager ("folder") or VS Code ("editor") */
+  onOpenProject?: (target: "folder" | "editor") => void;
   streaming: boolean;
   /** when set, typing works but sending is blocked (e.g. gateway down) */
   sendBlockedReason: string | null;
@@ -174,6 +176,16 @@ export function Composer({
               <FolderOpen size={14} strokeWidth={2} aria-hidden="true" />
               <span className="ellipsis" style={{ maxWidth: 160 }}>{projectDir ? baseName(projectDir) : "เลือกโฟลเดอร์"}</span>
             </button>
+          )}
+          {!docsMode && code && projectDir && onOpenProject && (
+            <>
+              <button type="button" className="icon-btn bordered" aria-label="เปิดโฟลเดอร์โปรเจคในตัวจัดการไฟล์" title="เปิดโฟลเดอร์โปรเจคในตัวจัดการไฟล์" onClick={() => onOpenProject("folder")}>
+                <ExternalLink size={15} strokeWidth={2} />
+              </button>
+              <button type="button" className="icon-btn bordered" aria-label="เปิดโปรเจคใน VS Code" title="เปิดโปรเจคใน VS Code (ต้องมีคำสั่ง code ใน PATH)" onClick={() => onOpenProject("editor")}>
+                <Code2 size={15} strokeWidth={2} />
+              </button>
+            </>
           )}
           {docsMode && onAddDocs && (
             <button type="button" className="icon-btn bordered" aria-label={th.addDocs} title={th.addDocs} onClick={onAddDocs} disabled={disabled}>

@@ -161,6 +161,7 @@ export default function NewChatPage({ onMenu, general = false, coding = false }:
         code={coding ? true : undefined}
         projectDir={coding ? projectDir : undefined}
         onPickProjectDir={coding ? async () => { const d = await api.pickFolder(); if (d) setProjectDir(d); } : undefined}
+        onOpenProject={coding && projectDir ? (target) => { (target === "editor" ? api.openInEditor(projectDir) : api.openProjectFolder(projectDir)).catch((e) => app.toast((e as { message?: string }).message ?? "เปิดไม่ได้")); } : undefined}
         onStop={() => {}}
         streaming={false}
         sendBlockedReason={sendBlocked}

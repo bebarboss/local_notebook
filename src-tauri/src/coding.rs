@@ -23,6 +23,10 @@ pub const PER_CALL: Duration = Duration::from_secs(60);
 pub const MAX_FILES: usize = 40;
 /// A tool result shown back to the model is trimmed to this many characters per call.
 const RESULT_CHARS: usize = 6000;
+/// read_file gets a larger slice than grep/list so the model can see a whole file before editing it
+/// (edit_file matches the exact original text). Files are capped at 256 KB on disk (codefs); a file
+/// longer than this still truncates, and the model is told to grep for the parts it needs.
+const READ_RESULT_CHARS: usize = 24_000;
 
 /// Result of a `run_command` call. `blocked` means the command was refused for not being in the
 /// project's allowlist (the model is told so and should try an allowed one or stop); otherwise
@@ -107,8 +111,11 @@ fn system_prompt(now: Option<&str>) -> String {
          - แก้ไฟล์ที่มีอยู่ด้วย edit_file (old ต้องตรงอักขระเป๊ะและมีที่เดียว) · สร้างไฟล์ใหม่หรือเขียนใหม่ทั้งไฟล์ด้วย write_file\n\
          - ทำให้ตรงกับที่ผู้ใช้ขอ แก้เท่าที่จำเป็น รักษาสไตล์เดิม อย่าเดาพาธหรือชื่อที่ยังไม่ได้อ่าน\n\
          - ถ้าเครื่องมือคืน error ให้อ่านสาเหตุแล้วแก้วิธีเรียกใหม่\n\
-         - ตรวจงานด้วย run_command (เช่น cargo check / cargo test / npm run build / pytest) อ่าน error ที่ได้มาแก้แล้วรันซ้ำจนผ่าน · รันได้เฉพาะคำสั่งที่อนุญาต ถ้าคำสั่งถูกบล็อกให้ข้ามไป อย่าพยายามเลี่ยง\n\
-         - ทำงานได้สูงสุด {MAX_ROUNDS} รอบ พอแก้เสร็จแล้วให้ตอบสรุปสั้น ๆ ว่าแก้อะไรไปบ้างและผลการตรวจ (ไม่ต้องเรียกเครื่องมือ)"
+         - หลังแก้โค้ดแล้ว ให้ตรวจงานด้วย run_command เสมอก่อนบอกว่าเสร็จ: รัน build/typecheck และ test ของโปรเจค (เช่น cargo check/test · npm run build · tsc · pytest) อ่าน error ที่ได้มาแก้แล้วรันซ้ำจนผ่าน · อย่าสรุปว่าเสร็จถ้ายังไม่ได้รันตรวจ\n\
+         - ถ้าโปรเจคมี git ใช้ git diff/git status (ดูได้อย่างเดียว) ทบทวนว่าแก้ตรงที่ตั้งใจ ไม่แก้เกินจำเป็น · ห้าม commit/reset/checkout (ถูกบล็อก)\n\
+         - รันได้เฉพาะคำสั่งที่อนุญาต ถ้าคำสั่งถูกบล็อกให้ข้ามไป อย่าพยายามเลี่ยง\n\
+         - อย่าจบเทิร์นด้วยการประกาศแผน เช่น \"เดี๋ยวจะอ่าน/แก้/ลองต่อ\" — ถ้างานยังไม่เสร็จให้เรียกเครื่องมือทำต่อจนจบในเทิร์นนี้ · ถ้าไฟล์ยาวถูกตัด (ขึ้น \"…(ตัดบางส่วน)\") ให้ใช้ grep หาส่วนที่ต้องแก้แทนการพยายามวัดขนาดไฟล์ · ถ้าติดจริงทำต่อไม่ได้ ให้บอกชัดว่าติดอะไรและทำอะไรสำเร็จไปแล้ว อย่าพิมพ์ขั้นตอนถัดไปเป็นคำตอบ\n\
+         - ทำงานได้สูงสุด {MAX_ROUNDS} รอบ พอแก้เสร็จและตรวจผ่านแล้วให้ตอบสรุปสั้น ๆ ว่าแก้อะไรไปบ้างและผลการตรวจ (build/test ผ่านไหม) (ไม่ต้องเรียกเครื่องมือ)"
     )
 }
 
@@ -124,10 +131,17 @@ fn arg<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 fn trim_result(s: &str) -> String {
-    if s.chars().count() <= RESULT_CHARS {
+    trim_to(s, RESULT_CHARS)
+}
+
+/// Cut a tool result to `cap` characters so a huge file or match list can't blow the model's context.
+/// read_file passes a larger cap (READ_RESULT_CHARS) than grep/list: to edit an existing file the model
+/// must see it whole, because edit_file needs the exact original text.
+fn trim_to(s: &str, cap: usize) -> String {
+    if s.chars().count() <= cap {
         return s.to_string();
     }
-    let mut out: String = s.chars().take(RESULT_CHARS).collect();
+    let mut out: String = s.chars().take(cap).collect();
     out.push_str("\n…(ตัดบางส่วน)");
     out
 }
@@ -251,7 +265,7 @@ fn run_tool<B: CodeBackend>(backend: &B, name: &str, args: &Value, changes: &mut
         "read_file" => {
             let path = arg(args, "path").unwrap_or("");
             match backend.read_file(path) {
-                Ok(text) => (format!("เนื้อหา {}:\n{}", path, trim_result(&text)), Some(step("coderead", path.to_string()))),
+                Ok(text) => (format!("เนื้อหา {}:\n{}", path, trim_to(&text, READ_RESULT_CHARS)), Some(step("coderead", path.to_string()))),
                 Err(e) => (format!("อ่าน {} ไม่ได้: {}", path, e.message), Some(step("coderead", path.to_string()))),
             }
         }

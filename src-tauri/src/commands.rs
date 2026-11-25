@@ -1757,6 +1757,56 @@ pub fn open_url(url: String) -> AppResult<()> {
     r.map(|_| ()).map_err(|e| AppError::new("open", format!("เปิดลิงก์ไม่ได้: {e}")))
 }
 
+/// Open the "เขียนโค้ด" project folder in the OS file manager. `path` is the chat's chosen project
+/// folder (picked earlier through the directory dialog), so it is checked to still be a real folder.
+#[tauri::command]
+pub fn open_project_folder(path: String) -> AppResult<()> {
+    let p = PathBuf::from(&path);
+    if !p.is_dir() {
+        return Err(AppError::new("not_found", "ไม่พบโฟลเดอร์โปรเจค (อาจถูกย้ายหรือลบ)"));
+    }
+    #[cfg(windows)]
+    let r = std::process::Command::new("explorer").arg(&p).spawn();
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(&p).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(&p).spawn();
+    r.map(|_| ()).map_err(|e| AppError::new("open", format!("เปิดโฟลเดอร์ไม่ได้: {e}")))
+}
+
+/// Open the "เขียนโค้ด" project folder in VS Code (the `code` command on PATH). On Windows `code` is a
+/// `.cmd` shim, so it is launched through `cmd /C` with no console window; stdio is detached so nothing
+/// blocks. A missing `code` becomes a friendly message instead of a raw OS error.
+#[tauri::command]
+pub fn open_in_editor(path: String) -> AppResult<()> {
+    let p = PathBuf::from(&path);
+    if !p.is_dir() {
+        return Err(AppError::new("not_found", "ไม่พบโฟลเดอร์โปรเจค (อาจถูกย้ายหรือลบ)"));
+    }
+    use std::process::Stdio;
+    let null = || (Stdio::null(), Stdio::null(), Stdio::null());
+    #[cfg(windows)]
+    let r = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let (i, o, e) = null();
+        std::process::Command::new("cmd")
+            .arg("/C").arg("code").arg(&p)
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(i).stdout(o).stderr(e)
+            .spawn()
+    };
+    #[cfg(not(windows))]
+    let r = {
+        let (i, o, e) = null();
+        std::process::Command::new("code").arg(&p).stdin(i).stdout(o).stderr(e).spawn()
+    };
+    r.map(|_| ()).map_err(|_| AppError::new(
+        "no_editor",
+        "เปิด VS Code ไม่ได้ — ตรวจว่าติดตั้ง VS Code แล้ว และมีคำสั่ง code ใน PATH (ใน VS Code กด Ctrl+Shift+P → \"Shell Command: Install 'code' command in PATH\")",
+    ))
+}
+
 /// Undo the files a "เขียนโค้ด" turn changed: restore each original, delete files it created.
 /// Loads the changeset saved with that assistant message.
 #[tauri::command]

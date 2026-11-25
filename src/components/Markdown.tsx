@@ -6,9 +6,49 @@ import type { Source } from "../lib/types";
 import { CitationChip } from "./CitationChip";
 import { BlockImages } from "./SourceImages";
 
-/** Code / SQL from the documents, with a copy button (copies the code only). */
-function CodeBlock({ text }: { text: string }) {
+// SQL keywords (upper-case) lit up in a code block. Not exhaustive — enough for the SELECT/DDL/DML
+// and PeopleSoft-style queries that show up in answers; anything not here stays plain text.
+const SQL_KEYWORDS = new Set([
+  "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "NULL", "IS", "IN", "LIKE", "BETWEEN", "EXISTS",
+  "ORDER", "BY", "GROUP", "HAVING", "LIMIT", "OFFSET", "DISTINCT", "AS", "ON", "USING", "TOP",
+  "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS", "UNION", "ALL", "INTERSECT", "EXCEPT",
+  "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "MERGE",
+  "CREATE", "ALTER", "DROP", "TRUNCATE", "TABLE", "VIEW", "INDEX", "SEQUENCE", "TRIGGER", "PROCEDURE", "FUNCTION",
+  "PRIMARY", "FOREIGN", "KEY", "REFERENCES", "CONSTRAINT", "UNIQUE", "CHECK", "DEFAULT",
+  "CASE", "WHEN", "THEN", "ELSE", "END", "WITH", "RECURSIVE", "OVER", "PARTITION",
+  "ASC", "DESC", "COUNT", "SUM", "AVG", "MIN", "MAX", "COALESCE", "CAST", "CONVERT", "SUBSTRING", "TRIM", "NVL",
+  "GRANT", "REVOKE", "COMMIT", "ROLLBACK", "BEGIN", "DECLARE", "IF", "EXEC", "EXECUTE",
+  "INT", "INTEGER", "BIGINT", "SMALLINT", "NUMERIC", "DECIMAL", "FLOAT", "REAL", "DOUBLE",
+  "VARCHAR", "VARCHAR2", "CHAR", "NVARCHAR", "TEXT", "DATE", "DATETIME", "TIMESTAMP", "TIME", "BOOLEAN", "BLOB", "CLOB",
+]);
+
+// Treat a fenced block as SQL when it says so, or (no language given) when it clearly starts a query.
+const SQL_HINT = /\bSELECT\b[\s\S]*\bFROM\b|^\s*(?:INSERT\s+INTO|UPDATE\b|DELETE\s+FROM|CREATE\s+(?:TABLE|OR\s+REPLACE|VIEW|INDEX|PROCEDURE|FUNCTION)|ALTER\s+TABLE|DROP\s+(?:TABLE|VIEW|INDEX)|WITH\b|MERGE\b|TRUNCATE\b|GRANT\b|REVOKE\b)/i;
+
+/** Colour a SQL string into spans: comments, '…' strings, numbers, and keywords. Builds React nodes
+ *  (no innerHTML), so the code text itself is never interpreted. Non-keyword identifiers stay plain. */
+function highlightSql(code: string): ReactNode[] {
+  const out: ReactNode[] = [];
+  const re = /(--[^\n]*|\/\*[\s\S]*?\*\/)|('(?:[^']|'')*'|"(?:[^"]|"")*")|(\b\d+(?:\.\d+)?\b)|([A-Za-z_][A-Za-z0-9_$#]*)/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let k = 0;
+  while ((m = re.exec(code))) {
+    if (m.index > last) out.push(code.slice(last, m.index));
+    if (m[1]) out.push(<span className="tok-com" key={k++}>{m[1]}</span>);
+    else if (m[2]) out.push(<span className="tok-str" key={k++}>{m[2]}</span>);
+    else if (m[3]) out.push(<span className="tok-num" key={k++}>{m[3]}</span>);
+    else out.push(SQL_KEYWORDS.has(m[4].toUpperCase()) ? <span className="tok-kw" key={k++}>{m[4]}</span> : m[4]);
+    last = m.index + m[0].length;
+  }
+  if (last < code.length) out.push(code.slice(last));
+  return out;
+}
+
+/** Code / SQL from the documents, with a copy button (copies the code only). SQL gets syntax colours. */
+function CodeBlock({ text, lang }: { text: string; lang?: string }) {
   const [copied, setCopied] = useState(false);
+  const isSql = lang === "sql" || (!lang && SQL_HINT.test(text));
   return (
     <div className="code-block">
       <button
@@ -25,7 +65,7 @@ function CodeBlock({ text }: { text: string }) {
       >
         {copied ? <Check size={14} strokeWidth={1.8} /> : <Copy size={14} strokeWidth={1.8} />}
       </button>
-      <pre><code>{text}</code></pre>
+      <pre><code className={isSql ? "lang-sql" : undefined}>{isSql ? highlightSql(text) : text}</code></pre>
     </div>
   );
 }
@@ -34,7 +74,7 @@ type Align = "left" | "center" | "right" | undefined;
 
 type Block =
   | { t: "p"; text: string }
-  | { t: "code"; text: string }
+  | { t: "code"; text: string; lang?: string }
   | { t: "ul" | "ol"; items: string[] }
   | { t: "h"; text: string }
   | { t: "table"; head: string[]; align: Align[]; rows: string[][] };
@@ -75,10 +115,12 @@ export function parseBlocks(src: string): Block[] {
     const line = lines[i];
     if (line.trimStart().startsWith("```")) {
       flush();
+      // the fence may name a language: ```sql → "sql" (used to pick syntax colours)
+      const lang = line.trimStart().slice(3).trim().split(/\s+/)[0].toLowerCase() || undefined;
       const buf: string[] = [];
       i++;
       while (i < lines.length && !lines[i].trimStart().startsWith("```")) buf.push(lines[i++]);
-      out.push({ t: "code", text: buf.join("\n") });
+      out.push({ t: "code", text: buf.join("\n"), lang });
       continue;
     }
     const ul = /^\s*[-*•]\s+(.*)$/.exec(line);
@@ -180,7 +222,7 @@ export function Markdown({ text, sources, trailing }: { text: string; sources: S
         switch (b.t) {
           case "p": el = <p>{inline(b.text, sources, `p${i}`)}{tail}</p>; break;
           case "h": el = <p><strong>{inline(b.text, sources, `h${i}`)}</strong>{tail}</p>; break;
-          case "code": el = <><CodeBlock text={b.text} />{tail}</>; break;
+          case "code": el = <><CodeBlock text={b.text} lang={b.lang} />{tail}</>; break;
           case "table": el = (
             <>
               <div className="md-table" role="region" aria-label="ตาราง" tabIndex={0}>

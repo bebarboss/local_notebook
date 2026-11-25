@@ -149,6 +149,10 @@ export interface Backend {
   openUrl(url: string): Promise<void>;
   /** undo the files a coding turn changed (restore originals, delete created files) */
   undoCodeChanges(chatId: string, messageId: number): Promise<UndoResult>;
+  /** open the coding project folder in the OS file manager */
+  openProjectFolder(path: string): Promise<void>;
+  /** open the coding project folder in VS Code (needs the `code` command on PATH) */
+  openInEditor(path: string): Promise<void>;
   stop(requestId: string): Promise<void>;
   /** a shared document whose file is on another PC is fetched from the server first */
   openSource(path: string, serviceId?: string): Promise<void>;
@@ -280,6 +284,8 @@ function createTauriBackend(): Backend {
     savePastedImage: (bytes, ext) => call("save_pasted_image", { bytes: Array.from(bytes), ext }),
     openUrl: (url) => call("open_url", { url }),
     undoCodeChanges: (chatId, messageId) => call("undo_code_changes", { chatId, messageId }),
+    openProjectFolder: (path) => call("open_project_folder", { path }),
+    openInEditor: (path) => call("open_in_editor", { path }),
     stop: (requestId) => call("stop_generation", { requestId }),
     openSource: (path, serviceId) => call("open_source_file", { path, serviceId: serviceId ?? null }),
     downloadServiceFiles: (serviceId, dest) => call("download_service_files", { serviceId, dest }),

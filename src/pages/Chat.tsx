@@ -248,6 +248,7 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
           code={codeMode ? true : undefined}
           projectDir={codeMode ? projectFolder : undefined}
           onPickProjectDir={codeMode ? async () => { const d = await api.pickFolder(); if (d) setProjectDir(d); } : undefined}
+          onOpenProject={codeMode && projectFolder ? (target) => { (target === "editor" ? api.openInEditor(projectFolder) : api.openProjectFolder(projectFolder)).catch((e) => app.toast((e as { message?: string }).message ?? "เปิดไม่ได้")); } : undefined}
           streaming={!!stream && !stream.error}
           sendBlockedReason={sendBlocked}
           placeholder={codeMode ? "บอกงานที่จะให้แก้โค้ด…" : undefined}

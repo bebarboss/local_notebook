@@ -612,6 +612,8 @@ export function createMockBackend(): Backend {
     savePastedImage: async (_bytes, ext) => `D:\\paste\\วางรูป-${Date.now().toString(36)}.${ext}`,
     openUrl: async (url) => { window.open(url, "_blank", "noopener"); },
     undoCodeChanges: async () => ({ restored: 1, deleted: 1 }),
+    openProjectFolder: async () => {},
+    openInEditor: async () => {},
     pickZip: async () => "C:\\Users\\me\\Downloads\\DocAsk-HR-นโยบาย.zip",
     pickJson: async () => "C:\\Users\\me\\AppData\\Roaming\\Code\\User\\chatLanguageModels.json",
     on: async (event, cb) => {

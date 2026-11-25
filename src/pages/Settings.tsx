@@ -653,7 +653,8 @@ function CodeSection() {
       <p className="muted" style={{ marginTop: -4, marginBottom: 14, lineHeight: 1.6 }}>
         ในโหมดเขียนโค้ด ผู้ช่วยรันคำสั่งตรวจงาน (build/test/lint) ในโฟลเดอร์โปรเจคเองเพื่อหา error มาแก้ ·
         คำสั่งที่อนุญาต<strong>ตั้งให้อัตโนมัติตามชนิดโปรเจค</strong> (เจอ Cargo.toml → cargo, package.json → npm/node,
-        pyproject/requirements → python/pytest, go.mod → go) · คำสั่งนอกรายการจะถูกบล็อก ไม่รัน
+        pyproject/requirements → python/pytest, go.mod → go · ถ้ามี .git ให้ดู git status/diff/log ได้ ไม่รวม commit/reset) ·
+        คำสั่งนอกรายการจะถูกบล็อก ไม่รัน
       </p>
       <div className="list-card">
         <div className="list-row" style={{ alignItems: "flex-start" }}>

@@ -126,7 +126,11 @@ export function MessageList({
             <Markdown text={streaming.content} sources={streaming.sources} trailing={<span className="caret" aria-hidden="true" />} />
           ) : !streaming.error ? (
             <div className="ai-text muted" style={{ fontSize: 14 }}>
-              {streaming.sources.length ? `พบ ${streaming.sources.length} ท่อนที่เกี่ยวข้อง กำลังถาม Gateway…` : "กำลังค้นเอกสาร…"}
+              {streaming.sources.length
+                ? `พบ ${streaming.sources.length} ท่อนที่เกี่ยวข้อง กำลังถาม Gateway…`
+                : streaming.steps?.some((s) => s.kind.startsWith("code"))
+                  ? "กำลังเขียนโค้ด…"
+                  : "กำลังค้นเอกสาร…"}
               <span className="caret" aria-hidden="true" />
             </div>
           ) : null}

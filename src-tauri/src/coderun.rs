@@ -69,6 +69,12 @@ pub fn default_allow(root: &Path) -> Vec<String> {
     if has("go.mod") {
         add(&mut v, &["go build", "go test", "go vet", "go run"]);
     }
+    // read-only git, so the agent can see what it changed vs the repo. Mutating/destructive git
+    // (commit, push, reset, checkout, clean, add, stash, rm) is NOT auto-allowed — committing stays a
+    // deliberate user action, and the user can add more in Settings if they want.
+    if root.join(".git").exists() {
+        add(&mut v, &["git status", "git diff", "git log", "git show"]);
+    }
     v
 }
 
@@ -186,6 +192,22 @@ mod tests {
 
         let empty = default_allow(&PathBuf::from(dir.path().join("does-not-exist")));
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn git_is_read_only_in_the_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let allow = default_allow(dir.path());
+        assert!(is_allowed("git status", &allow));
+        assert!(is_allowed("git diff --staged", &allow));
+        assert!(is_allowed("git log --oneline -n 20", &allow));
+        // mutating / destructive git stays blocked
+        assert!(!is_allowed("git commit -m x", &allow));
+        assert!(!is_allowed("git push", &allow));
+        assert!(!is_allowed("git reset --hard", &allow));
+        assert!(!is_allowed("git checkout main", &allow));
+        assert!(!is_allowed("git clean -fd", &allow));
     }
 
     #[tokio::test]
