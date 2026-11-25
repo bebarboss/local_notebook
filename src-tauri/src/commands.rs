@@ -42,6 +42,10 @@ pub struct AppState {
     pub watchers: Arc<Watchers>,
     pub streams: Mutex<HashMap<String, CancellationToken>>,
     pub status: Mutex<GatewayStatus>,
+    /// coding mode: in-flight "allow reading this outside file?" prompts, awaiting the user's reply
+    pub pending_perms: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+    /// coding mode: outside files the user already approved, per chat (canonical paths)
+    pub code_allowed: Mutex<HashMap<String, std::collections::HashSet<String>>>,
 }
 
 impl AppState {
@@ -66,6 +70,8 @@ impl AppState {
             indexer,
             streams: Mutex::new(HashMap::new()),
             status: Mutex::new(GatewayStatus { state: "unknown".into(), message: None, checked_at: 0 }),
+            pending_perms: Mutex::new(HashMap::new()),
+            code_allowed: Mutex::new(HashMap::new()),
         })
     }
 
@@ -719,6 +725,20 @@ struct CodeChangesEvent {
     root: String,
     changes: Vec<crate::codefs::CodeChange>,
 }
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CodePlanEvent {
+    plan: Vec<crate::coding::PlanStep>,
+}
+/// "Allow reading this outside file?" — emitted to the UI; the user's reply comes back via
+/// `resolve_code_permission(request_id, allow)`.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CodePermissionRequest {
+    request_id: String,
+    chat_id: String,
+    path: String,
+}
 
 #[tauri::command]
 pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<AskStarted> {
@@ -766,7 +786,7 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
         let previous = db.last_answer(&chat.id)?;
         let um = db.add_message(NewMessage {
             chat_id: &chat.id, role: "user", content: &question, model: None, reasoning_effort: None,
-            sources: &[], elapsed_ms: None, error: None, search_query: None, steps: &[], changes: None,
+            sources: &[], elapsed_ms: None, error: None, search_query: None, steps: &[], changes: None, plan: &[],
         })?;
         (chat, history, summary, previous, um)
     };
@@ -809,7 +829,7 @@ pub async fn ask(app: AppHandle, state: S<'_>, req: AskRequest) -> AppResult<Ask
     let web = chat.mode == "chat" && req.web && model.tool_calling;
     // extra commands the coding agent may run, beyond the ones auto-detected from the project
     let code_commands = if code { state.settings.lock().code_commands.clone() } else { Vec::new() };
-    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, docs, model, effort: req.effort, all: req.all_services, question, history, summary, turns, previous, search_query: None, steps: Vec::new(), attachments, from_attachment, now, web, code, project_dir, code_commands, changes: None, key, token };
+    let job = AskJob { app: app.clone(), request_id: request_id.clone(), chat_id: chat.id.clone(), svc, docs, model, effort: req.effort, all: req.all_services, question, history, summary, turns, previous, search_query: None, steps: Vec::new(), attachments, from_attachment, now, web, code, project_dir, code_commands, changes: None, plan: Vec::new(), key, token };
     tauri::async_runtime::spawn(job.run());
 
     Ok(AskStarted { request_id, chat_id: chat.id, user_message })
@@ -860,6 +880,8 @@ struct AskJob {
     project_dir: Option<String>,
     /// files the coding turn changed, saved with the answer for undo
     changes: Option<crate::codefs::Changeset>,
+    /// the coding turn's plan checklist, saved with the answer
+    plan: Vec<crate::coding::PlanStep>,
     key: String,
     token: CancellationToken,
 }
@@ -886,6 +908,7 @@ impl AskJob {
             search_query: self.search_query.as_deref(),
             steps: &self.steps,
             changes: self.changes.as_ref(),
+            plan: &self.plan,
         });
         saved.unwrap_or_else(|e| Message {
             id: -now_ms(),
@@ -901,6 +924,7 @@ impl AskJob {
             search_query: self.search_query.clone(),
             steps: self.steps.clone(),
             changes: self.changes.clone(),
+            plan: self.plan.clone(),
         })
     }
 
@@ -984,18 +1008,25 @@ impl AskJob {
                         return;
                     }
                 };
-                let agent = CodeAgent { model: &self.model, key: self.key.as_str(), effort: None, tools_max: self.model.max_output_tokens, ws, extra_allow: &self.code_commands };
+                let agent = CodeAgent {
+                    app: &self.app, chat_id: &self.chat_id, request_id: &self.request_id,
+                    model: &self.model, key: self.key.as_str(), effort: None,
+                    tools_max: self.model.max_output_tokens, ws, extra_allow: &self.code_commands, cancel: &self.token,
+                };
                 let (rid, cid, app2) = (self.request_id.clone(), self.chat_id.clone(), self.app.clone());
                 let mut collected: Vec<crate::agent::Step> = Vec::new();
-                let (items, answer_text, stop) = crate::coding::edit_codebase(&agent, &self.question, self.now.as_deref(), &self.token, |step| {
+                let out = crate::coding::edit_codebase(&agent, &self.question, self.now.as_deref(), &self.token, |step| {
                     let _ = app2.emit("chat-step", ChatEvent { request_id: rid.clone(), chat_id: cid.clone(), data: StepEvent { step: step.clone() } });
                     collected.push(step);
                 })
                 .await;
                 self.steps = collected;
-                let changeset = crate::codefs::Changeset { root: agent.ws.root_display(), items };
+                self.plan = out.plan;
+                self.emit("chat-plan", CodePlanEvent { plan: self.plan.clone() });
+                let changeset = crate::codefs::Changeset { root: agent.ws.root_display(), items: out.changes };
                 self.emit("chat-changes", CodeChangesEvent { root: changeset.root.clone(), changes: changeset.items.clone() });
                 self.changes = (!changeset.items.is_empty()).then_some(changeset.clone());
+                let (answer_text, stop) = (out.answer, out.stop);
                 if answer_text.trim().is_empty() {
                     // the loop ended without a summary (hit a limit/cancel/error) — ask for one from the
                     // files changed, passing the real stop reason so the model states it instead of guessing
@@ -1474,6 +1505,10 @@ struct WebAgent<'a> {
 
 /// Backend for the coding loop: a Gateway tool round plus the project-scoped filesystem.
 struct CodeAgent<'a> {
+    app: &'a AppHandle,
+    /// the chat this turn belongs to — for permission events and the per-chat approved-files list
+    chat_id: &'a str,
+    request_id: &'a str,
     model: &'a ModelConfig,
     key: &'a str,
     effort: Option<&'a str>,
@@ -1481,6 +1516,8 @@ struct CodeAgent<'a> {
     ws: crate::codefs::Workspace,
     /// extra allowed command prefixes from settings, merged with the project defaults
     extra_allow: &'a [String],
+    /// cancellation for the turn — also aborts a file-permission wait
+    cancel: &'a CancellationToken,
 }
 
 impl crate::coding::CodeBackend for CodeAgent<'_> {
@@ -1490,8 +1527,8 @@ impl crate::coding::CodeBackend for CodeAgent<'_> {
     fn list_dir(&self, path: &str) -> AppResult<Vec<crate::codefs::DirEntry>> {
         self.ws.list(path)
     }
-    fn read_file(&self, path: &str) -> AppResult<String> {
-        self.ws.read(path)
+    fn read_file(&self, path: &str, offset: Option<usize>, limit: Option<usize>) -> AppResult<String> {
+        self.ws.read(path, offset, limit)
     }
     fn grep(&self, pattern: &str, sub: Option<&str>) -> AppResult<Vec<crate::codefs::Hit>> {
         self.ws.grep(pattern, sub)
@@ -1519,6 +1556,52 @@ impl crate::coding::CodeBackend for CodeAgent<'_> {
         }
         let out = coderun::run(root, command, coderun::PER_CMD).await?;
         Ok(crate::coding::RunResult { blocked: false, exit_code: out.exit_code, text: out.output })
+    }
+
+    async fn read_reference(&self, path: &str) -> AppResult<crate::coding::ReferenceOutcome> {
+        use crate::coding::ReferenceOutcome;
+        // stable key for the per-chat approved list (if the file exists); the read itself re-validates
+        let canon = std::path::Path::new(path).canonicalize().ok().map(|p| p.to_string_lossy().into_owned());
+        let already = canon.as_ref().is_some_and(|c| {
+            self.app.state::<AppState>().code_allowed.lock().get(self.chat_id).is_some_and(|s| s.contains(c))
+        });
+        if !already && !self.ask_permission(path).await {
+            return Ok(ReferenceOutcome::Denied);
+        }
+        let text = crate::codefs::read_external(path)?;
+        if let Some(c) = canon {
+            self.app.state::<AppState>().code_allowed.lock().entry(self.chat_id.to_string()).or_default().insert(c);
+        }
+        Ok(ReferenceOutcome::Allowed(text))
+    }
+
+    async fn update_plan(&self, steps: &[crate::coding::PlanStep]) {
+        let _ = self.app.emit(
+            "chat-plan",
+            ChatEvent { request_id: self.request_id.to_string(), chat_id: self.chat_id.to_string(), data: CodePlanEvent { plan: steps.to_vec() } },
+        );
+    }
+}
+
+impl CodeAgent<'_> {
+    /// Ask the UI to approve reading an outside file; resolves to the user's choice, or `false` on
+    /// cancel/timeout. Never logs the file content — only that a prompt was raised.
+    async fn ask_permission(&self, path: &str) -> bool {
+        let request_id = format!("perm-{}", uuid::Uuid::new_v4());
+        let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+        self.app.state::<AppState>().pending_perms.lock().insert(request_id.clone(), tx);
+        let _ = self.app.emit(
+            "code-permission-request",
+            CodePermissionRequest { request_id: request_id.clone(), chat_id: self.chat_id.to_string(), path: path.to_string() },
+        );
+        let allowed = tokio::select! {
+            r = rx => r.unwrap_or(false),
+            _ = self.cancel.cancelled() => false,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(120)) => false,
+        };
+        // drop the sender if we bailed out on cancel/timeout (the resolver may never come)
+        self.app.state::<AppState>().pending_perms.lock().remove(&request_id);
+        allowed
     }
 }
 
@@ -1835,6 +1918,15 @@ pub fn undo_code_changes(state: S<'_>, chat_id: String, message_id: i64) -> AppR
     .ok_or_else(|| AppError::new("not_found", "ไม่พบรายการแก้ไขของข้อความนี้"))?;
     let ws = crate::codefs::Workspace::new(&changeset.root)?;
     Ok(ws.undo(&changeset.items))
+}
+
+/// The user's answer to an "Allow reading this outside file?" prompt from the coding agent.
+#[tauri::command]
+pub fn resolve_code_permission(state: S<'_>, request_id: String, allow: bool) -> AppResult<()> {
+    if let Some(tx) = state.pending_perms.lock().remove(&request_id) {
+        let _ = tx.send(allow);
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------ knowledge

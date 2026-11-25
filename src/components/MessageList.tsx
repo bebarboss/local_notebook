@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { BookMarked, BookOpen, Code2, Copy, Check, CircleAlert, Globe, RotateCcw, Search, Terminal } from "lucide-react";
-import type { AgentStep, CodeChange, Message, Source } from "../lib/types";
+import { BookMarked, BookOpen, Code2, Copy, Check, Circle, CircleAlert, CircleDot, FileSymlink, Globe, RotateCcw, Search, SkipForward, Terminal } from "lucide-react";
+import type { AgentStep, CodeChange, CodePermissionRequest, Message, PlanStep, Source } from "../lib/types";
 import { th } from "../i18n/th";
 import { api } from "../lib/api";
 import { initials, useApp } from "../state";
@@ -18,6 +18,10 @@ export interface StreamingState {
   steps?: AgentStep[];
   /** files the coding agent changed this turn (shown live before the answer saves) */
   changes?: CodeChange[];
+  /** the coding agent's plan checklist, updated live */
+  plan?: PlanStep[];
+  /** a pending "allow reading this outside file?" prompt */
+  permission?: CodePermissionRequest | null;
 }
 
 /** "ค้นด้วย: …" — how a follow-up question was understood for the search */
@@ -55,6 +59,8 @@ function stepText(s: AgentStep): string {
       return `รันคำสั่ง: ${s.detail}${s.found ? " — ผ่าน" : " — มีข้อผิดพลาด"}`;
     case "codeblocked":
       return `ไม่อนุญาตให้รัน: ${s.detail}`;
+    case "codeskip":
+      return `ข้ามไฟล์ (ไม่ได้รับอนุญาต): ${s.detail}`;
     case "done":
       return "เสร็จแล้ว";
     case "error": {
@@ -82,6 +88,7 @@ function stepIcon(kind: string) {
   if (kind === "read") return <BookOpen {...p} />;
   if (kind === "websearch" || kind === "webread") return <Globe {...p} />;
   if (kind === "coderun" || kind === "codeblocked") return <Terminal {...p} />;
+  if (kind === "codeskip") return <SkipForward {...p} />;
   if (kind.startsWith("code")) return <Code2 {...p} />;
   if (kind === "done") return <Check {...p} />;
   if (kind === "error") return <CircleAlert {...p} />;
@@ -103,12 +110,48 @@ function AgentSteps({ steps }: { steps?: AgentStep[] }) {
   );
 }
 
+/** The coding agent's plan as a ticking checklist (pending ○ / running ◉ / done ✓), like Claude Code. */
+function PlanChecklist({ steps }: { steps?: PlanStep[] }) {
+  if (!steps || steps.length === 0) return null;
+  const done = steps.filter((s) => s.status === "done").length;
+  return (
+    <div className="plan-list" aria-label="แผนงานของผู้ช่วย">
+      <div className="plan-head">แผนงาน <span className="plan-count">{done}/{steps.length}</span></div>
+      {steps.map((s, i) => (
+        <div key={i} className={`plan-step ${s.status}`}>
+          {s.status === "done" ? <Check size={13} strokeWidth={2.4} aria-hidden="true" />
+            : s.status === "running" ? <CircleDot size={13} strokeWidth={2.2} aria-hidden="true" />
+            : <Circle size={13} strokeWidth={2} aria-hidden="true" />}
+          <span>{s.text}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** "Allow reading this outside file?" — the mid-loop permission prompt (read-only, outside the project). */
+function PermissionPrompt({ req, onResolve }: { req: CodePermissionRequest; onResolve?: (allow: boolean) => void }) {
+  return (
+    <div className="perm-prompt" role="alertdialog" aria-label="ขออนุญาตอ่านไฟล์ภายนอก">
+      <div className="perm-head"><FileSymlink size={15} strokeWidth={2} aria-hidden="true" />อนุญาตให้อ่านไฟล์นอกโฟลเดอร์โปรเจค?</div>
+      <div className="perm-path mono" title={req.path}>{req.path}</div>
+      <div className="perm-note">อ่านอย่างเดียว · อนุญาตแล้วจะจำไว้ทั้งแชตนี้</div>
+      <div className="perm-actions">
+        <button className="btn btn-primary" onClick={() => onResolve?.(true)}>อนุญาต</button>
+        <button className="btn" onClick={() => onResolve?.(false)}><SkipForward size={14} strokeWidth={2} aria-hidden="true" />ข้าม</button>
+      </div>
+    </div>
+  );
+}
+
 export function MessageList({
-  messages, streaming, onRetry, retryDisabled, onSaveKnowledge,
+  messages, streaming, onRetry, retryDisabled, onSaveKnowledge, onResolvePermission,
 }: {
   messages: Message[]; streaming: StreamingState | null; onRetry: (question: string) => void; retryDisabled: boolean;
   /** "บันทึกเป็นความรู้" from this answer back to the start of the chat */
   onSaveKnowledge?: (messageId: number) => void;
+  /** answer the coding agent's "allow reading this outside file?" prompt */
+  onResolvePermission?: (allow: boolean) => void;
 }) {
   const { settings } = useApp();
   const me = initials(settings.userName || "ผู้ใช้");
@@ -133,7 +176,9 @@ export function MessageList({
       {streaming && (
         <div className="ai-msg" aria-busy={!streaming.error}>
           <SearchedAs query={streaming.searchQuery} />
+          <PlanChecklist steps={streaming.plan} />
           <AgentSteps steps={streaming.steps} />
+          {streaming.permission && <PermissionPrompt req={streaming.permission} onResolve={onResolvePermission} />}
           {streaming.changes && <ChangesList changes={streaming.changes} />}
           {streaming.content ? (
             <Markdown text={streaming.content} sources={streaming.sources} trailing={<span className="caret" aria-hidden="true" />} />
@@ -187,6 +232,7 @@ function AiMsg({ msg, onRetry, retryDisabled, onSaveKnowledge }: { msg: Message;
     >
       {menu && <ContextMenu at={menu} onClose={() => setMenu(null)} onCopy={copy} onSaveKnowledge={onSaveKnowledge!} />}
       <SearchedAs query={msg.searchQuery} />
+      <PlanChecklist steps={msg.plan} />
       <AgentSteps steps={msg.steps} />
       {msg.changes && msg.changes.items.length > 0 && <CodeChanges chatId={msg.chatId} messageId={msg.id} items={msg.changes.items} />}
       {msg.content && <Markdown text={msg.content} sources={msg.sources} />}

@@ -1,12 +1,51 @@
 import { useEffect, useState } from "react";
 import { MoreHorizontal, Plus, Search, Settings as SettingsIcon, Pencil, Trash2, BookMarked, MessageCircle, FileText, Code2 } from "lucide-react";
 import { api } from "../lib/api";
-import type { Chat } from "../lib/types";
+import type { Chat, KeyUsage } from "../lib/types";
 import { th } from "../i18n/th";
 import { initials, useApp } from "../state";
 import { StatusPill } from "./StatusPill";
 import { KnowledgeDialog } from "./KnowledgeDialog";
 import { ConfirmDialog, Logo, Modal, Skeleton, usePopover } from "./ui";
+
+const money = (n: number) => `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: n < 1 ? 4 : 2 })}`;
+function fmtDate(s: string): string {
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? s : d.toLocaleDateString("th-TH", { day: "numeric", month: "short", year: "numeric" });
+}
+
+/** Compact "Key usage" chip in the sidebar: spend/budget + a thin bar, with details on hover.
+ *  Hidden when there's no key or the gateway doesn't report usage. Click → Settings › Gateway. */
+function KeyUsageWidget() {
+  const { go, gateway } = useApp();
+  const [u, setU] = useState<KeyUsage | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const load = () => api.gatewayKeyUsage().then((r) => alive && setU(r)).catch(() => alive && setU(null));
+    load();
+    const t = setInterval(load, 180_000);
+    return () => { alive = false; clearInterval(t); };
+  }, [gateway.state]);
+  if (!u || (u.spend == null && u.maxBudget == null)) return null;
+  const spend = u.spend ?? 0;
+  const pct = u.maxBudget && u.maxBudget > 0 ? Math.min(1, spend / u.maxBudget) : null;
+  const tip = [
+    u.budgetResetAt ? `งบรีเซ็ต ${fmtDate(u.budgetResetAt)}` : null,
+    u.rpmLimit != null ? `${u.rpmLimit.toLocaleString("th-TH")} ครั้ง/นาที` : null,
+    u.tpmLimit != null ? `${u.tpmLimit.toLocaleString("th-TH")} token/นาที` : null,
+    u.models.length ? `${u.models.length} โมเดล` : null,
+    u.keyAlias,
+  ].filter(Boolean).join(" · ");
+  return (
+    <button className="usage-chip" title={tip || undefined} onClick={() => go({ name: "settings", section: "gateway" })} aria-label="การใช้งานของ Key">
+      <div className="usage-chip-top">
+        <span>การใช้งาน Key</span>
+        <span className="usage-chip-val">{money(spend)}{u.maxBudget != null ? ` / ${money(u.maxBudget)}` : ""}</span>
+      </div>
+      {pct != null && <div className="usage-bar"><div style={{ width: `${Math.round(pct * 100)}%` }} /></div>}
+    </button>
+  );
+}
 
 export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () => void }) {
   const app = useApp();
@@ -137,6 +176,8 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
           ))}
         </>
       )}
+
+      <KeyUsageWidget />
 
       <div className="side-foot">
         <span className="avatar" aria-hidden="true">{initials(settings.userName || "ผู้ใช้")}</span>

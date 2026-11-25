@@ -144,6 +144,14 @@ export interface Message {
   steps?: AgentStep[];
   /** files changed by a "เขียนโค้ด" turn (absent when it didn't run) — can be undone */
   changes?: Changeset;
+  /** the coding turn's plan checklist (absent when it didn't run) */
+  plan?: PlanStep[];
+}
+
+/** one item in the coding agent's plan checklist */
+export interface PlanStep {
+  text: string;
+  status: "pending" | "running" | "done";
 }
 
 /** one file changed by the coding agent */
@@ -478,6 +486,20 @@ export interface ChatChanges {
   chatId: string;
   root: string;
   changes: CodeChange[];
+}
+
+/** the coding agent's plan checklist, emitted live as it progresses */
+export interface ChatPlan {
+  requestId: string;
+  chatId: string;
+  plan: PlanStep[];
+}
+
+/** "allow reading this outside file?" — emitted when the coding agent needs a file outside the project */
+export interface CodePermissionRequest {
+  requestId: string;
+  chatId: string;
+  path: string;
 }
 
 export interface AppInfo {

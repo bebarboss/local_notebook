@@ -155,6 +155,7 @@ pub fn run() {
             commands::save_pasted_image,
             commands::open_url,
             commands::undo_code_changes,
+            commands::resolve_code_permission,
             commands::open_project_folder,
             commands::open_in_editor,
             commands::stop_generation,

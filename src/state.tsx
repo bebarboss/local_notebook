@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./lib/api";
-import type { AgentStep, AskRequest, CodeChange, GatewayStatus, Message, ModelConfig, Service, ServiceStats, Settings, Source } from "./lib/types";
+import type { AgentStep, AskRequest, CodeChange, CodePermissionRequest, GatewayStatus, Message, ModelConfig, PlanStep, Service, ServiceStats, Settings, Source } from "./lib/types";
 
 export type Page =
   | { name: "chat"; chatId: string; initial?: AskRequest }
@@ -25,6 +25,10 @@ export interface Live {
   searchQuery?: string;
   steps?: AgentStep[];
   changes?: CodeChange[];
+  /** the coding turn's plan checklist, updated live */
+  plan?: PlanStep[];
+  /** a pending "allow reading this outside file?" prompt for this chat */
+  permission?: CodePermissionRequest | null;
   error: string | null;
   /** the saved assistant message, set once the turn finishes */
   done?: Message;
@@ -57,6 +61,8 @@ interface Ctx {
   startLive: (chatId: string, requestId: string) => void;
   failLive: (chatId: string, message: string) => void;
   clearLive: (chatId: string) => void;
+  /** answer an "allow reading this outside file?" prompt from the coding agent */
+  answerPermission: (chatId: string, requestId: string, allow: boolean) => void;
   toast: (msg: string) => void;
   reload: () => Promise<void>;
 }
@@ -119,6 +125,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
   const clearLive = useCallback((chatId: string) => {
     setLive((prev) => { if (!(chatId in prev)) return prev; const n = { ...prev }; delete n[chatId]; return n; });
+  }, []);
+  const answerPermission = useCallback((chatId: string, requestId: string, allow: boolean) => {
+    api.resolveCodePermission(requestId, allow).catch(() => {});
+    setLive((prev) => { const cur = prev[chatId]; return cur ? { ...prev, [chatId]: { ...cur, permission: null } } : prev; });
   }, []);
 
   const refreshServices = useCallback(async () => {
@@ -195,6 +205,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       api.on("chat-sources", (p) => patch(p.chatId, p.requestId, (s) => ({ ...s, sources: p.sources, searchQuery: p.searchQuery }))),
       api.on("chat-step", (p) => patch(p.chatId, p.requestId, (s) => ({ ...s, steps: [...(s.steps ?? []), p.step] }))),
       api.on("chat-changes", (p) => patch(p.chatId, p.requestId, (s) => ({ ...s, changes: p.changes }))),
+      api.on("chat-plan", (p) => patch(p.chatId, p.requestId, (s) => ({ ...s, plan: p.plan }))),
+      // permission requests carry their own id (not the chat's requestId); attach to the chat's live turn
+      api.on("code-permission-request", (p) =>
+        setLive((prev) => { const cur = prev[p.chatId]; return cur && !cur.done ? { ...prev, [p.chatId]: { ...cur, permission: p } } : prev; }),
+      ),
       api.on("chat-delta", (p) => patch(p.chatId, p.requestId, (s) => ({ ...s, content: s.content + p.delta }))),
       api.on("chat-done", (p) => { patch(p.chatId, p.requestId, (s) => ({ ...s, done: p.message, error: null })); setChatsVersion((v) => v + 1); }),
       api.on("chat-error", (p) => {
@@ -236,9 +251,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     () => ({
       ready, loadError, settings, updateSettings, services, stats, refreshServices, models, refreshModels,
       gateway, recheckGateway, page, go: setPage, appMode, setAppMode, activeServiceId, setActiveServiceId,
-      chatsVersion, bumpChats: () => setChatsVersion((v) => v + 1), live, startLive, failLive, clearLive, toast, reload,
+      chatsVersion, bumpChats: () => setChatsVersion((v) => v + 1), live, startLive, failLive, clearLive, answerPermission, toast, reload,
     }),
-    [ready, loadError, settings, updateSettings, services, stats, refreshServices, models, refreshModels, gateway, recheckGateway, page, appMode, setAppMode, activeServiceId, chatsVersion, live, startLive, failLive, clearLive, toast, reload],
+    [ready, loadError, settings, updateSettings, services, stats, refreshServices, models, refreshModels, gateway, recheckGateway, page, appMode, setAppMode, activeServiceId, chatsVersion, live, startLive, failLive, clearLive, answerPermission, toast, reload],
   );
 
   return (

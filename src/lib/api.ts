@@ -15,6 +15,8 @@ import type {
   Chat,
   ChatDelta,
   ChatChanges,
+  ChatPlan,
+  CodePermissionRequest,
   ChatDone,
   ChatSources,
   ChatStep,
@@ -59,6 +61,10 @@ export interface EventMap {
   "chat-step": ChatStep;
   /** the coding agent's changeset (files created/modified this turn) */
   "chat-changes": ChatChanges;
+  /** the coding agent's plan checklist, emitted live as it progresses */
+  "chat-plan": ChatPlan;
+  /** the coding agent asks to read a file outside the project folder */
+  "code-permission-request": CodePermissionRequest;
   "chat-done": ChatDone;
   "chat-error": { requestId: string; chatId: string; error: AppError };
   "index-progress": IndexProgress;
@@ -151,6 +157,8 @@ export interface Backend {
   openUrl(url: string): Promise<void>;
   /** undo the files a coding turn changed (restore originals, delete created files) */
   undoCodeChanges(chatId: string, messageId: number): Promise<UndoResult>;
+  /** answer an "allow reading this outside file?" prompt from the coding agent */
+  resolveCodePermission(requestId: string, allow: boolean): Promise<void>;
   /** open the coding project folder in the OS file manager */
   openProjectFolder(path: string): Promise<void>;
   /** open the coding project folder in VS Code (needs the `code` command on PATH) */
@@ -287,6 +295,7 @@ function createTauriBackend(): Backend {
     savePastedImage: (bytes, ext) => call("save_pasted_image", { bytes: Array.from(bytes), ext }),
     openUrl: (url) => call("open_url", { url }),
     undoCodeChanges: (chatId, messageId) => call("undo_code_changes", { chatId, messageId }),
+    resolveCodePermission: (requestId, allow) => call("resolve_code_permission", { requestId, allow }),
     openProjectFolder: (path) => call("open_project_folder", { path }),
     openInEditor: (path) => call("open_in_editor", { path }),
     stop: (requestId) => call("stop_generation", { requestId }),

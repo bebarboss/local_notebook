@@ -9,14 +9,43 @@
 use crate::agent::Step;
 use crate::codefs::{CodeChange, DirEntry, Hit, WriteOutcome};
 use crate::llm::Reply;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-pub const MAX_ROUNDS: usize = 16;
-/// Wall-clock budget for a whole coding turn.
-pub const TIME_BUDGET: Duration = Duration::from_secs(180);
+pub const MAX_ROUNDS: usize = 24;
+/// Wall-clock budget for a whole coding turn (includes time spent waiting for a file-permission reply).
+pub const TIME_BUDGET: Duration = Duration::from_secs(300);
+/// Most plan steps kept from one `update_plan` call.
+const MAX_PLAN_STEPS: usize = 12;
+
+/// One item in the agent's visible plan checklist. `status` is "pending" | "running" | "done".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanStep {
+    pub text: String,
+    pub status: String,
+}
+
+/// Result of a `read_reference_file` call once the user has (or hasn't) approved it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReferenceOutcome {
+    /// extracted text of the approved outside file
+    Allowed(String),
+    /// the user skipped it (or didn't answer in time)
+    Denied,
+}
+
+/// Everything a coding turn produces: files changed, the final summary text, an optional stop reason
+/// (set only when it ended abnormally without a clean summary), and the latest plan checklist.
+pub struct CodeOutcome {
+    pub changes: Vec<CodeChange>,
+    pub answer: String,
+    pub stop: Option<String>,
+    pub plan: Vec<PlanStep>,
+}
 /// Each Gateway round's own timeout. Code replies can be long, and a round that feeds a whole file
 /// back to a reasoning model is slow — 60s was tight enough to time out mid-turn on big files and
 /// get mis-reported as "can't reach Gateway". The whole turn is still bounded by TIME_BUDGET.
@@ -47,11 +76,15 @@ pub struct RunResult {
 pub trait CodeBackend {
     async fn complete(&self, messages: &Value, tools: &Value) -> crate::errors::AppResult<Reply>;
     fn list_dir(&self, path: &str) -> crate::errors::AppResult<Vec<DirEntry>>;
-    fn read_file(&self, path: &str) -> crate::errors::AppResult<String>;
+    fn read_file(&self, path: &str, offset: Option<usize>, limit: Option<usize>) -> crate::errors::AppResult<String>;
     fn grep(&self, pattern: &str, sub: Option<&str>) -> crate::errors::AppResult<Vec<Hit>>;
     fn write_file(&self, path: &str, content: &str) -> crate::errors::AppResult<WriteOutcome>;
     fn edit_file(&self, path: &str, old: &str, new: &str) -> crate::errors::AppResult<WriteOutcome>;
     async fn run_command(&self, command: &str) -> crate::errors::AppResult<RunResult>;
+    /// Read a file outside the project root — asks the user to approve it first (read-only).
+    async fn read_reference(&self, path: &str) -> crate::errors::AppResult<ReferenceOutcome>;
+    /// Publish the agent's plan checklist to the UI (and let the host remember it).
+    async fn update_plan(&self, steps: &[PlanStep]);
 }
 
 pub fn tools_schema() -> Value {
@@ -65,10 +98,29 @@ pub fn tools_schema() -> Value {
         }},
         {"type": "function", "function": {
             "name": "read_file",
-            "description": "อ่านเนื้อหาไฟล์ข้อความ (relative กับรากโปรเจค) อ่านก่อนแก้เสมอ",
+            "description": "อ่านไฟล์ในโปรเจค (relative กับราก) อ่านก่อนแก้เสมอ · ไฟล์เอกสาร (pdf/xlsx/docx/pptx/รูป) จะถูกดึงข้อความให้อัตโนมัติ · ไฟล์ยาวใส่ offset/limit เพื่ออ่านเป็นช่วง",
             "parameters": {"type": "object", "properties": {
-                "path": {"type": "string"}
+                "path": {"type": "string"},
+                "offset": {"type": "integer", "description": "เริ่มอ่านจากบรรทัดที่ (เริ่มที่ 1) — ใช้กับไฟล์ข้อความยาว"},
+                "limit": {"type": "integer", "description": "จำนวนบรรทัดที่จะอ่าน (ไม่ใส่ = จนจบหรือจนเต็มขีดจำกัด)"}
             }, "required": ["path"]}
+        }},
+        {"type": "function", "function": {
+            "name": "read_reference_file",
+            "description": "อ่านไฟล์อ้างอิงที่อยู่ \"นอก\" โฟลเดอร์โปรเจค (เช่น ไฟล์ใน Downloads) ใส่พาธเต็มของไฟล์ · ระบบจะถามผู้ใช้ให้กดอนุญาตก่อน และอ่านได้อย่างเดียว (เขียนไม่ได้) · รองรับ xlsx/pdf/docx/csv/ข้อความ — ใช้เมื่อจำเป็นต้องดูเนื้อหาไฟล์ภายนอก อย่าเดาเอง",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "พาธเต็มของไฟล์ภายนอก เช่น C:\\Users\\me\\Downloads\\data.xlsx"}
+            }, "required": ["path"]}
+        }},
+        {"type": "function", "function": {
+            "name": "update_plan",
+            "description": "ตั้ง/อัปเดตเช็กลิสต์แผนงานที่ผู้ใช้เห็นความคืบหน้า · เรียกครั้งแรกตอนเริ่มงานเพื่อวางแผนทั้งหมด (ข้อแรก status=\"running\" ที่เหลือ \"pending\") แล้วเรียกซ้ำทุกครั้งที่ทำข้อหนึ่งเสร็จ (ข้อนั้นเป็น \"done\" และตั้งข้อถัดไปเป็น \"running\") · ส่งรายการทั้งหมดทุกครั้ง",
+            "parameters": {"type": "object", "properties": {
+                "steps": {"type": "array", "description": "ลำดับขั้นของงาน", "items": {"type": "object", "properties": {
+                    "text": {"type": "string", "description": "ชื่อขั้นสั้น ๆ"},
+                    "status": {"type": "string", "enum": ["pending", "running", "done"]}
+                }, "required": ["text", "status"]}}
+            }, "required": ["steps"]}
         }},
         {"type": "function", "function": {
             "name": "grep",
@@ -109,7 +161,9 @@ fn system_prompt(now: Option<&str>) -> String {
     let today = now.map(|n| format!(" วันนี้คือ {n}.")).unwrap_or_default();
     format!(
         "คุณเป็นผู้ช่วยเขียนโค้ดที่ทำงานในโฟลเดอร์โปรเจคของผู้ใช้โดยตรง{today}\n\
-         - สำรวจก่อนด้วย list_dir/read_file/grep ให้เข้าใจโครงสร้างและสไตล์โค้ดเดิม แล้วค่อยแก้\n\
+         - เริ่มงานด้วยการวางแผนเป็นขั้น ๆ ผ่าน update_plan (2–6 ข้อ · ข้อแรก status \"running\" ที่เหลือ \"pending\") แล้วอัปเดตแผนทุกครั้งที่ทำแต่ละข้อเสร็จ (ข้อนั้นเป็น \"done\" ตั้งข้อถัดไปเป็น \"running\") เพื่อให้ผู้ใช้เห็นความคืบหน้า\n\
+         - สำรวจก่อนด้วย list_dir/read_file/grep ให้เข้าใจโครงสร้างและสไตล์โค้ดเดิม แล้วค่อยแก้ · ไฟล์ยาวใช้ read_file พร้อม offset/limit อ่านเป็นช่วง · ไฟล์เอกสาร (pdf/xlsx/docx) read_file ดึงข้อความให้เอง\n\
+         - ไฟล์อ้างอิงที่อยู่นอกโฟลเดอร์โปรเจค (เช่นใน Downloads) อ่านด้วย read_reference_file ใส่พาธเต็ม — ระบบจะถามผู้ใช้ให้อนุญาตก่อน (อ่านอย่างเดียว) · ถ้าผู้ใช้อ้างถึงไฟล์ภายนอก ให้อ่านด้วยเครื่องมือนี้ อย่าเดาเนื้อหา\n\
          - แก้ไฟล์ที่มีอยู่ด้วย edit_file (old ต้องตรงอักขระเป๊ะและมีที่เดียว) · สร้างไฟล์ใหม่หรือเขียนใหม่ทั้งไฟล์ด้วย write_file\n\
          - ทำให้ตรงกับที่ผู้ใช้ขอ แก้เท่าที่จำเป็น รักษาสไตล์เดิม อย่าเดาพาธหรือชื่อที่ยังไม่ได้อ่าน\n\
          - ถ้าเครื่องมือคืน error ให้อ่านสาเหตุแล้วแก้วิธีเรียกใหม่\n\
@@ -204,12 +258,13 @@ pub async fn edit_codebase<B: CodeBackend>(
     now: Option<&str>,
     cancel: &CancellationToken,
     mut on_step: impl FnMut(Step),
-) -> (Vec<CodeChange>, String, Option<String>) {
+) -> CodeOutcome {
     let tools = tools_schema();
     let mut messages = initial_messages(question, now);
     let mut changes = Changes::default();
     let mut final_text = String::new();
     let mut stop: Option<String> = None;
+    let mut plan: Vec<PlanStep> = Vec::new();
     let start = Instant::now();
 
     for _ in 0..MAX_ROUNDS {
@@ -249,11 +304,17 @@ pub async fn edit_codebase<B: CodeBackend>(
 
         for tc in &reply.tool_calls {
             let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
-            // run_command is async (it spawns a process); the file tools are sync
-            let (result, emitted) = if tc.name == "run_command" {
-                run_command_tool(backend, &args).await
-            } else {
-                run_tool(backend, &tc.name, &args, &mut changes)
+            // run_command, read_reference and update_plan are async (process / UI prompt / event);
+            // the project file tools are sync
+            let (result, emitted) = match tc.name.as_str() {
+                "run_command" => run_command_tool(backend, &args).await,
+                "read_reference_file" => run_reference_tool(backend, &args).await,
+                "update_plan" => {
+                    plan = parse_plan(&args);
+                    backend.update_plan(&plan).await;
+                    ("บันทึกแผนแล้ว ทำตามแผนต่อได้เลย และอัปเดต update_plan เมื่อทำแต่ละข้อเสร็จ".to_string(), None)
+                }
+                _ => run_tool(backend, &tc.name, &args, &mut changes),
             };
             if let Some(s) = emitted {
                 on_step(s);
@@ -265,7 +326,58 @@ pub async fn edit_codebase<B: CodeBackend>(
     if final_text.trim().is_empty() && stop.is_none() && !cancel.is_cancelled() {
         stop = Some(format!("ทำครบ {MAX_ROUNDS} รอบสูงสุดแล้วแต่งานยังไม่จบ"));
     }
-    (changes.into_vec(), final_text, stop)
+    // mark the plan finished when the turn ended cleanly, so the checklist doesn't stay mid-progress
+    if stop.is_none() && !cancel.is_cancelled() {
+        for s in &mut plan {
+            if s.status != "done" {
+                s.status = "done".into();
+            }
+        }
+    }
+    CodeOutcome { changes: changes.into_vec(), answer: final_text, stop, plan }
+}
+
+/// Parse an `update_plan` tool call into a bounded list of plan steps.
+fn parse_plan(args: &Value) -> Vec<PlanStep> {
+    args.get("steps")
+        .and_then(|s| s.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|it| {
+                    let text = it.get("text").and_then(|t| t.as_str())?.trim();
+                    if text.is_empty() {
+                        return None;
+                    }
+                    let status = match it.get("status").and_then(|s| s.as_str()) {
+                        Some("running") => "running",
+                        Some("done") => "done",
+                        _ => "pending",
+                    };
+                    Some(PlanStep { text: text.chars().take(120).collect(), status: status.into() })
+                })
+                .take(MAX_PLAN_STEPS)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Run a `read_reference_file` call: the host asks the user to approve the outside path, then reads
+/// it read-only. A denial is handed back to the model as text so it can carry on without the file.
+async fn run_reference_tool<B: CodeBackend>(backend: &B, args: &Value) -> (String, Option<Step>) {
+    let Some(path) = arg(args, "path").map(str::trim).filter(|p| !p.is_empty()) else {
+        return ("ต้องระบุ path ของไฟล์อ้างอิง (พาธเต็ม)".into(), None);
+    };
+    match backend.read_reference(path).await {
+        Ok(ReferenceOutcome::Allowed(text)) => (
+            format!("เนื้อหาไฟล์อ้างอิง {}:\n{}", path, trim_to(&text, READ_RESULT_CHARS)),
+            Some(step("coderead", path.to_string())),
+        ),
+        Ok(ReferenceOutcome::Denied) => (
+            format!("ผู้ใช้ไม่อนุญาตให้อ่าน {path} — ทำงานต่อโดยไม่ใช้ไฟล์นี้ หรือถามผู้ใช้ว่าจะให้ทำอย่างไร"),
+            Some(step("codeskip", path.to_string())),
+        ),
+        Err(e) => (format!("อ่านไฟล์อ้างอิง {} ไม่ได้: {}", path, e.message), Some(step("codeskip", path.to_string()))),
+    }
 }
 
 /// A short Thai reason for an aborted round, so the fallback summary is honest about the cause. A
@@ -294,7 +406,9 @@ fn run_tool<B: CodeBackend>(backend: &B, name: &str, args: &Value, changes: &mut
         }
         "read_file" => {
             let path = arg(args, "path").unwrap_or("");
-            match backend.read_file(path) {
+            let offset = args.get("offset").and_then(|v| v.as_u64()).map(|n| n as usize).filter(|&n| n > 0);
+            let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize).filter(|&n| n > 0);
+            match backend.read_file(path, offset, limit) {
                 Ok(text) => (format!("เนื้อหา {}:\n{}", path, trim_to(&text, READ_RESULT_CHARS)), Some(step("coderead", path.to_string()))),
                 Err(e) => (format!("อ่าน {} ไม่ได้: {}", path, e.message), Some(step("coderead", path.to_string()))),
             }
@@ -390,6 +504,10 @@ mod tests {
         cmd: RefCell<Vec<RunResult>>,
         /// commands the loop asked to run, in order
         ran: RefCell<Vec<String>>,
+        /// whether read_reference approves (true) or denies (false) outside reads
+        ref_allow: bool,
+        /// the latest plan the loop published
+        plan: RefCell<Vec<PlanStep>>,
     }
     impl CodeBackend for Fake {
         async fn complete(&self, _m: &Value, _t: &Value) -> crate::errors::AppResult<Reply> {
@@ -406,8 +524,8 @@ mod tests {
         fn list_dir(&self, p: &str) -> crate::errors::AppResult<Vec<DirEntry>> {
             self.ws.list(p)
         }
-        fn read_file(&self, p: &str) -> crate::errors::AppResult<String> {
-            self.ws.read(p)
+        fn read_file(&self, p: &str, offset: Option<usize>, limit: Option<usize>) -> crate::errors::AppResult<String> {
+            self.ws.read(p, offset, limit)
         }
         fn grep(&self, pat: &str, sub: Option<&str>) -> crate::errors::AppResult<Vec<Hit>> {
             self.ws.grep(pat, sub)
@@ -421,6 +539,16 @@ mod tests {
         async fn run_command(&self, command: &str) -> crate::errors::AppResult<RunResult> {
             self.ran.borrow_mut().push(command.to_string());
             Ok(self.cmd.borrow_mut().pop_front_or(RunResult { blocked: false, exit_code: Some(0), text: "ok".into() }))
+        }
+        async fn read_reference(&self, path: &str) -> crate::errors::AppResult<ReferenceOutcome> {
+            if self.ref_allow {
+                Ok(ReferenceOutcome::Allowed(crate::codefs::read_external(path)?))
+            } else {
+                Ok(ReferenceOutcome::Denied)
+            }
+        }
+        async fn update_plan(&self, steps: &[PlanStep]) {
+            *self.plan.borrow_mut() = steps.to_vec();
         }
     }
 
@@ -442,10 +570,15 @@ mod tests {
         fake_with_cmds(replies, vec![])
     }
     fn fake_with_cmds(replies: Vec<Reply>, cmd: Vec<RunResult>) -> (tempfile::TempDir, Fake) {
+        let (dir, mut f) = fake_base(replies);
+        f.cmd = RefCell::new(cmd);
+        (dir, f)
+    }
+    fn fake_base(replies: Vec<Reply>) -> (tempfile::TempDir, Fake) {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("main.py"), "print('hi')\n").unwrap();
         let ws = Workspace::new(&dir.path().to_string_lossy()).unwrap();
-        (dir, Fake { ws, replies: RefCell::new(replies), calls: RefCell::new(0), cmd: RefCell::new(cmd), ran: RefCell::new(Vec::new()) })
+        (dir, Fake { ws, replies: RefCell::new(replies), calls: RefCell::new(0), cmd: RefCell::new(Vec::new()), ran: RefCell::new(Vec::new()), ref_allow: false, plan: RefCell::new(Vec::new()) })
     }
     fn tool(name: &str, args: &str) -> ToolCall {
         ToolCall { id: "c1".into(), name: name.into(), arguments: args.into() }
@@ -462,15 +595,15 @@ mod tests {
             Reply { content: "แก้ให้แล้ว".into(), tool_calls: vec![] },
         ]);
         let mut steps = Vec::new();
-        let (changes, answer, stop) = edit_codebase(&f, "เปลี่ยน hi เป็น world", None, &rt(), |s| steps.push(s)).await;
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].path, "main.py");
-        assert_eq!(changes[0].kind, "modify");
-        assert_eq!(changes[0].before.as_deref(), Some("print('hi')\n"));
-        assert_eq!(changes[0].after, "print('world')\n");
-        assert_eq!(f.ws.read("main.py").unwrap(), "print('world')\n", "write hit the disk");
-        assert_eq!(answer, "แก้ให้แล้ว", "the final no-tool reply is the summary");
-        assert_eq!(stop, None, "a clean finish has no stop reason");
+        let out = edit_codebase(&f, "เปลี่ยน hi เป็น world", None, &rt(), |s| steps.push(s)).await;
+        assert_eq!(out.changes.len(), 1);
+        assert_eq!(out.changes[0].path, "main.py");
+        assert_eq!(out.changes[0].kind, "modify");
+        assert_eq!(out.changes[0].before.as_deref(), Some("print('hi')\n"));
+        assert_eq!(out.changes[0].after, "print('world')\n");
+        assert_eq!(f.ws.read("main.py", None, None).unwrap(), "print('world')\n", "write hit the disk");
+        assert_eq!(out.answer, "แก้ให้แล้ว", "the final no-tool reply is the summary");
+        assert_eq!(out.stop, None, "a clean finish has no stop reason");
         assert_eq!(steps.last().unwrap().kind, "done");
     }
 
@@ -480,11 +613,11 @@ mod tests {
             Reply { content: String::new(), tool_calls: vec![tool("write_file", r#"{"path":"a/b.txt","content":"ok\n"}"#)] },
             Reply { content: "สร้างแล้ว".into(), tool_calls: vec![] },
         ]);
-        let (changes, _, _) = edit_codebase(&f, "สร้างไฟล์", None, &rt(), |_| {}).await;
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].kind, "create");
-        assert_eq!(changes[0].before, None);
-        assert_eq!(f.ws.read("a/b.txt").unwrap(), "ok\n");
+        let out = edit_codebase(&f, "สร้างไฟล์", None, &rt(), |_| {}).await;
+        assert_eq!(out.changes.len(), 1);
+        assert_eq!(out.changes[0].kind, "create");
+        assert_eq!(out.changes[0].before, None);
+        assert_eq!(f.ws.read("a/b.txt", None, None).unwrap(), "ok\n");
     }
 
     #[tokio::test]
@@ -496,10 +629,10 @@ mod tests {
             Reply { content: String::new(), tool_calls: vec![tool("edit_file", r#"{"path":"main.py","old":"hi","new":"world"}"#)] },
             Reply { content: "เสร็จ".into(), tool_calls: vec![] },
         ]);
-        let (changes, _, _) = edit_codebase(&f, "แก้", None, &rt(), |_| {}).await;
-        assert_eq!(changes.len(), 1, "one file changed, the failed attempt left nothing");
-        assert_eq!(changes[0].before.as_deref(), Some("print('hi')\n"));
-        assert_eq!(changes[0].after, "print('world')\n");
+        let out = edit_codebase(&f, "แก้", None, &rt(), |_| {}).await;
+        assert_eq!(out.changes.len(), 1, "one file changed, the failed attempt left nothing");
+        assert_eq!(out.changes[0].before.as_deref(), Some("print('hi')\n"));
+        assert_eq!(out.changes[0].after, "print('world')\n");
     }
 
     #[tokio::test]
@@ -511,11 +644,11 @@ mod tests {
             Reply { content: "__ERR__".into(), tool_calls: vec![] },
         ]);
         let mut steps = Vec::new();
-        let (changes, answer, stop) = edit_codebase(&f, "ทำ X", None, &rt(), |s| steps.push(s)).await;
-        assert!(changes.is_empty(), "nothing was written");
-        assert_eq!(answer, "", "narration that accompanied a tool call is not a final summary");
+        let out = edit_codebase(&f, "ทำ X", None, &rt(), |s| steps.push(s)).await;
+        assert!(out.changes.is_empty(), "nothing was written");
+        assert_eq!(out.answer, "", "narration that accompanied a tool call is not a final summary");
         assert!(steps.iter().any(|s| s.kind == "error"), "the failed round shows as an error step");
-        let reason = stop.expect("an aborted round reports why it stopped");
+        let reason = out.stop.expect("an aborted round reports why it stopped");
         assert!(reason.contains("ไม่ใช่ปัญหาการเขียนไฟล์"), "the reason rules out a write failure so the fallback won't invent one");
     }
 
@@ -525,8 +658,8 @@ mod tests {
             Reply { content: String::new(), tool_calls: vec![tool("edit_file", "not json")] },
             Reply { content: "จบ".into(), tool_calls: vec![] },
         ]);
-        let (changes, _, _) = edit_codebase(&f, "q", None, &rt(), |_| {}).await;
-        assert!(changes.is_empty());
+        let out = edit_codebase(&f, "q", None, &rt(), |_| {}).await;
+        assert!(out.changes.is_empty());
     }
 
     #[tokio::test]
@@ -539,13 +672,13 @@ mod tests {
             vec![RunResult { blocked: false, exit_code: Some(0), text: "2 passed".into() }],
         );
         let mut steps = Vec::new();
-        let (changes, answer, _) = edit_codebase(&f, "รันเทสต์", None, &rt(), |s| steps.push(s)).await;
-        assert!(changes.is_empty(), "running a command changes no files");
+        let out = edit_codebase(&f, "รันเทสต์", None, &rt(), |s| steps.push(s)).await;
+        assert!(out.changes.is_empty(), "running a command changes no files");
         assert_eq!(f.ran.borrow().as_slice(), ["pytest -q"]);
         let run_step = steps.iter().find(|s| s.kind == "coderun").expect("a coderun step was emitted");
         assert_eq!(run_step.detail, "pytest -q");
         assert_eq!(run_step.found, 1, "exit 0 → marked ok");
-        assert_eq!(answer, "เทสต์ผ่านแล้ว");
+        assert_eq!(out.answer, "เทสต์ผ่านแล้ว");
     }
 
     #[tokio::test]
@@ -564,12 +697,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reads_an_external_reference_when_allowed() {
+        let outside = tempfile::tempdir().unwrap();
+        let ref_path = outside.path().join("ref.txt");
+        fs::write(&ref_path, "REFERENCE CONTENT\n").unwrap();
+        let (_d, mut f) = fake_base(vec![
+            Reply { content: String::new(), tool_calls: vec![tool("read_reference_file", &format!(r#"{{"path":{:?}}}"#, ref_path.to_string_lossy()))] },
+            Reply { content: "ใช้ไฟล์อ้างอิงแล้ว".into(), tool_calls: vec![] },
+        ]);
+        f.ref_allow = true;
+        let mut steps = Vec::new();
+        let out = edit_codebase(&f, "อ่านไฟล์อ้างอิง", None, &rt(), |s| steps.push(s)).await;
+        assert_eq!(out.answer, "ใช้ไฟล์อ้างอิงแล้ว");
+        assert!(steps.iter().any(|s| s.kind == "coderead"), "an allowed reference read shows as coderead");
+    }
+
+    #[tokio::test]
+    async fn a_denied_reference_is_handed_back_not_fatal() {
+        let (_d, f) = fake_base(vec![
+            // ref_allow defaults to false → the host denies it
+            Reply { content: String::new(), tool_calls: vec![tool("read_reference_file", r#"{"path":"C:\\somewhere\\secret.xlsx"}"#)] },
+            Reply { content: "ทำต่อโดยไม่ใช้ไฟล์นั้น".into(), tool_calls: vec![] },
+        ]);
+        let mut steps = Vec::new();
+        let out = edit_codebase(&f, "q", None, &rt(), |s| steps.push(s)).await;
+        assert_eq!(out.answer, "ทำต่อโดยไม่ใช้ไฟล์นั้น");
+        assert!(steps.iter().any(|s| s.kind == "codeskip"), "a denied read shows as codeskip and the loop continues");
+    }
+
+    #[tokio::test]
+    async fn publishes_and_finalizes_the_plan() {
+        let (_d, f) = fake(vec![
+            Reply { content: String::new(), tool_calls: vec![tool("update_plan", r#"{"steps":[{"text":"อ่านโค้ด","status":"running"},{"text":"แก้","status":"pending"}]}"#)] },
+            Reply { content: "เสร็จ".into(), tool_calls: vec![] },
+        ]);
+        let out = edit_codebase(&f, "ทำงาน", None, &rt(), |_| {}).await;
+        assert_eq!(out.plan.len(), 2);
+        assert_eq!(f.plan.borrow().len(), 2, "the host received the plan live");
+        assert!(out.plan.iter().all(|s| s.status == "done"), "a clean finish completes the checklist");
+    }
+
+    #[tokio::test]
     async fn stops_at_the_round_limit() {
         let always = || Reply { content: String::new(), tool_calls: vec![tool("read_file", r#"{"path":"main.py"}"#)] };
         let (_d, f) = fake((0..MAX_ROUNDS + 4).map(|_| always()).collect());
-        let (_c, answer, stop) = edit_codebase(&f, "q", None, &rt(), |_| {}).await;
+        let out = edit_codebase(&f, "q", None, &rt(), |_| {}).await;
         assert_eq!(*f.calls.borrow(), MAX_ROUNDS);
-        assert_eq!(answer, "", "no clean summary when it ran out of rounds");
-        assert!(stop.expect("round-cap reports a stop reason").contains("รอบสูงสุด"));
+        assert_eq!(out.answer, "", "no clean summary when it ran out of rounds");
+        assert!(out.stop.expect("round-cap reports a stop reason").contains("รอบสูงสุด"));
     }
 }

@@ -72,6 +72,9 @@ pub struct Message {
     /// files changed by the "เขียนโค้ด" (coding) turn — kept so they can be undone later
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes: Option<crate::codefs::Changeset>,
+    /// the coding turn's plan checklist (empty when it didn't run)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plan: Vec<crate::coding::PlanStep>,
 }
 
 pub struct NewMessage<'a> {
@@ -86,6 +89,7 @@ pub struct NewMessage<'a> {
     pub search_query: Option<&'a str>,
     pub steps: &'a [crate::agent::Step],
     pub changes: Option<&'a crate::codefs::Changeset>,
+    pub plan: &'a [crate::coding::PlanStep],
 }
 
 /// (answer message id, question, answer)
@@ -167,6 +171,11 @@ impl ChatDb {
         let has: bool = conn.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name='changes'")?.exists([])?;
         if !has {
             conn.execute_batch("ALTER TABLE messages ADD COLUMN changes TEXT;")?;
+        }
+        // v0.30: the coding turn's plan checklist (Vec<coding::PlanStep>), stored as JSON
+        let has: bool = conn.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name='plan'")?.exists([])?;
+        if !has {
+            conn.execute_batch("ALTER TABLE messages ADD COLUMN plan TEXT;")?;
         }
         // v0.19: chat mode — "docs" (RAG, existing rows) or "chat" (general, no service)
         let has: bool = conn.prepare("SELECT 1 FROM pragma_table_info('chats') WHERE name='mode'")?.exists([])?;
@@ -304,10 +313,11 @@ impl ChatDb {
         let sources = serde_json::to_string(m.sources)?;
         let steps = if m.steps.is_empty() { None } else { Some(serde_json::to_string(m.steps)?) };
         let changes = m.changes.map(serde_json::to_string).transpose()?;
+        let plan = if m.plan.is_empty() { None } else { Some(serde_json::to_string(m.plan)?) };
         self.conn.execute(
-            "INSERT INTO messages(chat_id,role,content,model,reasoning_effort,sources,elapsed_ms,error,created_at,search_query,steps,changes)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-            params![m.chat_id, m.role, m.content, m.model, m.reasoning_effort, sources, m.elapsed_ms, m.error, now, m.search_query, steps, changes],
+            "INSERT INTO messages(chat_id,role,content,model,reasoning_effort,sources,elapsed_ms,error,created_at,search_query,steps,changes,plan)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![m.chat_id, m.role, m.content, m.model, m.reasoning_effort, sources, m.elapsed_ms, m.error, now, m.search_query, steps, changes, plan],
         )?;
         let id = self.conn.last_insert_rowid();
         self.touch(m.chat_id)?;
@@ -325,18 +335,20 @@ impl ChatDb {
             search_query: m.search_query.map(Into::into),
             steps: m.steps.to_vec(),
             changes: m.changes.cloned(),
+            plan: m.plan.to_vec(),
         })
     }
 
     pub fn messages(&self, chat_id: &str) -> AppResult<Vec<Message>> {
         let mut st = self.conn.prepare(
-            "SELECT id,chat_id,role,content,model,reasoning_effort,sources,elapsed_ms,error,created_at,search_query,steps,changes
+            "SELECT id,chat_id,role,content,model,reasoning_effort,sources,elapsed_ms,error,created_at,search_query,steps,changes,plan
              FROM messages WHERE chat_id=?1 ORDER BY id",
         )?;
         let rows = st.query_map([chat_id], |r| {
             let src: String = r.get(6)?;
             let steps: Option<String> = r.get(11)?;
             let changes: Option<String> = r.get(12)?;
+            let plan: Option<String> = r.get(13)?;
             Ok(Message {
                 id: r.get(0)?,
                 chat_id: r.get(1)?,
@@ -351,6 +363,7 @@ impl ChatDb {
                 search_query: r.get(10)?,
                 steps: steps.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
                 changes: changes.and_then(|s| serde_json::from_str(&s).ok()),
+                plan: plan.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -438,7 +451,7 @@ mod tests {
     use super::*;
 
     fn msg<'a>(chat: &'a str, role: &'a str, content: &'a str, error: Option<&'a str>) -> NewMessage<'a> {
-        NewMessage { chat_id: chat, role, content, model: None, reasoning_effort: None, sources: &[], elapsed_ms: None, error, search_query: None, steps: &[], changes: None }
+        NewMessage { chat_id: chat, role, content, model: None, reasoning_effort: None, sources: &[], elapsed_ms: None, error, search_query: None, steps: &[], changes: None, plan: &[] }
     }
 
     #[test]

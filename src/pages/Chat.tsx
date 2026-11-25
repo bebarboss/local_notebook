@@ -216,6 +216,7 @@ export default function ChatPage({ chatId, initial, onMenu }: { chatId: string; 
                 retryDisabled={!!stream && !stream.error}
                 onRetry={(q) => send(q)}
                 onSaveKnowledge={docsMode && chat && !(stream && !stream.error) ? (id) => setKnowledgeUpto(id) : undefined}
+                onResolvePermission={stream?.permission ? (allow) => app.answerPermission(chatId, stream.permission!.requestId, allow) : undefined}
               />
             )}
             {stream?.error && (

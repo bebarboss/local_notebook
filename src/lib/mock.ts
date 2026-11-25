@@ -11,6 +11,7 @@ import type {
   GatewayStatus,
   Message,
   ModelConfig,
+  PlanStep,
   Service,
   RerankStatus,
   ServiceStats,
@@ -370,14 +371,26 @@ export function createMockBackend(): Backend {
             : "";
           // coding mode (mock): emit code steps + a changeset, then a summary answer with undo
           if (isCode) {
+            const plan: PlanStep[] = [
+              { text: "อ่านโครงสร้างโปรเจค", status: "running" },
+              { text: "แก้ main.py", status: "pending" },
+              { text: "รันตรวจงาน", status: "pending" },
+            ];
+            emit("chat-plan", { requestId, chatId: cid, plan: clone(plan) });
             emit("chat-step", { requestId, chatId: cid, step: { kind: "codelist", detail: ".", found: 0 } });
             await wait(250);
             emit("chat-step", { requestId, chatId: cid, step: { kind: "coderead", detail: "main.py", found: 0 } });
             await wait(250);
+            plan[0].status = "done"; plan[1].status = "running";
+            emit("chat-plan", { requestId, chatId: cid, plan: clone(plan) });
             emit("chat-step", { requestId, chatId: cid, step: { kind: "codeedit", detail: "main.py", found: 0 } });
             await wait(250);
+            plan[1].status = "done"; plan[2].status = "running";
+            emit("chat-plan", { requestId, chatId: cid, plan: clone(plan) });
             emit("chat-step", { requestId, chatId: cid, step: { kind: "coderun", detail: "python main.py", found: 1 } });
             await wait(200);
+            plan[2].status = "done";
+            emit("chat-plan", { requestId, chatId: cid, plan: clone(plan) });
             emit("chat-step", { requestId, chatId: cid, step: { kind: "done", detail: "", found: 0 } });
             const items = [
               { path: "main.py", kind: "modify" as const, before: "print('hi')\n", after: "print('world')\n" },
@@ -389,7 +402,7 @@ export function createMockBackend(): Backend {
             let cout = "";
             const cparts = codeText.match(/.{1,6}/gsu) ?? [];
             for (const p of cparts) { if (st.stopped) break; await wait(25); cout += p; emit("chat-delta", { requestId, chatId: cid, delta: p }); }
-            const cmsg: Message = { id: ++seq, chatId: cid, role: "assistant", content: cout, model: req.model, reasoningEffort: req.effort, sources: [], elapsedMs: now() - started, error: st.stopped ? "หยุดโดยผู้ใช้" : null, createdAt: now(), changes: { root: projectDir ?? "", items: clone(items) } };
+            const cmsg: Message = { id: ++seq, chatId: cid, role: "assistant", content: cout, model: req.model, reasoningEffort: req.effort, sources: [], elapsedMs: now() - started, error: st.stopped ? "หยุดโดยผู้ใช้" : null, createdAt: now(), changes: { root: projectDir ?? "", items: clone(items) }, plan: clone(plan) };
             messages[cid].push(cmsg);
             const cc = chats.find((x) => x.id === cid);
             if (cc) cc.updatedAt = now();
@@ -622,6 +635,7 @@ export function createMockBackend(): Backend {
     savePastedImage: async (_bytes, ext) => `D:\\paste\\วางรูป-${Date.now().toString(36)}.${ext}`,
     openUrl: async (url) => { window.open(url, "_blank", "noopener"); },
     undoCodeChanges: async () => ({ restored: 1, deleted: 1 }),
+    resolveCodePermission: async () => {},
     openProjectFolder: async () => {},
     openInEditor: async () => {},
     pickZip: async () => "C:\\Users\\me\\Downloads\\DocAsk-HR-นโยบาย.zip",
