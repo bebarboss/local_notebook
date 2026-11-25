@@ -261,9 +261,106 @@ pub async fn list_models(base: &str, key: &str) -> AppResult<Vec<String>> {
         .unwrap_or_default())
 }
 
+/// LiteLLM virtual-key usage: spend/budget/limits for one key (`GET /key/info`).
+/// All fields optional because a gateway may report only a subset.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyUsage {
+    pub key_alias: Option<String>,
+    pub spend: Option<f64>,
+    pub max_budget: Option<f64>,
+    pub soft_budget: Option<f64>,
+    pub budget_duration: Option<String>,
+    pub budget_reset_at: Option<String>,
+    pub expires: Option<String>,
+    pub tpm_limit: Option<i64>,
+    pub rpm_limit: Option<i64>,
+    pub max_parallel_requests: Option<i64>,
+    pub models: Vec<String>,
+}
+
+fn parse_key_usage(info: &serde_json::Value) -> KeyUsage {
+    let s = |k: &str| info.get(k).and_then(|x| x.as_str()).filter(|x| !x.is_empty()).map(str::to_string);
+    let f = |k: &str| info.get(k).and_then(|x| x.as_f64());
+    let i = |k: &str| info.get(k).and_then(|x| x.as_i64());
+    KeyUsage {
+        key_alias: s("key_alias").or_else(|| s("key_name")),
+        spend: f("spend"),
+        max_budget: f("max_budget"),
+        soft_budget: f("soft_budget"),
+        budget_duration: s("budget_duration"),
+        budget_reset_at: s("budget_reset_at"),
+        expires: s("expires"),
+        tpm_limit: i("tpm_limit"),
+        rpm_limit: i("rpm_limit"),
+        max_parallel_requests: i("max_parallel_requests"),
+        models: info
+            .get("models")
+            .and_then(|m| m.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
+    }
+}
+
+/// GET /key/info — usage for the calling virtual key, read from the Authorization
+/// header (the key is never put in the URL). Returns Ok(None) when this gateway
+/// does not expose the endpoint, or will not report it for this key — so the UI
+/// can say "not available here" instead of showing an error. The Bearer key is
+/// attached here only.
+pub async fn key_info(base: &str, key: &str) -> AppResult<Option<KeyUsage>> {
+    let url = format!("{}/key/info", crate::config::normalize_base(base));
+    let resp = CLIENT
+        .get(&url)
+        .bearer_auth(key)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(AppError::from)?;
+    let status = resp.status();
+    // endpoint missing / disabled / needs admin rights to read → "not available", not an error
+    if matches!(status.as_u16(), 400 | 403 | 404 | 405 | 501) {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(AppError::from_status(status.as_u16(), &redact_secret(&text, Some(key))));
+    }
+    let v: serde_json::Value = resp.json().await.map_err(AppError::from)?;
+    let info = v.get("info").filter(|i| i.is_object()).unwrap_or(&v);
+    Ok(Some(parse_key_usage(info)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_key_usage_from_info_envelope() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"key":"sk-x","info":{"key_alias":"docask","spend":1.25,"max_budget":10.0,
+                "tpm_limit":1000,"rpm_limit":60,"models":["gpt-4o","claude"],"budget_duration":"30d"}}"#,
+        )
+        .unwrap();
+        let info = v.get("info").unwrap();
+        let u = parse_key_usage(info);
+        assert_eq!(u.key_alias.as_deref(), Some("docask"));
+        assert_eq!(u.spend, Some(1.25));
+        assert_eq!(u.max_budget, Some(10.0));
+        assert_eq!(u.tpm_limit, Some(1000));
+        assert_eq!(u.models, vec!["gpt-4o", "claude"]);
+        assert_eq!(u.soft_budget, None);
+    }
+
+    #[test]
+    fn parses_key_usage_with_nulls_and_empty() {
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"spend":0,"max_budget":null,"key_alias":"","models":null}"#).unwrap();
+        let u = parse_key_usage(&v);
+        assert_eq!(u.spend, Some(0.0));
+        assert_eq!(u.max_budget, None);
+        assert_eq!(u.key_alias, None); // empty string treated as absent
+        assert!(u.models.is_empty());
+    }
 
     #[test]
     fn parses_sse() {

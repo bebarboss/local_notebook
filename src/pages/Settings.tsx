@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft, FolderOpen, Download } from "lucide-react";
 import { api } from "../lib/api";
-import type { UpdateInfo, AppInfo, DownloadProgress, EmbeddingModelId, EmbeddingStatus, EmbedServerInfo, EmbedServerTest, GatewayInfo, ModelConfig, RerankStatus, ThemeMode, FontChoice, TextSize } from "../lib/types";
+import type { UpdateInfo, AppInfo, DownloadProgress, EmbeddingModelId, EmbeddingStatus, EmbedServerInfo, EmbedServerTest, GatewayInfo, KeyUsage, ModelConfig, RerankStatus, ThemeMode, FontChoice, TextSize } from "../lib/types";
 import { th } from "../i18n/th";
 import { formatBytes, useApp, type SettingsSection } from "../state";
 import { ApiKeyField, keyFormatError, ModelList, SecurityNotes, TestTable, useModelTest } from "../components/GatewayForms";
@@ -203,6 +203,7 @@ function GatewaySection() {
           </div>
           <button className="btn" onClick={() => setTesting(true)}>ทดสอบ</button>
         </div>
+        <KeyUsageRow hasKey={gw.hasKey} />
         <ThemeRow />
         <div className="list-row">
           <div className="l"><span className="t">ลบ Provider</span><span className="d">ลบ Key และการตั้งค่าโมเดลออกจากเครื่อง</span></div>
@@ -227,6 +228,68 @@ function GatewaySection() {
         />
       )}
     </section>
+  );
+}
+
+const fmtMoney = (n: number) => `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: n < 1 ? 4 : 2 })}`;
+const fmtNum = (n: number) => n.toLocaleString("th-TH");
+function fmtDate(s: string): string {
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? s : d.toLocaleDateString("th-TH", { day: "numeric", month: "short", year: "numeric" });
+}
+
+/** Usage/budget of the current virtual key, read live from the Gateway (LiteLLM /key/info). */
+function KeyUsageRow({ hasKey }: { hasKey: boolean }) {
+  const [state, setState] = useState<{ loading: boolean; usage?: KeyUsage | null; error?: string }>({ loading: hasKey });
+  const load = () => {
+    if (!hasKey) return;
+    setState({ loading: true });
+    api.gatewayKeyUsage().then((usage) => setState({ loading: false, usage })).catch((e) => setState({ loading: false, error: (e as { message?: string }).message ?? "โหลดไม่ได้" }));
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [hasKey]);
+
+  const u = state.usage;
+  const limits: string[] = [];
+  if (u?.rpmLimit != null) limits.push(`${fmtNum(u.rpmLimit)} ครั้ง/นาที`);
+  if (u?.tpmLimit != null) limits.push(`${fmtNum(u.tpmLimit)} token/นาที`);
+  if (u?.maxParallelRequests != null) limits.push(`${fmtNum(u.maxParallelRequests)} พร้อมกัน`);
+
+  return (
+    <div className="list-row" style={{ alignItems: "flex-start" }}>
+      <div className="l" style={{ gap: 6 }}>
+        <span className="t">การใช้งานของ Key</span>
+        {!hasKey ? (
+          <span className="d">ใส่ Key ก่อนจึงจะดูยอดใช้งานได้</span>
+        ) : state.loading ? (
+          <span className="d">กำลังโหลดจาก Gateway…</span>
+        ) : state.error ? (
+          <span className="d" style={{ color: "var(--warn-text)" }} role="alert">{state.error}</span>
+        ) : u == null ? (
+          <span className="d">Gateway นี้ไม่เปิดให้ดูยอดใช้งานของ Key ( endpoint /key/info ปิดอยู่ หรือ Key ไม่มีสิทธิ์อ่าน) · สอบถามยอดได้จาก Admin</span>
+        ) : (
+          <>
+            {u.spend != null && (
+              <span className="d">
+                ใช้ไป <strong>{fmtMoney(u.spend)}</strong>
+                {u.maxBudget != null ? <> จากงบ {fmtMoney(u.maxBudget)}{u.budgetDuration ? ` ต่อ ${u.budgetDuration}` : ""}</> : " · ไม่จำกัดงบ"}
+              </span>
+            )}
+            {u.spend != null && u.maxBudget != null && u.maxBudget > 0 && (
+              <div style={{ width: "100%", maxWidth: 360, marginTop: 2 }}>
+                <ProgressBar value={Math.min(1, u.spend / u.maxBudget)} label="สัดส่วนงบที่ใช้ไป" />
+              </div>
+            )}
+            {u.budgetResetAt && <span className="d">งบรีเซ็ต {fmtDate(u.budgetResetAt)}</span>}
+            {limits.length > 0 && <span className="d">ลิมิต: {limits.join(" · ")}</span>}
+            {u.expires && <span className="d">Key หมดอายุ {fmtDate(u.expires)}</span>}
+            {u.models.length > 0 && <span className="d">โมเดลที่ Key นี้เข้าถึงได้: {u.models.length} รายการ</span>}
+            {u.keyAlias && <span className="d mono">{u.keyAlias}</span>}
+            {u.spend == null && u.maxBudget == null && limits.length === 0 && <span className="d">Gateway ไม่ได้ส่งรายละเอียดยอดใช้งานมา</span>}
+          </>
+        )}
+      </div>
+      {hasKey && !state.loading && <button className="btn" onClick={load}>รีเฟรช</button>}
+    </div>
   );
 }
 

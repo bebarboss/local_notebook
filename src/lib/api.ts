@@ -34,6 +34,7 @@ import type {
   EmbeddingStatus,
   GatewayInfo,
   GatewayStatus,
+  KeyUsage,
   ImageInfo,
   IndexProgress,
   Message,
@@ -109,6 +110,7 @@ export interface Backend {
   removeProvider(): Promise<void>;
   gatewayStatus(): Promise<GatewayStatus>;
   checkGateway(): Promise<GatewayStatus>;
+  gatewayKeyUsage(): Promise<KeyUsage | null>;
   // models
   listModels(): Promise<ModelConfig[]>;
   saveModels(models: ModelConfig[]): Promise<ModelConfig[]>;
@@ -253,6 +255,7 @@ function createTauriBackend(): Backend {
     removeProvider: () => call("remove_provider"),
     gatewayStatus: () => call("gateway_status"),
     checkGateway: () => call("check_gateway"),
+    gatewayKeyUsage: () => call("gateway_key_usage"),
     listModels: () => call("list_models"),
     saveModels: (models) => call("save_models", { models }),
     resetModels: () => call("reset_models"),

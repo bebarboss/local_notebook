@@ -206,6 +206,16 @@ export function createMockBackend(): Backend {
       emit("gateway-status", status);
       return clone(status);
     },
+    gatewayKeyUsage: async () => {
+      await wait(400);
+      if (!gateway.hasKey) return null;
+      return {
+        keyAlias: "docask-demo", spend: 3.4217, maxBudget: 20, softBudget: null,
+        budgetDuration: "30d", budgetResetAt: new Date(now() + 9 * 86400000).toISOString(),
+        expires: null, tpmLimit: 200000, rpmLimit: 120, maxParallelRequests: null,
+        models: ["gpt-4o", "claude-sonnet", "gemini-1.5-pro"],
+      };
+    },
     listModels: async () => clone(models),
     saveModels: async (m) => { models = clone(m); return clone(models); },
     resetModels: async () => { models = defaultModels(gateway.url); return clone(models); },

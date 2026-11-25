@@ -212,6 +212,21 @@ export interface GatewayInfo {
 
 export type GatewayState = "unknown" | "ok" | "unreachable" | "error";
 
+/** Usage/budget for the current virtual key (LiteLLM `/key/info`). All optional. */
+export interface KeyUsage {
+  keyAlias: string | null;
+  spend: number | null;
+  maxBudget: number | null;
+  softBudget: number | null;
+  budgetDuration: string | null;
+  budgetResetAt: string | null;
+  expires: string | null;
+  tpmLimit: number | null;
+  rpmLimit: number | null;
+  maxParallelRequests: number | null;
+  models: string[];
+}
+
 export interface GatewayStatus {
   state: GatewayState;
   message: string | null;

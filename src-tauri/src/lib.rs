@@ -125,6 +125,7 @@ pub fn run() {
             commands::remove_provider,
             commands::check_gateway,
             commands::gateway_status,
+            commands::gateway_key_usage,
             commands::list_models,
             commands::save_models,
             commands::reset_models,

@@ -231,6 +231,18 @@ pub async fn check_gateway(app: AppHandle) -> AppResult<GatewayStatus> {
     Ok(do_check(&app).await)
 }
 
+/// Usage/budget for the current virtual key, read from the Gateway (LiteLLM `/key/info`).
+/// `Ok(None)` means this gateway does not expose it — the UI shows a "not available" note.
+#[tauri::command]
+pub async fn gateway_key_usage(app: AppHandle) -> AppResult<Option<llm::KeyUsage>> {
+    let base = app.state::<AppState>().gateway.lock().base();
+    let key = match secrets::get_key()? {
+        Some(k) => k,
+        None => return Err(AppError::no_key()),
+    };
+    llm::key_info(&base, &key).await
+}
+
 #[tauri::command]
 pub async fn gateway_status(app: AppHandle) -> AppResult<GatewayStatus> {
     let cached = app.state::<AppState>().status.lock().clone();
