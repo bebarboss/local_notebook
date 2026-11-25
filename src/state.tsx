@@ -14,7 +14,7 @@ export type Page =
 /** Top-level workspace, like Claude desktop's Claude ↔ Claude Code switch. */
 export type AppMode = "docs" | "chat" | "code";
 
-export type SettingsSection = "gateway" | "models" | "embedding" | "search" | "history" | "code" | "theme" | "startup" | "trouble" | "about";
+export type SettingsSection = "gateway" | "usage" | "models" | "embedding" | "search" | "history" | "code" | "theme" | "startup" | "trouble" | "about";
 
 /** An in-flight generation, kept at app level (keyed by chatId) so it survives page changes:
  * the background job keeps running and its events land here even when the chat page is unmounted. */

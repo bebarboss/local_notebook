@@ -249,6 +249,19 @@ pub async fn gateway_key_usage(app: AppHandle) -> AppResult<Option<llm::KeyUsage
     llm::key_info(&base, &key).await
 }
 
+/// Per-day spend/tokens/requests + per-model breakdown over a date range (LiteLLM /user/daily/activity).
+/// `start_date`/`end_date` are YYYY-MM-DD, computed on the frontend from the user's clock.
+/// `Ok(None)` means the gateway does not expose the endpoint for this key.
+#[tauri::command]
+pub async fn gateway_key_activity(app: AppHandle, start_date: String, end_date: String) -> AppResult<Option<llm::KeyActivity>> {
+    let base = app.state::<AppState>().gateway.lock().base();
+    let key = match secrets::get_key()? {
+        Some(k) => k,
+        None => return Err(AppError::no_key()),
+    };
+    llm::key_activity(&base, &key, &start_date, &end_date).await
+}
+
 #[tauri::command]
 pub async fn gateway_status(app: AppHandle) -> AppResult<GatewayStatus> {
     let cached = app.state::<AppState>().status.lock().clone();

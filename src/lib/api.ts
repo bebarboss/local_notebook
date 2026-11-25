@@ -37,6 +37,7 @@ import type {
   GatewayInfo,
   GatewayStatus,
   KeyUsage,
+  KeyActivity,
   ImageInfo,
   IndexProgress,
   Message,
@@ -117,6 +118,7 @@ export interface Backend {
   gatewayStatus(): Promise<GatewayStatus>;
   checkGateway(): Promise<GatewayStatus>;
   gatewayKeyUsage(): Promise<KeyUsage | null>;
+  gatewayKeyActivity(startDate: string, endDate: string): Promise<KeyActivity | null>;
   // models
   listModels(): Promise<ModelConfig[]>;
   saveModels(models: ModelConfig[]): Promise<ModelConfig[]>;
@@ -264,6 +266,7 @@ function createTauriBackend(): Backend {
     gatewayStatus: () => call("gateway_status"),
     checkGateway: () => call("check_gateway"),
     gatewayKeyUsage: () => call("gateway_key_usage"),
+    gatewayKeyActivity: (startDate, endDate) => call("gateway_key_activity", { startDate, endDate }),
     listModels: () => call("list_models"),
     saveModels: (models) => call("save_models", { models }),
     resetModels: () => call("reset_models"),

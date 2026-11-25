@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft, FolderOpen, Download } from "lucide-react";
 import { api } from "../lib/api";
-import type { UpdateInfo, AppInfo, DownloadProgress, EmbeddingModelId, EmbeddingStatus, EmbedServerInfo, EmbedServerTest, GatewayInfo, ModelConfig, RerankStatus, ThemeMode, FontChoice, TextSize } from "../lib/types";
+import type { UpdateInfo, AppInfo, DownloadProgress, EmbeddingModelId, EmbeddingStatus, EmbedServerInfo, EmbedServerTest, GatewayInfo, KeyUsage, KeyActivity, ModelConfig, RerankStatus, ThemeMode, FontChoice, TextSize } from "../lib/types";
 import { th } from "../i18n/th";
 import { formatBytes, useApp, type SettingsSection } from "../state";
 import { ApiKeyField, keyFormatError, ModelList, SecurityNotes, TestTable, useModelTest } from "../components/GatewayForms";
@@ -13,6 +13,7 @@ import { UpdateDialog } from "../components/UpdateDialog";
 
 const SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: "gateway", label: "Gateway และ Key" },
+  { id: "usage", label: "การใช้งาน" },
   { id: "models", label: "โมเดล" },
   { id: "embedding", label: "Embedding และ Index" },
   { id: "search", label: "การค้นหา" },
@@ -43,6 +44,7 @@ export default function SettingsPage({ section = "gateway" }: { section?: Settin
           </nav>
           <div className="settings-main">
             {cur === "gateway" && <GatewaySection />}
+            {cur === "usage" && <UsageSection />}
             {cur === "models" && <ModelsSection />}
             {cur === "embedding" && <EmbeddingSection />}
             {cur === "search" && <SearchSection />}
@@ -228,6 +230,151 @@ function GatewaySection() {
       )}
     </section>
   );
+}
+
+// ---- Usage (การใช้งาน): budget + LiteLLM /user/daily/activity dashboard ----
+const usdFull = (n: number) => `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: n < 1 ? 4 : 2 })}`;
+function compact(n: number): string {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+  return String(Math.round(n));
+}
+function ymd(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+const MODEL_COLORS = ["#3B82F6", "#F59E0B", "#22C55E", "#A855F7", "#EC4899", "#14B8A6", "#EF4444", "#64748B"];
+const RANGES = [{ v: 1, l: "วันนี้" }, { v: 7, l: "7 วัน" }, { v: 30, l: "30 วัน" }, { v: 90, l: "90 วัน" }] as const;
+type Metric = "spend" | "tokens" | "requests";
+const METRICS: { v: Metric; l: string }[] = [{ v: "spend", l: "ค่าใช้จ่าย" }, { v: "tokens", l: "Tokens" }, { v: "requests", l: "Requests" }];
+
+function UsageSection() {
+  const [days, setDays] = useState(7);
+  const [metric, setMetric] = useState<Metric>("spend");
+  const [budget, setBudget] = useState<KeyUsage | null>(null);
+  const [act, setAct] = useState<{ loading: boolean; data?: KeyActivity | null; error?: string }>({ loading: true });
+
+  useEffect(() => { api.gatewayKeyUsage().then(setBudget).catch(() => setBudget(null)); }, []);
+  const load = () => {
+    setAct({ loading: true });
+    const end = new Date();
+    const start = new Date(end.getTime() - (days - 1) * 86400000);
+    api.gatewayKeyActivity(ymd(start), ymd(end))
+      .then((data) => setAct({ loading: false, data }))
+      .catch((e) => setAct({ loading: false, error: (e as { message?: string }).message ?? "โหลดไม่ได้" }));
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [days]);
+
+  const a = act.data;
+  const mv = (x: { spend: number; totalTokens: number; requests: number }) => (metric === "spend" ? x.spend : metric === "tokens" ? x.totalTokens : x.requests);
+  const fmtMetric = (n: number) => (metric === "spend" ? usdFull(n) : compact(n));
+  const peak = a ? Math.max(1e-9, ...a.daily.map(mv)) : 1;
+  const modelTotal = a ? Math.max(1e-9, a.models.reduce((s, m) => s + mv(m), 0)) : 1;
+
+  return (
+    <section>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <h2 style={{ margin: 0 }}>การใช้งาน</h2>
+        <button className="btn" onClick={load} disabled={act.loading}>{act.loading ? "กำลังโหลด…" : "รีเฟรช"}</button>
+      </div>
+
+      {budget && budget.spend != null && (
+        <div className="list-card" style={{ padding: 16, marginTop: 14 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 24, fontWeight: 700 }}>{usdFull(budget.spend)}</span>
+            {budget.maxBudget != null && <span className="muted">/ {usdFull(budget.maxBudget)}{budget.budgetDuration ? ` ต่อ ${budget.budgetDuration}` : ""}</span>}
+          </div>
+          {budget.maxBudget != null && budget.maxBudget > 0 && (
+            <div style={{ marginTop: 8 }}><ProgressBar value={Math.min(1, budget.spend / budget.maxBudget)} label="สัดส่วนงบที่ใช้ไป" /></div>
+          )}
+          {budget.budgetResetAt && <span className="d" style={{ marginTop: 6, display: "block" }}>งบรีเซ็ต {fmtDateTime(budget.budgetResetAt)}</span>}
+        </div>
+      )}
+
+      <div className="seg-tabs" role="tablist" aria-label="ช่วงเวลา" style={{ marginTop: 16 }}>
+        {RANGES.map((r) => (
+          <button key={r.v} role="tab" aria-selected={days === r.v} className={days === r.v ? "on" : ""} onClick={() => setDays(r.v)}>{r.l}</button>
+        ))}
+      </div>
+
+      {act.loading ? (
+        <Skeleton h={320} style={{ borderRadius: 14, marginTop: 14 }} />
+      ) : act.error ? (
+        <div className="list-card" style={{ padding: 16, marginTop: 14 }}><span className="d" style={{ color: "var(--warn-text)" }}>{act.error}</span></div>
+      ) : !a ? (
+        <div className="list-card" style={{ padding: 16, marginTop: 14 }}>
+          <span className="d">Gateway นี้ไม่เปิดให้ดูสถิติการใช้งานรายวัน (endpoint <span className="mono">/user/daily/activity</span> ปิดอยู่ หรือ Key ไม่มีสิทธิ์) · ดูยอดรวมได้ที่ด้านบน</span>
+        </div>
+      ) : (
+        <>
+          <div className="usage-cards" style={{ marginTop: 14 }}>
+            <StatCard label="ค่าใช้จ่าย" value={usdFull(a.total.spend)} />
+            <StatCard label="Tokens ทั้งหมด" value={compact(a.total.totalTokens)} />
+            <StatCard label="Input / Output" value={`${compact(a.total.promptTokens)} / ${compact(a.total.completionTokens)}`} />
+            <StatCard label="Requests" value={a.total.requests.toLocaleString("th-TH")} />
+          </div>
+
+          <div className="seg-tabs sm" role="tablist" aria-label="ตัวชี้วัด" style={{ marginTop: 16 }}>
+            {METRICS.map((m) => (
+              <button key={m.v} role="tab" aria-selected={metric === m.v} className={metric === m.v ? "on" : ""} onClick={() => setMetric(m.v)}>{m.l}</button>
+            ))}
+          </div>
+
+          <div className="list-card" style={{ padding: 16, marginTop: 10 }}>
+            <div className="usage-h">รายวัน</div>
+            {a.daily.length === 0 ? (
+              <span className="d">ไม่มีข้อมูลในช่วงนี้</span>
+            ) : (
+              <div className="bar-chart" style={{ ["--peak" as string]: peak }}>
+                {a.daily.map((d) => (
+                  <div key={d.date} className="bar-col" title={`${d.date} · ${fmtMetric(mv(d))}`}>
+                    <div className="bar-fill" style={{ height: `${Math.max(2, (mv(d) / peak) * 100)}%` }} />
+                    <span className="bar-x">{d.date.slice(5)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {a.models.length > 0 && (
+            <div className="list-card" style={{ padding: 16, marginTop: 12 }}>
+              <div className="usage-h">สัดส่วนตามโมเดล</div>
+              <div className="share-bar">
+                {a.models.map((m, i) => {
+                  const pct = (mv(m) / modelTotal) * 100;
+                  return pct > 0 ? <div key={m.model} style={{ width: `${pct}%`, background: MODEL_COLORS[i % MODEL_COLORS.length] }} title={`${m.model} · ${pct.toFixed(1)}%`} /> : null;
+                })}
+              </div>
+              <div className="share-list">
+                {a.models.map((m, i) => (
+                  <div key={m.model} className="share-row">
+                    <span className="share-dot" style={{ background: MODEL_COLORS[i % MODEL_COLORS.length] }} />
+                    <span className="share-name mono">{m.model}</span>
+                    <span className="share-pct">{((mv(m) / modelTotal) * 100).toFixed(1)}%</span>
+                    <span className="share-val">{usdFull(m.spend)} · {compact(m.totalTokens)} tok · {m.requests.toLocaleString("th-TH")} req</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function StatCard({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="stat-card">
+      <span className="stat-label">{label}</span>
+      <span className="stat-value">{value}</span>
+    </div>
+  );
+}
+
+function fmtDateTime(s: string): string {
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? s : d.toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" });
 }
 
 /** Enter a new key and re-test without redoing the 6 models. */

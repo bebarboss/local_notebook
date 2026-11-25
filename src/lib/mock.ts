@@ -217,6 +217,29 @@ export function createMockBackend(): Backend {
         models: ["gpt-4o", "claude-sonnet", "gemini-1.5-pro"],
       };
     },
+    gatewayKeyActivity: async (startDate, endDate) => {
+      await wait(400);
+      if (!gateway.hasKey) return null;
+      const d0 = new Date(startDate), d1 = new Date(endDate);
+      const days = Math.max(1, Math.round((d1.getTime() - d0.getTime()) / 86400000) + 1);
+      const daily = Array.from({ length: Math.min(days, 30) }, (_, i) => {
+        const dt = new Date(d0.getTime() + i * 86400000);
+        const spend = 0.5 + Math.random() * 4;
+        return { date: dt.toISOString().slice(0, 10), spend, totalTokens: Math.round(spend * 700000), requests: Math.round(spend * 25) };
+      });
+      const sum = (f: (x: typeof daily[number]) => number) => daily.reduce((a, x) => a + f(x), 0);
+      const totalTokens = sum((x) => x.totalTokens), requests = sum((x) => x.requests), spend = sum((x) => x.spend);
+      return {
+        total: { spend, promptTokens: Math.round(totalTokens * 0.96), completionTokens: Math.round(totalTokens * 0.04), totalTokens, requests, successfulRequests: requests, failedRequests: 0 },
+        daily,
+        models: [
+          { model: "gw/godev1", spend: spend * 0.556, totalTokens: Math.round(totalTokens * 0.2), requests: Math.round(requests * 0.6) },
+          { model: "gw/gothink1", spend: spend * 0.311, totalTokens: Math.round(totalTokens * 0.6), requests: Math.round(requests * 0.26) },
+          { model: "gw/godev2", spend: spend * 0.132, totalTokens: Math.round(totalTokens * 0.19), requests: Math.round(requests * 0.13) },
+          { model: "gw/gothink2", spend: spend * 0.001, totalTokens: Math.round(totalTokens * 0.01), requests: Math.round(requests * 0.01) },
+        ],
+      };
+    },
     listModels: async () => clone(models),
     saveModels: async (m) => { models = clone(m); return clone(models); },
     resetModels: async () => { models = defaultModels(gateway.url); return clone(models); },

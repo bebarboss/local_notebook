@@ -220,6 +220,34 @@ export interface GatewayInfo {
 
 export type GatewayState = "unknown" | "ok" | "unreachable" | "error";
 
+/** aggregated usage over a date range (LiteLLM /user/daily/activity) */
+export interface KeyActivity {
+  total: ActivityMetrics;
+  daily: DayActivity[];
+  models: ModelActivity[];
+}
+export interface ActivityMetrics {
+  spend: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  requests: number;
+  successfulRequests: number;
+  failedRequests: number;
+}
+export interface DayActivity {
+  date: string;
+  spend: number;
+  totalTokens: number;
+  requests: number;
+}
+export interface ModelActivity {
+  model: string;
+  spend: number;
+  totalTokens: number;
+  requests: number;
+}
+
 /** Usage/budget for the current virtual key (LiteLLM `/key/info`). All optional. */
 export interface KeyUsage {
   keyAlias: string | null;

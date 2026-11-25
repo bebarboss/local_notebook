@@ -262,6 +262,29 @@ code { font-family: var(--mono); font-size: 12.5px; background: var(--code); col
 .usage-chip-val { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
 .usage-bar { height: 5px; border-radius: 3px; background: var(--border); overflow: hidden; }
 .usage-bar > div { height: 100%; background: var(--accent, #3B6FE0); border-radius: 3px; }
+/* Usage dashboard (Settings › การใช้งาน) */
+.seg-tabs { display: inline-flex; gap: 2px; padding: 3px; background: var(--code); border: 1px solid var(--border); border-radius: 10px; flex-wrap: wrap; }
+.seg-tabs button { padding: 6px 14px; border: none; background: none; color: var(--muted); font-size: 13px; font-weight: 600; border-radius: 7px; cursor: pointer; }
+.seg-tabs button.on { background: var(--accent, #3B6FE0); color: #fff; }
+.seg-tabs.sm button { padding: 5px 11px; font-size: 12px; }
+.usage-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.stat-card { display: flex; flex-direction: column; gap: 4px; padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.stat-label { font-size: 12px; color: var(--muted); }
+.stat-value { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.usage-h { font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 12px; }
+.bar-chart { display: flex; align-items: flex-end; gap: 6px; height: 160px; }
+.bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; min-width: 0; }
+.bar-fill { width: 100%; max-width: 54px; background: var(--accent, #3B6FE0); border-radius: 5px 5px 0 0; transition: height .25s; }
+.bar-col:hover .bar-fill { opacity: .82; }
+.bar-x { font-size: 10px; color: var(--muted); margin-top: 6px; white-space: nowrap; }
+.share-bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: var(--border); }
+.share-bar > div { min-width: 2px; }
+.share-list { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+.share-row { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap; }
+.share-dot { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.share-name { font-weight: 600; }
+.share-pct { color: var(--muted); min-width: 44px; }
+.share-val { color: var(--muted); margin-left: auto; }
 .avatar {
   width: 32px; height: 32px; border-radius: 50%; background: var(--avatar); color: var(--text-2);
   font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; flex: none;

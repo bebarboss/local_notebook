@@ -37,7 +37,7 @@ function KeyUsageWidget() {
     u.keyAlias,
   ].filter(Boolean).join(" · ");
   return (
-    <button className="usage-chip" title={tip || undefined} onClick={() => go({ name: "settings", section: "gateway" })} aria-label="การใช้งานของ Key">
+    <button className="usage-chip" title={tip || undefined} onClick={() => go({ name: "settings", section: "usage" })} aria-label="การใช้งานของ Key">
       <div className="usage-chip-top">
         <span>การใช้งาน Key</span>
         <span className="usage-chip-val">{money(spend)}{u.maxBudget != null ? ` / ${money(u.maxBudget)}` : ""}</span>

@@ -330,6 +330,147 @@ pub async fn key_info(base: &str, key: &str) -> AppResult<Option<KeyUsage>> {
     Ok(Some(parse_key_usage(info)))
 }
 
+/// Spend/token/request totals for a period (or one day, or one model). Mirrors LiteLLM's SpendMetrics.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityMetrics {
+    pub spend: f64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub requests: i64,
+    pub successful_requests: i64,
+    pub failed_requests: i64,
+}
+
+impl ActivityMetrics {
+    fn add(&mut self, m: &serde_json::Value) {
+        let f = |k: &str| m.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let i = |k: &str| m.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+        self.spend += f("spend");
+        self.prompt_tokens += i("prompt_tokens");
+        self.completion_tokens += i("completion_tokens");
+        self.total_tokens += i("total_tokens");
+        self.requests += i("api_requests");
+        self.successful_requests += i("successful_requests");
+        self.failed_requests += i("failed_requests");
+    }
+}
+
+/// One day's spend/tokens/requests, for the daily chart.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayActivity {
+    pub date: String,
+    pub spend: f64,
+    pub total_tokens: i64,
+    pub requests: i64,
+}
+
+/// One model's share of the period's spend/tokens/requests.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelActivity {
+    pub model: String,
+    pub spend: f64,
+    pub total_tokens: i64,
+    pub requests: i64,
+}
+
+/// Aggregated usage over a date range: period totals, a per-day series, and a per-model breakdown.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyActivity {
+    pub total: ActivityMetrics,
+    pub daily: Vec<DayActivity>,
+    pub models: Vec<ModelActivity>,
+}
+
+/// GET /user/daily/activity — per-day spend/tokens/requests with a per-model breakdown, aggregated
+/// client-side over the whole range (LiteLLM paginates by DB row, not by day, and its page totals
+/// cover only that page, so we sum the rows ourselves across pages). `start`/`end` are YYYY-MM-DD.
+/// Returns Ok(None) when the gateway does not expose the endpoint for this key. Bearer key only.
+pub async fn key_activity(base: &str, key: &str, start: &str, end: &str) -> AppResult<Option<KeyActivity>> {
+    let base = crate::config::normalize_base(base);
+    let mut total = ActivityMetrics::default();
+    let mut per_day: Vec<DayActivity> = Vec::new();
+    let mut per_model: std::collections::HashMap<String, ActivityMetrics> = std::collections::HashMap::new();
+    let mut page = 1u32;
+    loop {
+        let url = format!("{base}/user/daily/activity?start_date={start}&end_date={end}&page={page}&page_size=1000");
+        let resp = CLIENT.get(&url).bearer_auth(key).timeout(Duration::from_secs(20)).send().await.map_err(AppError::from)?;
+        let status = resp.status();
+        if matches!(status.as_u16(), 400 | 403 | 404 | 405 | 501) {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(AppError::from_status(status.as_u16(), &redact_secret(&text, Some(key))));
+        }
+        let v: serde_json::Value = resp.json().await.map_err(AppError::from)?;
+        let results = v.get("results").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+        fold_results(&results, &mut total, &mut per_day, &mut per_model);
+        let has_more = v.pointer("/metadata/has_more").and_then(|h| h.as_bool()).unwrap_or(false);
+        if !has_more || results.is_empty() || page >= 50 {
+            break;
+        }
+        page += 1;
+    }
+    Ok(Some(finalize_activity(total, per_day, per_model)))
+}
+
+/// Accumulate one page's `results` (days) into the running totals, per-day list and per-model map.
+fn fold_results(
+    results: &[serde_json::Value],
+    total: &mut ActivityMetrics,
+    per_day: &mut Vec<DayActivity>,
+    per_model: &mut std::collections::HashMap<String, ActivityMetrics>,
+) {
+    for day in results {
+        let Some(metrics) = day.get("metrics") else { continue };
+        total.add(metrics);
+        per_day.push(DayActivity {
+            date: day.get("date").and_then(|d| d.as_str()).unwrap_or("").to_string(),
+            spend: metrics.get("spend").and_then(|x| x.as_f64()).unwrap_or(0.0),
+            total_tokens: metrics.get("total_tokens").and_then(|x| x.as_i64()).unwrap_or(0),
+            requests: metrics.get("api_requests").and_then(|x| x.as_i64()).unwrap_or(0),
+        });
+        if let Some(models) = day.pointer("/breakdown/models").and_then(|m| m.as_object()) {
+            for (name, data) in models {
+                if let Some(m) = data.get("metrics") {
+                    per_model.entry(name.clone()).or_default().add(m);
+                }
+            }
+        }
+    }
+}
+
+/// Merge same-date rows (one date can span two pages under row-based paging), sort models by spend.
+fn finalize_activity(
+    total: ActivityMetrics,
+    mut per_day: Vec<DayActivity>,
+    per_model: std::collections::HashMap<String, ActivityMetrics>,
+) -> KeyActivity {
+    per_day.sort_by(|a, b| a.date.cmp(&b.date));
+    let mut daily: Vec<DayActivity> = Vec::new();
+    for d in per_day {
+        match daily.last_mut() {
+            Some(last) if last.date == d.date => {
+                last.spend += d.spend;
+                last.total_tokens += d.total_tokens;
+                last.requests += d.requests;
+            }
+            _ => daily.push(d),
+        }
+    }
+    let mut models: Vec<ModelActivity> = per_model
+        .into_iter()
+        .map(|(model, m)| ModelActivity { model, spend: m.spend, total_tokens: m.total_tokens, requests: m.requests })
+        .collect();
+    models.sort_by(|a, b| b.spend.partial_cmp(&a.spend).unwrap_or(std::cmp::Ordering::Equal));
+    KeyActivity { total, daily, models }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +501,40 @@ mod tests {
         assert_eq!(u.max_budget, None);
         assert_eq!(u.key_alias, None); // empty string treated as absent
         assert!(u.models.is_empty());
+    }
+
+    #[test]
+    fn aggregates_daily_activity_across_days_and_models() {
+        // two days, model breakdown; a duplicate date (as row-based paging can produce) must merge
+        let results: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[
+              {"date":"2026-11-24","metrics":{"spend":2.0,"total_tokens":100,"api_requests":5},
+               "breakdown":{"models":{"gw/godev1":{"metrics":{"spend":1.5,"total_tokens":80,"api_requests":4}},
+                                      "gw/gothink1":{"metrics":{"spend":0.5,"total_tokens":20,"api_requests":1}}}}},
+              {"date":"2026-11-25","metrics":{"spend":3.0,"total_tokens":200,"api_requests":7},
+               "breakdown":{"models":{"gw/godev1":{"metrics":{"spend":3.0,"total_tokens":200,"api_requests":7}}}}},
+              {"date":"2026-11-25","metrics":{"spend":1.0,"total_tokens":50,"api_requests":2},
+               "breakdown":{"models":{"gw/godev1":{"metrics":{"spend":1.0,"total_tokens":50,"api_requests":2}}}}}
+            ]"#,
+        )
+        .unwrap();
+        let mut total = ActivityMetrics::default();
+        let mut per_day = Vec::new();
+        let mut per_model = std::collections::HashMap::new();
+        fold_results(&results, &mut total, &mut per_day, &mut per_model);
+        let a = finalize_activity(total, per_day, per_model);
+        assert_eq!(a.total.spend, 6.0);
+        assert_eq!(a.total.total_tokens, 350);
+        assert_eq!(a.total.requests, 14);
+        // the two 11-25 rows merged into one day
+        assert_eq!(a.daily.len(), 2);
+        assert_eq!(a.daily[0].date, "2026-11-24");
+        assert_eq!(a.daily[1].date, "2026-11-25");
+        assert_eq!(a.daily[1].spend, 4.0);
+        // models sorted by spend desc: godev1 (5.5) before gothink1 (0.5)
+        assert_eq!(a.models[0].model, "gw/godev1");
+        assert_eq!(a.models[0].spend, 5.5);
+        assert_eq!(a.models[1].model, "gw/gothink1");
     }
 
     #[test]
