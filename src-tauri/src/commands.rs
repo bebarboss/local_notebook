@@ -987,7 +987,7 @@ impl AskJob {
                 let agent = CodeAgent { model: &self.model, key: self.key.as_str(), effort: None, tools_max: self.model.max_output_tokens, ws, extra_allow: &self.code_commands };
                 let (rid, cid, app2) = (self.request_id.clone(), self.chat_id.clone(), self.app.clone());
                 let mut collected: Vec<crate::agent::Step> = Vec::new();
-                let (items, answer_text) = crate::coding::edit_codebase(&agent, &self.question, self.now.as_deref(), &self.token, |step| {
+                let (items, answer_text, stop) = crate::coding::edit_codebase(&agent, &self.question, self.now.as_deref(), &self.token, |step| {
                     let _ = app2.emit("chat-step", ChatEvent { request_id: rid.clone(), chat_id: cid.clone(), data: StepEvent { step: step.clone() } });
                     collected.push(step);
                 })
@@ -997,8 +997,9 @@ impl AskJob {
                 self.emit("chat-changes", CodeChangesEvent { root: changeset.root.clone(), changes: changeset.items.clone() });
                 self.changes = (!changeset.items.is_empty()).then_some(changeset.clone());
                 if answer_text.trim().is_empty() {
-                    // the loop ended without a summary (hit a limit/cancel) — ask for one from the files changed
-                    let messages = build_code_prompt(&self.history, self.summary.as_deref(), self.now.as_deref(), &changeset, &self.question);
+                    // the loop ended without a summary (hit a limit/cancel/error) — ask for one from the
+                    // files changed, passing the real stop reason so the model states it instead of guessing
+                    let messages = build_code_prompt(&self.history, self.summary.as_deref(), self.now.as_deref(), &changeset, &self.question, stop.as_deref());
                     self.answer(messages, Vec::new(), started).await;
                 } else {
                     self.deliver(&answer_text, started);
@@ -1634,10 +1635,11 @@ pub fn build_web_prompt(history: &[(String, String)], summary: Option<&str>, att
 /// Coding summary prompt: used only when the coding loop ended without its own final text (hit a
 /// limit/cancel). Asks the model to summarize the files it changed. The normal path delivers the
 /// loop's own last message instead.
-pub fn build_code_prompt(history: &[(String, String)], summary: Option<&str>, now: Option<&str>, changeset: &crate::codefs::Changeset, question: &str) -> Vec<ChatMessage> {
+pub fn build_code_prompt(history: &[(String, String)], summary: Option<&str>, now: Option<&str>, changeset: &crate::codefs::Changeset, question: &str, stop: Option<&str>) -> Vec<ChatMessage> {
     let mut system = String::from(
         "คุณเพิ่งพยายามแก้โค้ดในโปรเจคของผู้ใช้ตามคำขอ ด้านล่างคือรายการไฟล์ที่เปลี่ยน\n\
          - สรุปสั้น ๆ ว่าแก้อะไรไปบ้าง และถ้าทำไม่ครบให้บอกตรง ๆ ว่าติดอะไร ตอบเป็นภาษาเดียวกับคำขอ\n\
+         - ถ้ามีบรรทัด \"เหตุที่หยุด\" ให้บอกเหตุนั้นตรง ๆ ตามที่ระบุ ห้ามเดาสาเหตุอื่นเอง (เช่น อย่าบอกว่าเขียนไฟล์ล้มเหลวถ้ารายการไฟล์ที่เปลี่ยนเป็นค่าว่าง = ยังไม่เคยพยายามเขียน) · ถ้าเหตุคือ Gateway ให้บอกผู้ใช้ลองส่งคำสั่งใหม่อีกครั้ง\n\
          - เตือนให้ผู้ใช้ตรวจ diff ก่อนใช้ (มีปุ่มย้อนกลับถ้าไม่ต้องการ)\n\
          - ใช้ **ตัวหนา** กับชื่อไฟล์ได้ อย่าแปะเนื้อไฟล์ทั้งหมดซ้ำ",
     );
@@ -1659,6 +1661,9 @@ pub fn build_code_prompt(history: &[(String, String)], summary: Option<&str>, no
     for c in &changeset.items {
         let act = if c.kind == "create" { "สร้าง" } else { "แก้" };
         user.push_str(&format!("- {act} {}\n", c.path));
+    }
+    if let Some(reason) = stop {
+        user.push_str(&format!("\nเหตุที่หยุด: {reason}\n"));
     }
     msgs.push(ChatMessage::new("user", user));
     msgs

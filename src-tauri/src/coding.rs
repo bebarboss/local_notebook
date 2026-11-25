@@ -17,8 +17,10 @@ use tokio_util::sync::CancellationToken;
 pub const MAX_ROUNDS: usize = 16;
 /// Wall-clock budget for a whole coding turn.
 pub const TIME_BUDGET: Duration = Duration::from_secs(180);
-/// Each Gateway round's own timeout (code replies can be long).
-pub const PER_CALL: Duration = Duration::from_secs(60);
+/// Each Gateway round's own timeout. Code replies can be long, and a round that feeds a whole file
+/// back to a reasoning model is slow — 60s was tight enough to time out mid-turn on big files and
+/// get mis-reported as "can't reach Gateway". The whole turn is still bounded by TIME_BUDGET.
+pub const PER_CALL: Duration = Duration::from_secs(120);
 /// Most files a single turn may change.
 pub const MAX_FILES: usize = 40;
 /// A tool result shown back to the model is trimmed to this many characters per call.
@@ -191,29 +193,37 @@ impl Changes {
 }
 
 /// Run the bounded coding loop. Emits a `Step` per action for the live activity list. Returns the
-/// files changed and the model's final summary text (its last turn with no tool calls). Never
-/// errors: any trouble ends the loop and returns what was done so far.
+/// files changed, the model's final summary text (its last turn with no tool calls), and — when the
+/// loop ended abnormally without that summary — a short Thai reason why it stopped, so the caller's
+/// fallback can state it accurately instead of letting the model guess (e.g. blaming a "silent write
+/// failure" when the real cause was a Gateway timeout and nothing was ever written). Never errors:
+/// any trouble ends the loop and returns what was done so far.
 pub async fn edit_codebase<B: CodeBackend>(
     backend: &B,
     question: &str,
     now: Option<&str>,
     cancel: &CancellationToken,
     mut on_step: impl FnMut(Step),
-) -> (Vec<CodeChange>, String) {
+) -> (Vec<CodeChange>, String, Option<String>) {
     let tools = tools_schema();
     let mut messages = initial_messages(question, now);
     let mut changes = Changes::default();
     let mut final_text = String::new();
+    let mut stop: Option<String> = None;
     let start = Instant::now();
 
     for _ in 0..MAX_ROUNDS {
-        if cancel.is_cancelled() || start.elapsed() > TIME_BUDGET {
+        if cancel.is_cancelled() {
+            break;
+        }
+        if start.elapsed() > TIME_BUDGET {
+            stop = Some("หมดเวลารวมที่กำหนดสำหรับงานนี้".into());
             break;
         }
         let reply = tokio::select! {
             r = backend.complete(&messages, &tools) => match r {
                 Ok(r) => r,
-                Err(e) => { on_step(step("error", e.code.clone())); break; }
+                Err(e) => { on_step(step("error", e.code.clone())); stop = Some(stop_reason_for(&e)); break; }
             },
             _ = cancel.cancelled() => break,
         };
@@ -251,7 +261,22 @@ pub async fn edit_codebase<B: CodeBackend>(
             push(&mut messages, json!({"role": "tool", "tool_call_id": tc.id, "content": result}));
         }
     }
-    (changes.into_vec(), final_text)
+    // ran out of rounds while still calling tools (no clean summary, no earlier stop reason)
+    if final_text.trim().is_empty() && stop.is_none() && !cancel.is_cancelled() {
+        stop = Some(format!("ทำครบ {MAX_ROUNDS} รอบสูงสุดแล้วแต่งานยังไม่จบ"));
+    }
+    (changes.into_vec(), final_text, stop)
+}
+
+/// A short Thai reason for an aborted round, so the fallback summary is honest about the cause. A
+/// timeout maps to `gateway_unreachable`, so we say "can't reach / too slow" and rule out a write
+/// problem (the loop may have stopped before ever trying to write).
+fn stop_reason_for(e: &crate::errors::AppError) -> String {
+    if e.is_unreachable() {
+        "หยุดกลางคันเพราะต่อ Gateway ไม่ได้ หรือ Gateway ตอบช้าเกินกำหนด — ไม่ใช่ปัญหาการเขียนไฟล์".into()
+    } else {
+        format!("หยุดกลางคันเพราะ Gateway ขัดข้อง ({})", e.code)
+    }
 }
 
 /// Execute one tool call; returns the text result for the model and the step to emit (if any).
@@ -370,9 +395,11 @@ mod tests {
         async fn complete(&self, _m: &Value, _t: &Value) -> crate::errors::AppResult<Reply> {
             *self.calls.borrow_mut() += 1;
             let r = self.replies.borrow_mut().remove(0);
-            // a scripted Gateway-round failure (mirrors complete_tools returning Err)
+            // a scripted Gateway-round failure (mirrors complete_tools returning Err). Uses the
+            // unreachable/timeout variant — the realistic mid-loop failure when a big file read makes
+            // the next round too slow.
             if r.content == "__ERR__" {
-                return Err(crate::errors::AppError::new("http_500", "boom"));
+                return Err(crate::errors::AppError::unreachable());
             }
             Ok(r)
         }
@@ -435,7 +462,7 @@ mod tests {
             Reply { content: "แก้ให้แล้ว".into(), tool_calls: vec![] },
         ]);
         let mut steps = Vec::new();
-        let (changes, answer) = edit_codebase(&f, "เปลี่ยน hi เป็น world", None, &rt(), |s| steps.push(s)).await;
+        let (changes, answer, stop) = edit_codebase(&f, "เปลี่ยน hi เป็น world", None, &rt(), |s| steps.push(s)).await;
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].path, "main.py");
         assert_eq!(changes[0].kind, "modify");
@@ -443,6 +470,7 @@ mod tests {
         assert_eq!(changes[0].after, "print('world')\n");
         assert_eq!(f.ws.read("main.py").unwrap(), "print('world')\n", "write hit the disk");
         assert_eq!(answer, "แก้ให้แล้ว", "the final no-tool reply is the summary");
+        assert_eq!(stop, None, "a clean finish has no stop reason");
         assert_eq!(steps.last().unwrap().kind, "done");
     }
 
@@ -452,7 +480,7 @@ mod tests {
             Reply { content: String::new(), tool_calls: vec![tool("write_file", r#"{"path":"a/b.txt","content":"ok\n"}"#)] },
             Reply { content: "สร้างแล้ว".into(), tool_calls: vec![] },
         ]);
-        let (changes, _) = edit_codebase(&f, "สร้างไฟล์", None, &rt(), |_| {}).await;
+        let (changes, _, _) = edit_codebase(&f, "สร้างไฟล์", None, &rt(), |_| {}).await;
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].kind, "create");
         assert_eq!(changes[0].before, None);
@@ -468,7 +496,7 @@ mod tests {
             Reply { content: String::new(), tool_calls: vec![tool("edit_file", r#"{"path":"main.py","old":"hi","new":"world"}"#)] },
             Reply { content: "เสร็จ".into(), tool_calls: vec![] },
         ]);
-        let (changes, _) = edit_codebase(&f, "แก้", None, &rt(), |_| {}).await;
+        let (changes, _, _) = edit_codebase(&f, "แก้", None, &rt(), |_| {}).await;
         assert_eq!(changes.len(), 1, "one file changed, the failed attempt left nothing");
         assert_eq!(changes[0].before.as_deref(), Some("print('hi')\n"));
         assert_eq!(changes[0].after, "print('world')\n");
@@ -483,10 +511,12 @@ mod tests {
             Reply { content: "__ERR__".into(), tool_calls: vec![] },
         ]);
         let mut steps = Vec::new();
-        let (changes, answer) = edit_codebase(&f, "ทำ X", None, &rt(), |s| steps.push(s)).await;
+        let (changes, answer, stop) = edit_codebase(&f, "ทำ X", None, &rt(), |s| steps.push(s)).await;
         assert!(changes.is_empty(), "nothing was written");
         assert_eq!(answer, "", "narration that accompanied a tool call is not a final summary");
         assert!(steps.iter().any(|s| s.kind == "error"), "the failed round shows as an error step");
+        let reason = stop.expect("an aborted round reports why it stopped");
+        assert!(reason.contains("ไม่ใช่ปัญหาการเขียนไฟล์"), "the reason rules out a write failure so the fallback won't invent one");
     }
 
     #[tokio::test]
@@ -495,7 +525,7 @@ mod tests {
             Reply { content: String::new(), tool_calls: vec![tool("edit_file", "not json")] },
             Reply { content: "จบ".into(), tool_calls: vec![] },
         ]);
-        let (changes, _) = edit_codebase(&f, "q", None, &rt(), |_| {}).await;
+        let (changes, _, _) = edit_codebase(&f, "q", None, &rt(), |_| {}).await;
         assert!(changes.is_empty());
     }
 
@@ -509,7 +539,7 @@ mod tests {
             vec![RunResult { blocked: false, exit_code: Some(0), text: "2 passed".into() }],
         );
         let mut steps = Vec::new();
-        let (changes, answer) = edit_codebase(&f, "รันเทสต์", None, &rt(), |s| steps.push(s)).await;
+        let (changes, answer, _) = edit_codebase(&f, "รันเทสต์", None, &rt(), |s| steps.push(s)).await;
         assert!(changes.is_empty(), "running a command changes no files");
         assert_eq!(f.ran.borrow().as_slice(), ["pytest -q"]);
         let run_step = steps.iter().find(|s| s.kind == "coderun").expect("a coderun step was emitted");
@@ -537,7 +567,9 @@ mod tests {
     async fn stops_at_the_round_limit() {
         let always = || Reply { content: String::new(), tool_calls: vec![tool("read_file", r#"{"path":"main.py"}"#)] };
         let (_d, f) = fake((0..MAX_ROUNDS + 4).map(|_| always()).collect());
-        edit_codebase(&f, "q", None, &rt(), |_| {}).await;
+        let (_c, answer, stop) = edit_codebase(&f, "q", None, &rt(), |_| {}).await;
         assert_eq!(*f.calls.borrow(), MAX_ROUNDS);
+        assert_eq!(answer, "", "no clean summary when it ran out of rounds");
+        assert!(stop.expect("round-cap reports a stop reason").contains("รอบสูงสุด"));
     }
 }
