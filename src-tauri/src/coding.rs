@@ -217,10 +217,15 @@ pub async fn edit_codebase<B: CodeBackend>(
             },
             _ = cancel.cancelled() => break,
         };
-        if !reply.content.trim().is_empty() {
-            final_text = reply.content.clone();
-        }
         if reply.tool_calls.is_empty() {
+            // Only a reply with no tool calls is a genuine final summary. Content that rode along
+            // with tool calls is mid-loop narration ("I'll read the file first…") — never deliver it
+            // as the answer, or a round that errors out mid-way would surface stale planning text.
+            // When the loop instead breaks on error/budget/cancel, final_text stays empty and the
+            // caller asks for an honest summary from the files actually changed.
+            if !reply.content.trim().is_empty() {
+                final_text = reply.content.clone();
+            }
             on_step(step("done", String::new()));
             break;
         }
@@ -364,7 +369,12 @@ mod tests {
     impl CodeBackend for Fake {
         async fn complete(&self, _m: &Value, _t: &Value) -> crate::errors::AppResult<Reply> {
             *self.calls.borrow_mut() += 1;
-            Ok(self.replies.borrow_mut().remove(0))
+            let r = self.replies.borrow_mut().remove(0);
+            // a scripted Gateway-round failure (mirrors complete_tools returning Err)
+            if r.content == "__ERR__" {
+                return Err(crate::errors::AppError::new("http_500", "boom"));
+            }
+            Ok(r)
         }
         fn list_dir(&self, p: &str) -> crate::errors::AppResult<Vec<DirEntry>> {
             self.ws.list(p)
@@ -462,6 +472,21 @@ mod tests {
         assert_eq!(changes.len(), 1, "one file changed, the failed attempt left nothing");
         assert_eq!(changes[0].before.as_deref(), Some("print('hi')\n"));
         assert_eq!(changes[0].after, "print('world')\n");
+    }
+
+    #[tokio::test]
+    async fn mid_loop_narration_is_not_delivered_when_a_round_errors() {
+        // round 1: reasoning text rides along with a tool call; round 2: the Gateway round fails.
+        // The narration must NOT come back as the answer (the caller then builds an honest summary).
+        let (_d, f) = fake(vec![
+            Reply { content: "ผู้ใช้อยากได้ X ผมจะอ่านไฟล์ก่อน".into(), tool_calls: vec![tool("read_file", r#"{"path":"main.py"}"#)] },
+            Reply { content: "__ERR__".into(), tool_calls: vec![] },
+        ]);
+        let mut steps = Vec::new();
+        let (changes, answer) = edit_codebase(&f, "ทำ X", None, &rt(), |s| steps.push(s)).await;
+        assert!(changes.is_empty(), "nothing was written");
+        assert_eq!(answer, "", "narration that accompanied a tool call is not a final summary");
+        assert!(steps.iter().any(|s| s.kind == "error"), "the failed round shows as an error step");
     }
 
     #[tokio::test]

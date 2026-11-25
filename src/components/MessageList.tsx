@@ -57,11 +57,24 @@ function stepText(s: AgentStep): string {
       return `ไม่อนุญาตให้รัน: ${s.detail}`;
     case "done":
       return "เสร็จแล้ว";
-    case "error":
-      return "ทำบางขั้นไม่สำเร็จ ใช้ผลที่มี";
+    case "error": {
+      const hint = errorStepHint(s.detail);
+      return hint ? `หยุดกลางคัน: ${hint}` : "ทำบางขั้นไม่สำเร็จ ใช้ผลที่มี";
+    }
     default:
       return s.detail;
   }
+}
+
+/** Map an error step's code (from AppError.code) to a short Thai reason, or "" to keep the generic text. */
+function errorStepHint(code: string): string {
+  if (code.includes("unreachable")) return "ต่อ Gateway ไม่ได้ (ตรวจ VPN) แล้วลองใหม่";
+  if (code.includes("429")) return "Gateway เกินโควตา/ความถี่ รอสักครู่แล้วลองใหม่";
+  if (code.includes("401") || code.includes("403")) return "สิทธิ์หรือ Key มีปัญหา";
+  if (code.includes("404")) return "Gateway URL หรือชื่อโมเดลไม่ถูกต้อง";
+  if (code.includes("timeout")) return "Gateway ตอบช้าเกินกำหนด ลองใหม่";
+  if (code.includes("http") || code.includes("network")) return "Gateway ขัดข้องชั่วคราว ลองใหม่อีกครั้ง";
+  return "";
 }
 
 function stepIcon(kind: string) {
