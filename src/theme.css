@@ -374,6 +374,13 @@ code { font-family: var(--mono); font-size: 12.5px; background: var(--code); col
 .ai-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .ai-meta .info { font-size: 12px; color: var(--muted); margin-left: 4px; }
 .thumbs { display: flex; flex-wrap: wrap; gap: 8px; }
+/* inline pictures in an answer (images for that block's citations) — shown large enough to read */
+.md-figs { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin: 2px 0 14px; }
+.md-fig { padding: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--sidebar); cursor: zoom-in; max-width: 100%; display: block; line-height: 0; }
+.md-fig:hover { border-color: var(--accent); }
+.md-fig:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.md-fig img { display: block; width: auto; height: auto; max-width: 100%; max-height: 440px; object-fit: contain; }
+.md-fig .thumb-loading { display: block; min-width: 240px; min-height: 150px; background: var(--border); opacity: .5; }
 /* inline picture strip between answer paragraphs (images for that part's citations) */
 .md-thumbs { margin: 2px 0 14px; }
 .thumb { padding: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--sidebar); cursor: zoom-in; flex: none; }

@@ -140,6 +140,17 @@ export function SourceImageGrid({ source }: { source: Source }) {
   );
 }
 
+/** One inline answer picture, shown large enough to read: up to the answer column width, whole image
+ *  (contain, not cropped), capped height. A small image stays its natural size. Click → lightbox. */
+function Figure({ img, onOpen }: { img: SourceImage; onOpen: () => void }) {
+  const url = useImageUrl(img.serviceId, img.info.id);
+  return (
+    <button className="md-fig" onClick={onOpen} title={caption(img.source)} aria-label={`ดูรูปจาก ${caption(img.source)}`}>
+      {url ? <img src={url} alt={caption(img.source)} draggable={false} /> : <span className="thumb-loading" aria-hidden="true" />}
+    </button>
+  );
+}
+
 /** Pictures of the sources first cited in one answer block, shown inline in the answer (right after
  *  the related text) so the reader sees them without opening a citation. Null when there are none. */
 export function BlockImages({ sources }: { sources: Source[] }) {
@@ -147,8 +158,8 @@ export function BlockImages({ sources }: { sources: Source[] }) {
   const [open, setOpen] = useState<number | null>(null);
   if (!items.length) return null;
   return (
-    <div className="thumbs md-thumbs" aria-label="รูปจากเอกสารที่เกี่ยวข้อง">
-      {items.map((img, i) => <Thumb key={img.key} img={img} onOpen={() => setOpen(i)} size={88} />)}
+    <div className="md-figs" aria-label="รูปจากเอกสารที่เกี่ยวข้อง">
+      {items.map((img, i) => <Figure key={img.key} img={img} onOpen={() => setOpen(i)} />)}
       {open != null && <Lightbox items={items} index={open} onIndex={setOpen} onClose={() => setOpen(null)} />}
     </div>
   );
