@@ -345,6 +345,9 @@ pub fn chunk_pages(pages: Vec<Page>, opts: ChunkOptions) -> Extracted {
             at.entry(i).or_insert(last);
         }
         for (i, img) in p.images.into_iter().enumerate() {
+            if is_blank_image(&img.jpeg) {
+                continue; // flat-colour / black-poster picture → looks like an empty box in an answer
+            }
             let digest: [u8; 16] = Sha256::digest(&img.jpeg)[..16].try_into().expect("16 bytes");
             if !seen.insert(digest) {
                 continue; // same picture again (logo, repeated screenshot)
@@ -354,6 +357,23 @@ pub fn chunk_pages(pages: Vec<Page>, opts: ChunkOptions) -> Extracted {
         }
     }
     out
+}
+
+/// A picture that carries no information — a single flat colour, such as a slide background or the
+/// black poster frame of an embedded video. These render as an empty box in an answer, so we skip
+/// them (at index time and when serving). A picture we can't decode is NOT treated as blank — better
+/// to keep real content than silently drop it.
+pub fn is_blank_image(jpeg: &[u8]) -> bool {
+    // `::image` = the image crate (this module also has a `mod image` extractor, which would shadow it)
+    let Ok(img) = ::image::load_from_memory(jpeg) else { return false };
+    let small = img.resize(16, 16, ::image::imageops::FilterType::Triangle).to_luma8();
+    let mut lo = 255u8;
+    let mut hi = 0u8;
+    for p in small.pixels() {
+        lo = lo.min(p.0[0]);
+        hi = hi.max(p.0[0]);
+    }
+    hi.saturating_sub(lo) < 8
 }
 
 // ------------------------------------------------------------------ manager
@@ -781,6 +801,31 @@ fn index_files(
 mod tests {
     use super::*;
 
+    fn jpeg_of(img: ::image::DynamicImage) -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, ::image::ImageFormat::Jpeg).unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn blank_pictures_are_detected_but_content_is_kept() {
+        use ::image::{DynamicImage, GrayImage, Luma};
+        let black = jpeg_of(DynamicImage::ImageLuma8(GrayImage::from_pixel(40, 40, Luma([0]))));
+        assert!(is_blank_image(&black), "a solid black poster is blank");
+        let white = jpeg_of(DynamicImage::ImageLuma8(GrayImage::from_pixel(40, 40, Luma([255]))));
+        assert!(is_blank_image(&white), "a solid white background is blank");
+        // white with a dark block → has content, must be kept
+        let mut g = GrayImage::from_pixel(40, 40, Luma([255]));
+        for y in 5..22 {
+            for x in 5..22 {
+                g.put_pixel(x, y, Luma([0]));
+            }
+        }
+        assert!(!is_blank_image(&jpeg_of(DynamicImage::ImageLuma8(g))), "a picture with content is kept");
+        // undecodable bytes are not treated as blank (never drop possibly-real content)
+        assert!(!is_blank_image(&[1, 2, 3, 4]));
+    }
+
     #[test]
     fn extracts_and_chunks_txt() {
         let dir = tempfile::tempdir().unwrap();
@@ -792,7 +837,15 @@ mod tests {
     }
 
     fn picture(w: u32, h: u32, shade: u8) -> ::image::DynamicImage {
-        ::image::DynamicImage::ImageRgb8(::image::RgbImage::from_pixel(w, h, ::image::Rgb([shade, 0, 0])))
+        let mut img = ::image::RgbImage::from_pixel(w, h, ::image::Rgb([shade, 0, 0]));
+        // a contrasting block so it isn't a flat colour (is_blank_image would drop that); `shade`
+        // still makes distinct pictures differ for the dedup check
+        for y in 0..(h / 2).max(1) {
+            for x in 0..(w / 2).max(1) {
+                img.put_pixel(x, y, ::image::Rgb([255 - shade, 240, 160]));
+            }
+        }
+        ::image::DynamicImage::ImageRgb8(img)
     }
 
     #[test]

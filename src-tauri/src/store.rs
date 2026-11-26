@@ -251,13 +251,24 @@ impl SqliteStore {
     /// or — for documents without pages — the pictures inside that chunk plus whole-file ones.
     pub fn images_for(&self, doc_path: &str, page: Option<u32>, ord: i64) -> AppResult<Vec<ImageInfo>> {
         let mut st = self.conn.prepare(
-            "SELECT i.id, i.w, i.h FROM images i JOIN documents d ON d.id=i.doc_id
+            "SELECT i.id, i.w, i.h, i.data FROM images i JOIN documents d ON d.id=i.doc_id
              WHERE d.path=?1 AND ((?2 IS NOT NULL AND i.page=?2)
                                OR (?2 IS NULL AND i.page IS NULL AND (i.chunk_ord=?3 OR i.chunk_ord IS NULL)))
              ORDER BY i.id LIMIT 12",
         )?;
-        let rows = st.query_map(params![doc_path, page, ord], |r| Ok(ImageInfo { id: r.get(0)?, w: r.get(1)?, h: r.get(2)? }))?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        let rows = st.query_map(params![doc_path, page, ord], |r| {
+            Ok((ImageInfo { id: r.get(0)?, w: r.get(1)?, h: r.get(2)? }, r.get::<_, Vec<u8>>(3)?))
+        })?;
+        // also skip flat-colour / blank pictures already in the index (so existing indexes benefit
+        // without a re-index); the decode is cheap and bounded by the LIMIT above
+        let mut out = Vec::new();
+        for row in rows {
+            let (info, data) = row?;
+            if !crate::ingest::is_blank_image(&data) {
+                out.push(info);
+            }
+        }
+        Ok(out)
     }
 
     /// Text → vector of a document's current chunks (to reuse when it is re-indexed).
