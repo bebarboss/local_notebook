@@ -1203,8 +1203,10 @@ fn cap_chars(s: &str, max: usize) -> String {
     out
 }
 
-/// Total characters of attached-file text handed to a general chat, across all files.
-const ATTACH_CAP: usize = 24000;
+/// Total characters of attached-file text handed to the model, across all files. Large enough to
+/// fit a long slide deck / document (incl. per-slide OCR text) so the model doesn't see it cut
+/// mid-way and report it as incomplete; a file bigger than this is still truncated (with a marker).
+const ATTACH_CAP: usize = 100_000;
 
 /// When a question is only an attachment (no typed text), how much of its text (OCR) to use as the
 /// query. The embed server truncates a query to its own token limit anyway; this keeps the model's
@@ -1242,7 +1244,8 @@ fn read_attachments(paths: &[String], opts: crate::ingest::chunker::ChunkOptions
             out.push('\n');
         }
         if out.chars().count() > ATTACH_CAP {
-            out = cap_chars(&out, ATTACH_CAP);
+            out = out.chars().take(ATTACH_CAP).collect::<String>();
+            out.push_str("\n…(ไฟล์แนบยาวมาก ส่งให้โมเดลเฉพาะช่วงต้น — ส่วนที่เหลือไม่ได้ส่ง ถ้าต้องดูครบให้เพิ่มไฟล์เข้า service แล้วค้นแทน)");
             break;
         }
     }
