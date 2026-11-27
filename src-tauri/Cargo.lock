@@ -1194,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "docask"
-version = "0.31.3"
+version = "0.31.4"
 dependencies = [
  "base64 0.22.1",
  "calamine",
