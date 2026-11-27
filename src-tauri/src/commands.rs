@@ -1934,6 +1934,17 @@ pub fn undo_code_changes(state: S<'_>, chat_id: String, message_id: i64) -> AppR
     Ok(ws.undo(&changeset.items))
 }
 
+/// Save an answer as a file the user picked in the Save dialog. `content` is the answer
+/// Markdown already on screen, `format` is `"md" | "txt" | "csv" | "xlsx"`, and `dest` is
+/// the full path chosen on the frontend. Returns the path written. The answer text is never
+/// logged — only built into bytes and written where the user asked.
+#[tauri::command]
+pub fn export_answer(content: String, format: String, dest: String) -> AppResult<String> {
+    let bytes = crate::export::build(&content, &format)?;
+    std::fs::write(&dest, &bytes)?;
+    Ok(dest)
+}
+
 /// The user's answer to an "Allow reading this outside file?" prompt from the coding agent.
 #[tauri::command]
 pub fn resolve_code_permission(state: S<'_>, request_id: String, allow: bool) -> AppResult<()> {

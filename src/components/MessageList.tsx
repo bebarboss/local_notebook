@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
-import { BookMarked, BookOpen, Code2, Copy, Check, Circle, CircleAlert, CircleDot, FileSymlink, Globe, RotateCcw, Search, SkipForward, Terminal } from "lucide-react";
-import type { AgentStep, CodeChange, CodePermissionRequest, Message, PlanStep, Source } from "../lib/types";
+import { useEffect, useRef, useState } from "react";
+import { BookMarked, BookOpen, Code2, Copy, Check, Circle, CircleAlert, CircleDot, Download, FileDown, FileSymlink, Globe, RotateCcw, Search, SkipForward, Terminal } from "lucide-react";
+import type { AgentStep, CodeChange, CodePermissionRequest, ExportFormat, Message, PlanStep, Source } from "../lib/types";
 import { th } from "../i18n/th";
 import { api } from "../lib/api";
 import { initials, useApp } from "../state";
@@ -157,22 +157,22 @@ export function MessageList({
   const me = initials(settings.userName || "ผู้ใช้");
   return (
     <div className="messages" aria-live="polite">
-      {messages.map((m, i) =>
-        m.role === "user" ? (
-          <UserMsg key={m.id} text={m.content} avatar={me} />
-        ) : (
+      {messages.map((m, i) => {
+        if (m.role === "user") return <UserMsg key={m.id} text={m.content} avatar={me} />;
+        const q = [...messages.slice(0, i)].reverse().find((x) => x.role === "user");
+        return (
           <AiMsg
             key={m.id}
             msg={m}
             retryDisabled={retryDisabled}
+            suggestedName={fileBase(q?.content)}
             onSaveKnowledge={onSaveKnowledge && !m.error && m.content ? () => onSaveKnowledge(m.id) : undefined}
             onRetry={() => {
-              const q = [...messages.slice(0, i)].reverse().find((x) => x.role === "user");
               if (q) onRetry(q.content);
             }}
           />
-        ),
-      )}
+        );
+      })}
       {streaming && (
         <div className="ai-msg" aria-busy={!streaming.error}>
           <SearchedAs query={streaming.searchQuery} />
@@ -208,8 +208,76 @@ export function UserMsg({ text, avatar }: { text: string; avatar: string }) {
   );
 }
 
+/** A safe, extension-less filename from the question that produced the answer. */
+function fileBase(question?: string): string {
+  const clean = (question ?? "").replace(/[\\/:*?"<>|\n\r\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 50);
+  return clean || "DocAsk-คำตอบ";
+}
+
+const EXPORT_FORMATS: { id: ExportFormat; label: string; hint: string }[] = [
+  { id: "xlsx", label: "Excel (.xlsx)", hint: "ตาราง" },
+  { id: "csv", label: "CSV (.csv)", hint: "ตาราง" },
+  { id: "md", label: "Markdown (.md)", hint: "ข้อความเต็ม" },
+  { id: "txt", label: "ข้อความ (.txt)", hint: "ข้อความล้วน" },
+];
+
+/** "บันทึกเป็นไฟล์": a Save dialog that writes the answer as md/txt/csv/xlsx. */
+function ExportButton({ content, suggestedName }: { content: string; suggestedName: string }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const wrap = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => { if (!wrap.current?.contains(e.target as Node)) setOpen(false); };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", onKey); };
+  }, [open]);
+  const run = async (format: ExportFormat) => {
+    setOpen(false); setBusy(true); setErr(null); setSaved(false);
+    try {
+      const path = await api.exportAnswer(content, format, suggestedName);
+      if (path) { setSaved(true); setTimeout(() => setSaved(false), 3000); }
+    } catch (e) {
+      setErr((e as { message: string }).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="export-wrap" ref={wrap}>
+      <button
+        className="icon-btn"
+        aria-label="บันทึกเป็นไฟล์"
+        title="บันทึกคำตอบเป็นไฟล์ (Excel / CSV / Markdown / Text)"
+        onClick={() => setOpen((v) => !v)}
+        disabled={busy}
+      >
+        <Download size={16} strokeWidth={1.8} />
+      </button>
+      {open && (
+        <div className="popover export-menu" role="menu" onMouseDown={(e) => e.stopPropagation()}>
+          <div className="menu-label">บันทึกคำตอบเป็นไฟล์</div>
+          {EXPORT_FORMATS.map((f) => (
+            <button key={f.id} role="menuitem" className="menu-item" onClick={() => run(f.id)}>
+              <FileDown size={14} strokeWidth={1.8} aria-hidden="true" />
+              <span style={{ flex: 1 }}>{f.label}</span>
+              <span className="export-hint">{f.hint}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {saved && <span className="info">บันทึกแล้ว ✓</span>}
+      {err && <span className="info" style={{ color: "var(--err-text)" }}>{err}</span>}
+    </div>
+  );
+}
+
 // sources are reached through the numbered citations inside the answer only
-function AiMsg({ msg, onRetry, retryDisabled, onSaveKnowledge }: { msg: Message; onRetry: () => void; retryDisabled: boolean; onSaveKnowledge?: () => void }) {
+function AiMsg({ msg, onRetry, retryDisabled, onSaveKnowledge, suggestedName }: { msg: Message; onRetry: () => void; retryDisabled: boolean; onSaveKnowledge?: () => void; suggestedName: string }) {
   const [copied, setCopied] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const copy = async () => {
@@ -246,6 +314,7 @@ function AiMsg({ msg, onRetry, retryDisabled, onSaveKnowledge }: { msg: Message;
         >
           {copied ? <Check size={16} strokeWidth={1.8} /> : <Copy size={16} strokeWidth={1.8} />}
         </button>
+        {msg.content && !msg.error && <ExportButton content={msg.content} suggestedName={suggestedName} />}
         {onSaveKnowledge && (
           <button className="icon-btn" aria-label="บันทึกเป็นความรู้" title="บันทึกเป็นความรู้ (หรือคลิกขวาที่คำตอบ)" onClick={onSaveKnowledge}>
             <BookMarked size={16} strokeWidth={1.8} />

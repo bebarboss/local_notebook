@@ -658,6 +658,7 @@ export function createMockBackend(): Backend {
     savePastedImage: async (_bytes, ext) => `D:\\paste\\วางรูป-${Date.now().toString(36)}.${ext}`,
     openUrl: async (url) => { window.open(url, "_blank", "noopener"); },
     undoCodeChanges: async () => ({ restored: 1, deleted: 1 }),
+    exportAnswer: async (_content, format, suggestedName) => `D:\\Downloads\\${suggestedName}.${format}`,
     resolveCodePermission: async () => {},
     openProjectFolder: async () => {},
     openInEditor: async () => {},

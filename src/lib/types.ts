@@ -4,6 +4,8 @@ export type Effort = "low" | "medium" | "high";
 export type ThemeMode = "light" | "dark" | "system";
 export type FontChoice = "looped" | "sarabun" | "plex" | "system";
 export type TextSize = "s" | "m" | "l" | "xl";
+/** file formats an answer can be saved as */
+export type ExportFormat = "md" | "txt" | "csv" | "xlsx";
 
 export interface Service {
   id: string;

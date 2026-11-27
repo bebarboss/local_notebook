@@ -32,6 +32,7 @@ import type {
   ConnectLinkInfo,
   ConnectResult,
   ExportResult,
+  ExportFormat,
   ShareProgress,
   EmbeddingStatus,
   GatewayInfo,
@@ -157,6 +158,8 @@ export interface Backend {
   savePastedImage(bytes: Uint8Array, ext: string): Promise<string>;
   /** open a web source (http/https) in the system default browser */
   openUrl(url: string): Promise<void>;
+  /** save an answer as a file (md/txt/csv/xlsx) via a Save dialog; returns the path saved, or null if cancelled */
+  exportAnswer(content: string, format: ExportFormat, suggestedName: string): Promise<string | null>;
   /** undo the files a coding turn changed (restore originals, delete created files) */
   undoCodeChanges(chatId: string, messageId: number): Promise<UndoResult>;
   /** answer an "allow reading this outside file?" prompt from the coding agent */
@@ -297,6 +300,13 @@ function createTauriBackend(): Backend {
     ask: (req) => call("ask", { req: { ...req, now: new Intl.DateTimeFormat("th-TH", { dateStyle: "full", timeStyle: "short" }).format(new Date()) } }),
     savePastedImage: (bytes, ext) => call("save_pasted_image", { bytes: Array.from(bytes), ext }),
     openUrl: (url) => call("open_url", { url }),
+    exportAnswer: async (content, format, suggestedName) => {
+      const { save } = await dialog;
+      const names: Record<ExportFormat, string> = { md: "Markdown", txt: "ข้อความ", csv: "CSV (เปิดใน Excel)", xlsx: "Excel" };
+      const path = await save({ defaultPath: `${suggestedName}.${format}`, filters: [{ name: names[format], extensions: [format] }] });
+      if (typeof path !== "string") return null;
+      return call("export_answer", { content, format, dest: path });
+    },
     undoCodeChanges: (chatId, messageId) => call("undo_code_changes", { chatId, messageId }),
     resolveCodePermission: (requestId, allow) => call("resolve_code_permission", { requestId, allow }),
     openProjectFolder: (path) => call("open_project_folder", { path }),

@@ -12,6 +12,7 @@ pub mod diag;
 pub mod encoder;
 pub mod embed;
 pub mod errors;
+pub mod export;
 pub mod gateway_embed;
 pub mod embed_server;
 pub mod gateway_test;
@@ -157,6 +158,7 @@ pub fn run() {
             commands::open_url,
             commands::undo_code_changes,
             commands::resolve_code_permission,
+            commands::export_answer,
             commands::open_project_folder,
             commands::open_in_editor,
             commands::stop_generation,
